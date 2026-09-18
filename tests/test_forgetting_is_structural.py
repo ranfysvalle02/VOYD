@@ -23,7 +23,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from voyd.engine import DEADLINE, REVOKED, UNREADABLE, why_unreachable
+from voyd.engine import (DEADLINE, REVOKED, UNREADABLE, ScopeInvalid,
+                         ScopeRequired, why_unreachable)
 from voyd.engine.forgetting import ForgettingSpec
 
 SPEC = ForgettingSpec("facts")
@@ -292,3 +293,86 @@ async def test_declaring_it_forgettable_also_declares_the_ttl(facts):
     without refusing is the original bug. One declaration, both halves."""
     engine, _, _ = facts
     assert "facts" in [s.collection for s in engine.expiry.specs]
+
+
+# ---- the boundary the handle also has to keep -------------------------
+
+@pytest.fixture
+async def tenanted(core):
+    """Two tenants in one collection, behind a handle that declares one."""
+    engine, db = core
+    handle = engine.model("scoped", tenant="tenant").forgettable()
+    await engine.ensure(search_wait_s=0)
+    await db.scoped.insert_many([
+        {"tenant": "acme", "text": "acme payroll"},
+        {"tenant": "globex", "text": "globex merger terms"},
+    ])
+    return engine, db, handle
+
+
+async def test_the_naive_read_is_tenant_safe_too(tenanted):
+    """The defect this closes, and the reason it mattered.
+
+    This module's promise is that the naive read is the safe read. For a
+    while it was only half true: the handle refused forgotten facts and
+    silently ignored the ``tenant`` it had been declared with, so
+    ``model(tenant="t").forgettable().find({})`` returned every tenant's
+    rows -- while ``engine.search`` on the *same model declaration* refused
+    the same query. One declaration, two primitives, two answers, which is
+    exactly the drift this module exists to remove, reappearing inside it.
+    """
+    _, _, docs = tenanted
+    with pytest.raises(ScopeRequired):
+        await docs.find({})
+
+
+async def test_a_scoped_read_still_works_and_sees_only_its_tenant(tenanted):
+    """Enforcing must not mean refusing everything."""
+    _, _, docs = tenanted
+    rows = await docs.find({"tenant": "acme"})
+    assert [r["text"] for r in rows] == ["acme payroll"]
+
+
+async def test_the_tenant_shape_check_is_inherited_not_reimplemented(tenanted):
+    """An operator in the tenant position is refused here for the same
+    reason and by the same code as on the search path -- one rule, not two
+    that can drift."""
+    _, _, docs = tenanted
+    with pytest.raises(ScopeInvalid):
+        await docs.find({"tenant": {"$ne": "nobody"}})
+
+
+async def test_revoking_cannot_reach_another_tenant(tenanted):
+    """The dangerous direction: forgetting is a write."""
+    _, _, docs = tenanted
+    with pytest.raises(ScopeRequired):
+        await docs.revoke({}, reason="everything everywhere")
+
+    assert await docs.revoke({"tenant": "acme"}, reason="scoped") == 1
+    survivors = [r["text"] for r in await docs.find({"tenant": "globex"})]
+    assert survivors == ["globex merger terms"]
+
+
+async def test_audit_sees_forgotten_rows_but_not_foreign_ones(tenanted):
+    """``including_forgotten`` sets aside the deadline, not the boundary.
+
+    Seeing forgotten rows is an operational need. Seeing another tenant's
+    forgotten rows is a breach with a nicer name.
+    """
+    _, _, docs = tenanted
+    with pytest.raises(ScopeRequired):
+        await docs.including_forgotten().find({})
+
+    await docs.revoke({"tenant": "acme"}, reason="audit")
+    seen = await docs.including_forgotten().find({"tenant": "acme"})
+    assert [r["text"] for r in seen] == ["acme payroll"]
+
+
+async def test_a_collection_with_no_tenant_is_unaffected(core):
+    """Not every collection is multi-tenant, and declaring none must stay a
+    valid choice rather than becoming an error."""
+    engine, db = core
+    free = engine.model("free").forgettable()
+    await engine.ensure(search_wait_s=0)
+    await db.free.insert_one({"text": "anyone can read this"})
+    assert [r["text"] for r in await free.find({})] == ["anyone can read this"]

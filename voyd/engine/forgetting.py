@@ -70,6 +70,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Iterable
 
+from .errors import require_tenant
 from .time import aware, living, now
 
 log = logging.getLogger("engine.forgetting")
@@ -202,6 +203,10 @@ class Forgetting:
         Audit, administration and the reaper itself need this. It is a
         separate object rather than a flag on every call so that a review can
         grep for the phrase and find every place the guarantee was set aside.
+
+        Note what it does *not* set aside: the tenant. Seeing forgotten rows
+        is an operational need; seeing another tenant's forgotten rows is a
+        breach with a nicer name.
         """
         clone = Forgetting(self.db, self.spec, tenant=self.tenant)
         clone.receipts_log = self.receipts_log
@@ -211,8 +216,21 @@ class Forgetting:
     # ---- the rule ------------------------------------------------------
 
     def _query(self, filters: dict | None) -> dict:
-        """Push refusal into the query, where the query can express it."""
-        q = dict(filters or {})
+        """Push refusal *and* the tenant into the query.
+
+        The tenant check is the same ``require_scope`` the search path uses,
+        deliberately: this handle once accepted a ``tenant`` and ignored it,
+        so ``model(tenant="t").forgettable().find({})`` returned every
+        tenant's rows while ``engine.search`` on the same model refused the
+        same query. One declaration, two primitives, two answers -- which is
+        the drift this module was written to remove, reappearing inside it.
+
+        It shares the tenant rule but not the search path's blanket
+        "every filter must be scalar": this handle queries the collection,
+        where ``doc_id: {"$in": [...]}`` is how a batch is forgotten. The
+        hazards differ, so the rules do.
+        """
+        q = require_tenant(self.collection, self.tenant, filters)
         if self._include:
             return q
         clauses = [living(self.spec.at_field),

@@ -160,8 +160,10 @@ class MongoStore:
         # how six read paths came to disagree about the rule in the first
         # place. The local _unexpired() helper is gone on purpose: a rule
         # you have to remember to apply is not enforced, it is suggested.
-        self.forgetting_documents = self.engine.forgetting("documents")
-        self.forgetting_voids = self.engine.forgetting("voids")
+        self.forgetting_documents = self.engine.forgetting("documents",
+                                                          tenant="voyd_id")
+        self.forgetting_voids = self.engine.forgetting("voids",
+                                                      tenant="voyd_id")
 
         self.engine.searchable(SearchSpec(
             collection="documents",
@@ -354,10 +356,9 @@ class MongoStore:
         The elegant part is that there is no second mechanism here. Forgetting
         a fact *is* giving it a deadline in the past: ``revoke()`` stamps the
         same ``expire_at`` the scope already uses, plus a mark recording why.
-        So one TTL index collects user-requested erasure and time-based expiry
-        alike, and the same change-stream delete event reclaims the blobs for
-        both. An erasure request is not a special case -- it is a deadline
-        that has already passed.
+        So one TTL index collects user-requested erasure and time-based
+        expiry alike. An erasure request is not a special case -- it is a
+        deadline that has already passed.
 
         ``doc_ids`` omitted means the whole scope.
         """

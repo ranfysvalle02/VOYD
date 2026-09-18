@@ -223,3 +223,47 @@ def test_the_query_is_text_when_the_server_owns_the_embedding():
     assert vs["queryVector"] == [0.1] * 8
     assert vs["path"] == "embedding"
     assert "query" not in vs
+
+
+# ---- the two ways to hold it wrong ------------------------------------
+
+def test_querying_a_server_embedded_index_without_text_is_refused():
+    """The quiet-wrong-answer this closes.
+
+    A caller who passes only a vector is doing the normal thing for a
+    client-embedded index. On a server-embedded one their vector is useless
+    -- it was never compared against anything this index holds -- and the
+    stage used to send ``query: ""`` instead, asking mongot to embed the
+    empty string and rank by whatever that lands near. Results that look
+    ordinary and mean nothing, which is the failure mode this whole codebase
+    is organised against.
+    """
+    from voyd.engine.capabilities import Capabilities
+    from voyd.engine.search import SearchEngine
+
+    spec = SearchSpec("docs", text_paths=("text",), auto_embed=MODEL,
+                      vector_index="docs_vector")
+    se = SearchEngine(db=None, capabilities=Capabilities(search=True))
+    se.specs["docs"] = spec
+    se.auto_embed_active.append("docs")
+
+    for empty in (None, "", "   "):
+        with pytest.raises(ValueError) as caught:
+            se._vector_stage(spec, [0.1] * 8, empty, {}, 5)
+        # The message has to say what to do instead, not just what is wrong.
+        assert "text=" in str(caught.value)
+
+    # And the same call on a client-embedded index is still fine, because
+    # there the vector is exactly what the index holds.
+    se.auto_embed_active.remove("docs")
+    stage = se._vector_stage(spec, [0.1] * 8, None, {}, 5)["$vectorSearch"]
+    assert stage["queryVector"] == [0.1] * 8
+
+
+def test_declaring_auto_embed_with_nothing_to_embed_is_a_clear_error():
+    """``text_paths=()`` used to raise IndexError from a tuple lookup. A
+    declaration mistake should name itself."""
+    spec = SearchSpec("docs", text_paths=(), auto_embed=MODEL)
+    with pytest.raises(ValueError) as caught:
+        spec.auto_embed_definition()
+    assert "text_paths" in str(caught.value)

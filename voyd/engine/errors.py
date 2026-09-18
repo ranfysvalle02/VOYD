@@ -91,23 +91,45 @@ class FilterInvalid(ValueError):
         )
 
 
+def require_tenant(collection: str, field: str | None,
+                   filters: dict | None) -> dict:
+    """The tenant half of ``require_scope``, for callers that query the
+    collection directly.
+
+    A plain ``find`` can express operators perfectly well -- ``doc_id:
+    {"$in": [...]}`` is how you forget a batch -- so the blanket scalar rule
+    that protects the *search* path would be wrong here. What still holds,
+    and holds everywhere, is the tenant: present, and a scalar, because a
+    dict in that position is an operator that matches every tenant.
+
+    Learned the hard way: reusing ``require_scope`` here refused
+    ``forget(doc_ids=[...])``, which is a legitimate batched write. One rule
+    per hazard, rather than one rule reused past its reason.
+    """
+    flt = dict(filters or {})
+    if not field:
+        return flt
+    if field not in flt or flt[field] is None:
+        raise ScopeRequired(collection, field)
+    if not isinstance(flt[field], SCALAR_ID):
+        raise ScopeInvalid(collection, field, flt[field])
+    return flt
+
+
 def require_scope(collection: str, field: str | None,
                   filters: dict | None) -> dict:
     """Return a copy of ``filters``, or raise if the tenant is missing or unsafe.
 
-    Raises ``ScopeRequired`` when the declared tenant field is absent or
-    ``None``, and ``ScopeInvalid`` when it is present but not a scalar id.
-    Every other filter value is checked for the same scalar shape and raises
-    ``FilterInvalid``, so no tier can be handed an operator it would
-    interpret differently from the others.
-    """
-    flt = dict(filters or {})
+    The search path's rule: ``require_tenant`` plus the stricter condition
+    that *every* filter value is a scalar. That extra clause is about the
+    index rather than the tenant -- the lexical leg's ``equals`` cannot
+    express an operator, so one would fail the query and hand the caller the
+    cosine fallback with a silently wider filter.
 
-    if field:
-        if field not in flt or flt[field] is None:
-            raise ScopeRequired(collection, field)
-        if not isinstance(flt[field], SCALAR_ID):
-            raise ScopeInvalid(collection, field, flt[field])
+    Raises ``ScopeRequired`` / ``ScopeInvalid`` for the tenant, and
+    ``FilterInvalid`` for anything else that is not a scalar.
+    """
+    flt = require_tenant(collection, field, filters)
 
     for key, value in flt.items():
         if key == field or value is None:

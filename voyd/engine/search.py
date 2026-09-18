@@ -167,8 +167,15 @@ class SearchSpec:
         """The server-side-embedding form of the vector index.
 
         The embedded path is the *text*, not a vector field: there is no
-        vector field, because nothing in this process ever computes one.
+        vector field, because nothing in this process ever computes one --
+        which is why a spec with no ``text_paths`` has nothing to embed and
+        is a declaration error rather than an empty index.
         """
+        if not self.text_paths:
+            raise ValueError(
+                f"{self.collection} declares auto_embed={self.auto_embed!r} "
+                f"but no text_paths: the server embeds a text field, so there "
+                f"has to be one to name")
         fields: list[dict] = [{
             "type": "autoEmbed", "path": self.text_paths[0],
             "model": self.auto_embed, "modality": self.auto_embed_modality,
@@ -482,9 +489,22 @@ class SearchEngine:
         model, and this cannot.
         """
         if self.embeds_itself(spec.collection):
+            if not (text or "").strip():
+                # Sending query:"" would ask mongot to embed the empty string
+                # and rank by whatever that lands near -- results that look
+                # ordinary and mean nothing. A caller who passed only a vector
+                # is on the wrong index and needs to be told, not guessed at:
+                # their vector cannot be used here, because the index holds
+                # text the server embedded with its own model.
+                raise ValueError(
+                    f"{spec.collection} is embedded by the server "
+                    f"(auto_embed={spec.auto_embed!r}), so a query needs "
+                    f"text: pass text=... rather than a query vector. The "
+                    f"vector you supplied cannot be compared against an "
+                    f"index this process never computed.")
             return {"$vectorSearch": {
                 "index": spec.vector_index, "path": spec.text_paths[0],
-                "query": text or "", "numCandidates": max(50, limit * 10),
+                "query": text, "numCandidates": max(50, limit * 10),
                 "limit": limit, "filter": flt,
             }}
         return {"$vectorSearch": {
