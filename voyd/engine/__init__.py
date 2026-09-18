@@ -224,6 +224,13 @@ class Engine:
                 # could not be corrected. Non-empty means queries are running
                 # against a definition the application no longer declares.
                 "stale_indexes": list(self.search_engine.stale),
+                # Who computes the vectors. `declined` means the deployment
+                # could not, so the application still must -- the difference
+                # between the two is a deployment fact, not a code path.
+                "embedding_owner": {
+                    "server": list(self.search_engine.auto_embed_active),
+                    "client": list(self.search_engine.auto_embed_declined),
+                },
             },
             # Refusal is a guarantee, so it is reported like one. A climbing
             # `revoked` count with no erasure requests behind it, or any

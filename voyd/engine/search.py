@@ -151,9 +151,31 @@ class SearchSpec:
     # string tenants (agent ids, session ids, slugs) -> "token".
     tenant_type: str = "objectId"
     filter_fields: tuple[str, ...] = ()
+    # Ask the *server* to embed. When set, the vector index is declared with
+    # ``type: autoEmbed`` and mongot produces the embedding on write and at
+    # query time, so the application never holds a vector at all. Declared,
+    # not probed: a deployment that cannot do it says so at index creation,
+    # and ``ensure_indexes`` falls back to the ordinary vector index, loudly.
+    # Adopting this is therefore safe before every deployment supports it.
+    auto_embed: str | None = None
+    auto_embed_modality: str = "text"
     similarity: str = "cosine"
     vector_index: str = "engine_vector_index"
     text_index: str = "engine_text_index"
+
+    def auto_embed_definition(self) -> dict:
+        """The server-side-embedding form of the vector index.
+
+        The embedded path is the *text*, not a vector field: there is no
+        vector field, because nothing in this process ever computes one.
+        """
+        fields: list[dict] = [{
+            "type": "autoEmbed", "path": self.text_paths[0],
+            "model": self.auto_embed, "modality": self.auto_embed_modality,
+        }]
+        for name in self._filterable():
+            fields.append({"type": "filter", "path": name})
+        return {"fields": fields}
 
     def vector_definition(self) -> dict:
         fields: list[dict] = [{
@@ -203,6 +225,11 @@ class SearchEngine:
     # Indexes whose live definition no longer matches the declared spec and
     # which could not be corrected. Named, because the consequence is silent.
     stale: list[str] = field(default_factory=list)
+    # Collections that asked the server to embed and did not get it. Non-empty
+    # means those specs are running on the ordinary vector index and the
+    # application still has to supply vectors.
+    auto_embed_declined: list[str] = field(default_factory=list)
+    auto_embed_active: list[str] = field(default_factory=list)
     cosine_cap: int = COSINE_CAP
 
     def register(self, spec: SearchSpec) -> None:
@@ -250,8 +277,13 @@ class SearchEngine:
             except OperationFailure:
                 existing = {}
 
+            vector_definition = spec.vector_definition()
+            if spec.auto_embed and spec.collection not in self.auto_embed_declined:
+                vector_definition = await self._auto_embed_or_fall_back(
+                    coll, spec, existing)
+
             wanted = [
-                (spec.vector_index, "vectorSearch", spec.vector_definition()),
+                (spec.vector_index, "vectorSearch", vector_definition),
                 (spec.text_index, "search", spec.text_definition()),
             ]
             for name, kind, definition in wanted:
@@ -274,6 +306,81 @@ class SearchEngine:
             log.warning("search indexes still building after %.0fs; using the "
                         "cosine fallback until they finish", wait_s)
         return self.ready
+
+    # Errors that mean "this deployment cannot embed for you", as opposed to
+    # "you asked for the wrong thing". Atlas Local answers the first with an
+    # empty model list; a real cluster missing one model answers the second.
+    _NO_AUTO_EMBED = ("supported models are: []", "not registered yet",
+                      "autoembed", "unrecognized field")
+
+    async def _auto_embed_or_fall_back(self, coll, spec, existing) -> dict:
+        """Ask the server to own the embedding. Accept no for an answer.
+
+        The point of declaring rather than probing: application code says what
+        it wants once, and a deployment that cannot do it degrades to the
+        ordinary vector index plus whatever embeds on the client. Nothing
+        branches upstream, and the difference is visible on ``health()``
+        rather than inferred from results being worse.
+
+        Measured against ``mongodb/mongodb-atlas-local:8.2`` (mongot 0.69.1,
+        edition ``localDev``): ``autoEmbed`` validates field by field and then
+        reports ``supported models are: []`` -- the capability is absent, not
+        misconfigured, and no credential or registration command exists to fix
+        it. See BUG.md. So the fallback is the normal path locally and in CI
+        today, and the same code takes the auto path wherever models exist.
+        """
+        from pymongo.operations import SearchIndexModel
+
+        if spec.vector_index in existing:
+            # Already built. Which shape it is was decided on a previous boot
+            # and is reported below; reconciliation handles the rest.
+            live = existing[spec.vector_index].get("latestDefinition") or {}
+            kinds = {f.get("type") for f in live.get("fields", [])}
+            if "autoEmbed" in kinds:
+                self._mark_auto_embed(spec, active=True)
+                return spec.auto_embed_definition()
+            self._mark_auto_embed(spec, active=False)
+            return spec.vector_definition()
+
+        definition = spec.auto_embed_definition()
+        try:
+            await coll.create_search_index(SearchIndexModel(
+                name=spec.vector_index, type="vectorSearch",
+                definition=definition))
+        except OperationFailure as exc:
+            message = str(exc).lower()
+            if not any(m in message for m in self._NO_AUTO_EMBED):
+                raise
+            log.error(
+                "%s asked the server to embed with %r and this deployment "
+                "cannot (%s). Falling back to a client-supplied vector index: "
+                "the application must keep producing embeddings. This is "
+                "expected on Atlas Local, which registers no models.",
+                spec.collection, spec.auto_embed,
+                str(exc).split(", full error")[0])
+            self._mark_auto_embed(spec, active=False)
+            return spec.vector_definition()
+
+        log.info("%s: the server owns embedding (%s); no vectors are "
+                 "computed in this process", spec.collection, spec.auto_embed)
+        self._mark_auto_embed(spec, active=True)
+        return definition
+
+    def _mark_auto_embed(self, spec, *, active: bool) -> None:
+        target, other = ((self.auto_embed_active, self.auto_embed_declined)
+                         if active else
+                         (self.auto_embed_declined, self.auto_embed_active))
+        if spec.collection not in target:
+            target.append(spec.collection)
+        if spec.collection in other:
+            other.remove(spec.collection)
+
+    def embeds_itself(self, collection: str) -> bool:
+        """Is the server producing this collection's vectors?
+
+        The one question the write path and the embed worker need answered.
+        """
+        return collection in self.auto_embed_active
 
     async def _reconcile(self, coll, spec, name: str, kind: str,
                          definition: dict, live: dict) -> None:
@@ -355,7 +462,7 @@ class SearchEngine:
             try:
                 if self.capabilities.rank_fusion and text:
                     return await self._hybrid(spec, vector, text, flt, limit)
-                return await self._vector(spec, vector, flt, limit)
+                return await self._vector(spec, vector, flt, limit, text=text)
             except OperationFailure as exc:
                 self.degraded += 1
                 log.error(
@@ -365,13 +472,30 @@ class SearchEngine:
 
         return await self._cosine(spec, vector, flt, limit)
 
-    async def _vector(self, spec, vector, flt, limit) -> list[dict]:
-        pipeline = [
-            {"$vectorSearch": {
-                "index": spec.vector_index, "path": spec.vector_path,
-                "queryVector": vector, "numCandidates": max(50, limit * 10),
+    def _vector_stage(self, spec, vector, text, flt, limit) -> dict:
+        """The ``$vectorSearch`` stage, in whichever form this index takes.
+
+        When the server owns the embedding there is no query vector to send:
+        the index holds text, so the query is text and mongot embeds it with
+        the same model it used on write. That symmetry is the reason this is
+        worth having -- a client-side embedder can drift from the index's
+        model, and this cannot.
+        """
+        if self.embeds_itself(spec.collection):
+            return {"$vectorSearch": {
+                "index": spec.vector_index, "path": spec.text_paths[0],
+                "query": text or "", "numCandidates": max(50, limit * 10),
                 "limit": limit, "filter": flt,
-            }},
+            }}
+        return {"$vectorSearch": {
+            "index": spec.vector_index, "path": spec.vector_path,
+            "queryVector": vector, "numCandidates": max(50, limit * 10),
+            "limit": limit, "filter": flt,
+        }}
+
+    async def _vector(self, spec, vector, flt, limit, text=None) -> list[dict]:
+        pipeline = [
+            self._vector_stage(spec, vector, text, flt, limit),
             {"$addFields": {"score": {"$meta": "vectorSearchScore"},
                             "source": spec.collection}},
         ]
@@ -384,11 +508,7 @@ class SearchEngine:
         must = [{"equals": {"path": k, "value": v}} for k, v in flt.items()]
         pipeline = [
             {"$rankFusion": {"input": {"pipelines": {
-                "vector": [{"$vectorSearch": {
-                    "index": spec.vector_index, "path": spec.vector_path,
-                    "queryVector": vector, "numCandidates": max(50, limit * 10),
-                    "limit": limit, "filter": flt,
-                }}],
+                "vector": [self._vector_stage(spec, vector, text, flt, limit)],
                 "lexical": [
                     {"$search": {"index": spec.text_index, "compound": {
                         "must": must,
