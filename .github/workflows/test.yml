@@ -1,0 +1,106 @@
+name: test
+
+# The claims that matter -- documents inheriting the scope's deadline, the void
+# as a retrieval boundary, hybrid ranking, a cold index that cannot look empty
+# -- are only true if the *queries* are right, so CI runs them against real
+# mongot (Atlas Local), the same path a laptop uses. No mock tier, on purpose.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Atlas Local (mongod + mongot)
+        # Only the database service. The `voyd` app service needs .env and real
+        # R2/Voyage credentials to boot; the suite does not -- it talks to Mongo
+        # directly on 27018. `--wait` blocks on the compose healthcheck, which
+        # waits for mongot ($listSearchIndexes), not just for mongod to ping.
+        run: |
+          cp .env.example .env
+          docker compose up -d --wait mongo
+
+      - name: Install uv + Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      - name: Sync (Engine + all extras + dev)
+        run: uv sync --all-extras
+
+      - name: Engine installs on its own
+        # Move #1 of this repo is "Engine is what you install." Prove the import
+        # graph in the built package: Engine, no FastAPI. This does not need Mongo.
+        run: |
+          uv run --no-sync python -c "import sys; from voyd import Engine, PermanentFailure; \
+            assert 'fastapi' not in sys.modules, 'importing Engine pulled the Host'; \
+            print('Engine imports clean:', Engine.__name__)"
+
+      - name: The wheel builds, and the claim holds *in the wheel*
+        # The step above proves the import graph in the source tree, which is
+        # not the thing anybody installs. That gap hid a real bug: a
+        # force-include duplicated every theme file at the same archive path,
+        # so `uv build --wheel` failed outright and `pip install voyd` had
+        # never worked. Nothing caught it, because nothing built the artifact.
+        #
+        # So: build it, install it alone in a clean venv, and re-assert the
+        # engine-only contract against what a stranger would actually get --
+        # including that the templates the console needs are really in there.
+        run: |
+          uv build
+          uv venv /tmp/wheelcheck
+          VIRTUAL_ENV=/tmp/wheelcheck uv pip install dist/*.whl
+          /tmp/wheelcheck/bin/python -c "
+          import sys
+          from voyd import Engine, PermanentFailure
+          assert 'fastapi' not in sys.modules, 'the wheel pulls FastAPI'
+          try:
+              import fastapi
+              raise AssertionError('bare wheel install dragged in the app extra')
+          except ImportError:
+              pass
+          print('wheel: Engine imports clean, no FastAPI')"
+          VIRTUAL_ENV=/tmp/wheelcheck uv pip install "voyd[app] @ ./dist/$(ls dist | grep whl)"
+          /tmp/wheelcheck/bin/python -c "
+          from pathlib import Path
+          import voyd, voyd.app
+          from voyd import Voyd
+          themes = Path(voyd.__file__).parent / 'themes' / 'console'
+          html = sorted(p.name for p in themes.glob('*.html'))
+          assert 'base.html' in html, f'templates missing from the wheel: {html}'
+          print('wheel[app]: service imports, templates shipped:', len(html), 'files')"
+
+      - name: The MCP server has no delete tool
+        # The pitch is that a scope collects itself. If a delete tool ever shows
+        # up on the surface, the product has quietly become a bucket -- so this
+        # is checked in CI and not only in the unit suite.
+        run: |
+          uv run --no-sync python -c "
+          import asyncio
+          from voyd.mcp import build_server
+          class Stub:
+              def __getattr__(self, n): raise AssertionError('no network in CI')
+          names = {t.name for t in asyncio.run(build_server(Stub()).list_tools())}
+          assert names == {'open_scope', 'add', 'search', 'describe'}, names
+          print('MCP surface:', sorted(names))"
+
+      - name: Test
+        env:
+          # Explicit even though it is the default: mongot index builds are async,
+          # and the suite polls up to ~60s per ensure() rather than sleeping.
+          VOYD_TEST_MONGO_URI: mongodb://localhost:27018/?directConnection=true
+        run: uv run --no-sync pytest -q
+
+      - name: Mongo logs on failure
+        if: failure()
+        run: docker compose logs mongo | tail -100

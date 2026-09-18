@@ -1,0 +1,53 @@
+{% extends "console/base.html" %}
+{% block title %}{{ voyd.name or voyd.slug }} is live · VOYD{% endblock %}
+
+{% block content %}
+<section class="stage stage-tight">
+  <div class="shell success-shell">
+    <div class="burst">✓</div>
+    <p class="kicker ok">Live</p>
+    <h1 class="stage-title">{{ voyd.name or voyd.slug }} is live.</h1>
+
+    <a class="live-url" href="{{ url }}" target="_blank" rel="noopener">
+      {{ url | replace("http://", "") | replace("https://", "") }} ↗
+    </a>
+
+    <div class="stage-cta">
+      <a class="btn btn-lg" href="/keys">Get your API key →</a>
+      <a class="btn btn-ghost btn-lg" href="/">Back to namespaces</a>
+    </div>
+  </div>
+</section>
+
+{# What the namespace is for: opening voids in it. #}
+<section class="section">
+  <div class="shell">
+    <p class="kicker">Do this next</p>
+    <h2 class="handoff-title">Open a scope in it.</h2>
+    <p class="dim">
+      A void is a vector index with a TTL. Put documents in, query them, and
+      stop thinking about it — when the deadline passes the text, the
+      embeddings and any bytes are collected together. There is no cleanup
+      call, and nothing to remember.
+    </p>
+<pre class="code"># open a scope that lives for an hour
+curl -X POST {{ url }}/v1/voids \
+  -H "Authorization: Bearer $VOYD_KEY" \
+  -d '{"ttl_seconds": 3600}'
+
+# text straight in -- no bucket, no presign, no upload round trip
+curl -X POST {{ url }}/v1/voids/$TOKEN/documents \
+  -H "Authorization: Bearer $VOYD_KEY" \
+  -d '{"documents": [{"text": "fault code P0301", "name": "scan.md"}]}'
+
+# query inside the boundary, and only the boundary
+curl -X POST {{ url }}/v1/voids/$TOKEN/search \
+  -H "Authorization: Bearer $VOYD_KEY" \
+  -d '{"query": "misfire"}'</pre>
+    <p class="dim small">
+      Or give it to an agent as four MCP tools:
+      <code>VOYD_URL={{ url }} VOYD_API_KEY=... python -m voyd.mcp</code>
+    </p>
+  </div>
+</section>
+{% endblock %}

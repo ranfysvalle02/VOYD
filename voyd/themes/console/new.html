@@ -1,0 +1,72 @@
+{% extends "console/base.html" %}
+{% block title %}New namespace · VOYD{% endblock %}
+
+{% block content %}
+<section class="stage stage-tight">
+  <div class="shell">
+    <p class="kicker">{% if first %}Your first namespace{% else %}New namespace{% endif %}</p>
+    <h1 class="stage-title sm">Go live.</h1>
+  </div>
+</section>
+
+<section class="section">
+  <div class="shell wizard">
+    {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+
+    <form method="post" action="/new" id="launch">
+      <div class="field-block">
+        <h3>Name this namespace</h3>
+        <input class="big-input" id="name" name="business_name" required
+               autocomplete="off" autofocus
+               value="{{ business_name or '' }}"
+               placeholder="Auto Repair Orlando" />
+        <div class="url-live">
+          <span class="dim small">Live at</span>
+          <div class="url-live-bar">
+            <code><span id="slug-out" class="url-slug">your-voyd</span>.{{ host_suffix }}</code>
+          </div>
+          <p class="url-hint small dim" id="slug-hint"></p>
+        </div>
+      </div>
+
+      <div class="launch-row">
+        <button class="btn btn-lg" type="submit" id="go">Go live</button>
+        <span class="dim small">An insert, not a deploy. Voids open inside it via the API.</span>
+      </div>
+    </form>
+  </div>
+</section>
+
+<script>
+  // Live slug preview: the URL appears as they type the name.
+  const nameEl = document.getElementById('name');
+  const out = document.getElementById('slug-out');
+  const hint = document.getElementById('slug-hint');
+  const RESERVED = new Set(['www','api','admin','app','voyd','static','assets','mail',
+    'localhost','login','signup','logout','new','dashboard','keys']);
+
+  function slugify(s) {
+    return s.normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-')
+      .replace(/-{2,}/g, '-').replace(/^-|-$/g, '').slice(0, 40).replace(/^-|-$/g, '');
+  }
+
+  function update() {
+    const slug = slugify(nameEl.value);
+    out.textContent = slug || 'your-voyd';
+    if (!nameEl.value) { hint.textContent = ''; return; }
+    if (slug.length < 3) hint.textContent = 'A little longer, please.';
+    else if (RESERVED.has(slug)) hint.textContent = 'That name is reserved. Try another.';
+    else hint.textContent = '';
+  }
+
+  nameEl.addEventListener('input', update);
+  update();
+
+  document.getElementById('launch').addEventListener('submit', () => {
+    const go = document.getElementById('go');
+    go.disabled = true;
+    go.textContent = 'Inserting…';
+  });
+</script>
+{% endblock %}

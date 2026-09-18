@@ -1,0 +1,85 @@
+[project]
+name = "voyd"
+version = "0.1.0"
+description = "Every database can delete; none can refuse. A retrieval scope with a deadline, and a read path that cannot return what it has forgotten."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Fabian Valle" }]
+requires-python = ">=3.11"
+# The body is Engine. `import voyd` / `from voyd import Engine` needs only a
+# MongoDB driver -- everything else is an extra you opt into.
+dependencies = [
+    "pymongo>=4.9",            # async: from pymongo import AsyncMongoClient (NO motor)
+]
+
+[project.optional-dependencies]
+# The HTTP service: FastAPI runtime, templates, auth. `python -m voyd` needs this.
+app = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "argon2-cffi>=23.1",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+]
+# Embeddings. `remember()` takes floats; this is only for computing them.
+voyage = [
+    "voyageai>=0.3.2",
+]
+# The vault byte-path. S3-compatible blob storage.
+r2 = [
+    "aioboto3>=13.0",
+]
+# The MCP server: four tools, so any agent runtime is a channel not a rival.
+mcp = [
+    "mcp>=2.0",           # 2.x: FastMCP was renamed MCPServer
+    "httpx>=0.27",
+]
+# Everything: the HTTP service + embeddings + blobs + the MCP server.
+all = [
+    "voyd[app,voyage,r2,mcp]",
+]
+# The drift exhibit only: the four-owners stack it argues against. Not
+# needed to run VOYD, and deliberately not in `all` -- nothing VOYD ships
+# imports a Postgres driver or a vector database client.
+drift = [
+    "asyncpg>=0.29",
+    "qdrant-client>=1.9",
+    "aioboto3>=13.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+voyd = "voyd.__main__:main"
+voyd-mcp = "voyd.mcp:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# `packages` already ships everything under voyd/, templates included. A
+# force-include of voyd/themes on top of that added every theme file a second
+# time at the same archive path, which hatchling refuses outright -- so the
+# wheel could not be built at all and `pip install voyd` had never worked.
+packages = ["voyd"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint.per-file-ignores]
+# Every test that touches an optional extra guards its imports with
+# ``pytest.importorskip`` *before* importing, so an engine-only install skips
+# the test instead of failing collection. That ordering is the point, and it is
+# E402 by construction.
+"tests/*" = ["E402"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

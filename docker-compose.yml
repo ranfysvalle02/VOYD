@@ -1,0 +1,44 @@
+services:
+  mongo:
+    # Atlas Local: a real single-node Atlas deployment -- mongod + mongot in one
+    # container. This is deliberately not `mongo:7`. VOYD's search, GC and TTL
+    # behaviour all depend on Atlas features, so developing against a plain
+    # mongod meant the default experience silently exercised fallback paths and
+    # never ran $vectorSearch at all.
+    #
+    # Gives us, with no Atlas account and no network:
+    #   $vectorSearch + $search   (mongot, bundled)
+    #   $rankFusion               (8.1+, hybrid search)
+    #   change streams w/ pre-images, TTL  (it is a replica set out of the box)
+    image: mongodb/mongodb-atlas-local:8.2
+    container_name: voyd-mongo
+    ports:
+      - "27018:27017"
+    volumes:
+      - voyd-atlas:/data/db
+    healthcheck:
+      # Not just "is mongod up" -- wait until mongot answers, because that is
+      # what the app blocks on at startup while search indexes build.
+      test:
+        - CMD-SHELL
+        - mongosh --quiet --eval 'db.getSiblingDB("admin").aggregate([{$listSearchIndexes:{}}])' >/dev/null 2>&1 || mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' | grep -q 1
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 20s
+
+  voyd:
+    build: .
+    container_name: voyd-app
+    ports:
+      - "8000:8000"
+    environment:
+      - VOYD_MONGO_URI=mongodb://mongo:27017/?directConnection=true
+    env_file:
+      - .env
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+volumes:
+  voyd-atlas:

@@ -1,0 +1,263 @@
+"""The engine: ModelController over one MongoDB.
+
+Which interface sits on top -- HTTP, MCP, a script -- is the caller's concern,
+not the engine's. What the engine is, is a **model** (one collection of
+documents, and the traits the replica set maintains) plus a **controller**
+(probe, wait, retry, resume, announce -- the behaviours people buy a service
+mesh for once their data plane is spread across four systems).
+
+No Redis, no Celery, no Elasticsearch, no vector database, no PostGIS, no Neo4j,
+no Influx, no cron. One connection string. Operational resiliency is a
+property of the document, not a sidecar.
+
+    engine = Engine(client, db)
+    await engine.connect()          # probe: what can this replica set do?
+                                    # engine.db is UTC-aware even if the
+                                    # caller's client is not.
+
+    docs = engine.model("docs", tenant="tenant_id")
+    docs.searchable(text_paths=("title", "body"))
+    engine.model("sessions").expiring()
+    mem = engine.model("memories", tenant="session").memory(
+        default_ttl=timedelta(hours=1))
+
+    await engine.ensure()           # wait until indexes are queryable
+    engine.health()                 # degraded is a first-class state
+
+Six traits ship: ``searchable``, ``expiring``, ``forgettable``, ``memory`` and
+``queue`` chain onto a model, and ``reactor`` watches the replica set. Each is
+usable on its own if a single one is all you need. ``forgettable`` is the one
+worth knowing about: it returns a read handle that *cannot* return an expired
+or revoked document, because a deadline enforced by convention is enforced
+exactly as reliably as it is remembered. ``model()`` is the main entry point:
+one collection, tenant threaded, traits chained, ``use()`` for anything this
+package does not ship. ``ensure()`` builds what you declared.
+
+This package is deliberately free of application vocabulary. It knows about
+collections, fields and filters, never about namespaces or voids.
+"""
+
+from __future__ import annotations
+
+from .capabilities import Capabilities, detect
+from .errors import (
+    FilterInvalid,
+    ScopeError,
+    ScopeInvalid,
+    ScopeRequired,
+)
+from .expiry import Expiry, ExpirySpec
+from .forgetting import (DEADLINE, REVOKED, UNREADABLE, Forgetting,
+                         ForgettingSpec, why_unreachable)
+from .jobs import JobQueue, PermanentFailure, backoff
+from .memory import Memory, MemorySpec
+from .model import Model
+from .reactor import Reactor
+from .search import SearchEngine, SearchSpec, cosine
+from .time import UTC, aware, bind, deadline, live, living, now, window
+from .trait import Trait, collection_of, kind_of
+
+
+class Engine:
+    """The controller. Models are collections you declare on it.
+
+    Operational resiliency is not a sidecar mesh. It is ``connect`` (probe),
+    ``ensure`` (wait, never query a building index), ``queue`` (retry the
+    world, not the document), ``reactor`` (resume after election),
+    ``health`` (say the tier out loud), and the clock (UTC-aware on
+    ``engine.db``, never inherited from the caller). Replica set plus these
+    policies is the data-plane mesh. The documents never left.
+    """
+
+    def __init__(self, client, db):
+        self.client = client
+        # Pin the clock on our handle. The caller's client is not mutated --
+        # a default AsyncMongoClient decodes Date naive, and that is how a
+        # forgotten memory crashed recall.
+        self.db = bind(db)
+        self.capabilities = Capabilities()
+        self.search_engine = SearchEngine(db=self.db, capabilities=self.capabilities)
+        self.expiry = Expiry(self.db)
+        # kind -> collection -> trait. Builtins and third-party share this.
+        self._installed: dict[str, dict[str, object]] = {}
+        self._memory: dict[str, Memory] = {}
+        self._models: dict[str, Model] = {}
+        # Reactors are handed to a caller to run, but health() has to be able
+        # to report them: a reactor that gave up looks exactly like a quiet
+        # database from the outside.
+        self._reactors: list[Reactor] = []
+
+    async def connect(self) -> Capabilities:
+        self.capabilities = await detect(self.client, self.db)
+        self.search_engine.capabilities = self.capabilities
+        return self.capabilities
+
+    # ---- declaration ---------------------------------------------------
+
+    def model(self, collection: str, *, tenant: str | None = None,
+              tenant_type: str = "token") -> Model:
+        """Declare a collection: optional tenant, traits chained on the handle.
+
+        ``engine.searchable(SearchSpec(...))`` still works. This is the same
+        declaration with the collection and tenant written once.
+        """
+        m = Model(self, collection, tenant=tenant, tenant_type=tenant_type)
+        self._models[collection] = m
+        return m
+
+    def use(self, trait):
+        """Install a primitive. Anything with ``kind``, ``collection``,
+        ``async ensure()``. Replaces a previous trait of the same kind on
+        the same collection. Returns the trait so the caller has a handle.
+        """
+        kind = kind_of(trait)
+        coll = collection_of(trait)
+        self._installed.setdefault(kind, {})[coll] = trait
+        return trait
+
+    def installed(self, kind: str | None = None) -> dict:
+        """Installed traits. One kind, or every kind keyed by kind."""
+        if kind is None:
+            return {k: dict(v) for k, v in self._installed.items()}
+        return dict(self._installed.get(kind, {}))
+
+    def searchable(self, spec: SearchSpec) -> None:
+        self.search_engine.register(spec)
+
+    def expiring(self, spec: ExpirySpec) -> None:
+        self.expiry.register(spec)
+
+    def memory(self, spec: MemorySpec | None = None) -> Memory:
+        """Declare a memory store: hybrid recall plus decay.
+
+        A composition of two primitives already declared above, not a new
+        subsystem -- which is the point.
+        """
+        spec = spec or MemorySpec()
+        self.searchable(spec.search_spec())
+        self.expiring(spec.expiry_spec())
+        m = self._memory[spec.collection] = Memory(self, spec)
+        return m
+
+    # ---- one call builds everything declared ---------------------------
+
+    async def ensure(self, *, search_wait_s: float = 90.0) -> dict:
+        """Build every declared schema. Safe to call on every boot.
+
+        Installed traits first, in declaration order. TTL next. Search last
+        because it is the only step that *waits* -- indexes build
+        asynchronously and querying one that is not ready returns zero rows
+        rather than raising.
+        """
+        report: dict = {}
+        for kind, items in self._installed.items():
+            report[kind] = [
+                coll for coll, trait in items.items() if await trait.ensure()
+            ]
+        report["ttl"] = await self.expiry.ensure()
+        report["search_ready"] = await self.search_engine.ensure_indexes(
+            wait_s=search_wait_s)
+        return report
+
+    # ---- access --------------------------------------------------------
+
+    async def search(self, collection: str, vector, *, text=None,
+                     limit: int = 5, filters=None) -> list[dict]:
+        return await self.search_engine.query(
+            collection, vector, text=text, limit=limit, filters=filters)
+
+    @property
+    def search_tier(self) -> str:
+        return self.search_engine.tier
+
+    # ---- work ----------------------------------------------------------
+
+    def queue(self, collection: str, *, when: dict, **kw) -> JobQueue:
+        return self.use(JobQueue(db=self.db, collection=collection, when=when, **kw))
+
+    def forgetting(self, collection: str, *, at_field: str = "expire_at",
+                   mark_field: str = "forgotten",
+                   tenant: str | None = None) -> Forgetting:
+        """A read handle for ``collection`` that refuses forgotten facts.
+
+        Installed as a trait, so ``ensure()`` indexes the mark field and
+        ``health()`` can report what it has refused.
+
+        Idempotent per collection. ``use()`` replaces a trait of the same kind
+        on the same collection, so handing out a second handle would orphan the
+        first -- its refusals would still happen and would stop being counted,
+        which is the one thing this primitive exists to prevent. A caller
+        asking twice gets the same object.
+        """
+        spec = ForgettingSpec(collection, at_field=at_field,
+                              mark_field=mark_field)
+        existing = self._installed.get("forgetting", {}).get(collection)
+        if existing is not None:
+            if existing.spec != spec:
+                raise ValueError(
+                    f"{collection} is already forgettable on "
+                    f"{existing.spec.at_field}/{existing.spec.mark_field}; "
+                    f"refusing to redeclare it on {at_field}/{mark_field}, "
+                    f"because two rules for one collection is how they drift")
+            return existing
+        return self.use(Forgetting(self.db, spec, tenant=tenant))
+
+    def reactor(self, **kw) -> Reactor:
+        r = Reactor(self.db, **kw)
+        self._reactors.append(r)
+        return r
+
+    # ---- introspection -------------------------------------------------
+
+    def health(self) -> dict:
+        """What a health endpoint should say, so a degraded deployment is
+        visible to a probe instead of only showing up as worse results."""
+        return {
+            "mongodb": ".".join(str(p) for p in self.capabilities.version),
+            "search": {
+                "tier": self.search_tier,
+                "indexes_ready": self.search_engine.ready,
+                "degraded_searches": self.search_engine.degraded,
+                "scope_refused": self.search_engine.scope_refused,
+                "cosine_capped": self.search_engine.cosine_capped,
+                # Indexes whose live definition stopped matching the spec and
+                # could not be corrected. Non-empty means queries are running
+                # against a definition the application no longer declares.
+                "stale_indexes": list(self.search_engine.stale),
+            },
+            # Refusal is a guarantee, so it is reported like one. A climbing
+            # `revoked` count with no erasure requests behind it, or any
+            # `unreadable` at all, is a question worth asking.
+            "forgetting": [t.receipts()
+                           for t in self._installed.get("forgetting", {}).values()],
+            "change_streams": self.capabilities.change_streams,
+            # Not the capability -- what the reactors actually did. A resume
+            # is routine; a lost window means deletes went uncollected and
+            # storage needs reconciling; unsupported means the handlers never
+            # ran at all. All three look identical without this.
+            "reactors": [r.health() for r in self._reactors],
+            "time": {"tz": "UTC", "aware": True},
+            "declared": {
+                "models": sorted(self._models),
+                "searchable": sorted(self.search_engine.specs),
+                "expiring": sorted(s.collection for s in self.expiry.specs),
+                "memory": sorted(self._memory),
+                **{kind: sorted(items) for kind, items in self._installed.items()},
+            },
+        }
+
+
+__all__ = [
+    "Engine", "Capabilities", "detect",
+    "SearchEngine", "SearchSpec", "cosine",
+    "Expiry", "ExpirySpec",
+    "Forgetting", "ForgettingSpec", "why_unreachable",
+    "DEADLINE", "REVOKED", "UNREADABLE",
+    "Memory", "MemorySpec",
+    "Model",
+    "JobQueue", "PermanentFailure", "backoff",
+    "Reactor",
+    "ScopeRequired", "ScopeInvalid", "ScopeError", "FilterInvalid",
+    "Trait", "kind_of", "collection_of",
+    "now", "aware", "live", "living", "deadline", "window", "bind", "UTC",
+]

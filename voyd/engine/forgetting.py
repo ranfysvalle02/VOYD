@@ -1,0 +1,347 @@
+"""Forgetting as a retrieval guarantee, not a storage event.
+
+Every database can delete. None of them can *refuse*. That distinction is the
+whole point of this module:
+
+    deletion  is a storage operation -- eventually consistent, by nature.
+              A TTL monitor sweeps about once a minute. An object lifecycle
+              rule runs about once a day. A cron runs when it last worked.
+
+    refusal   is a retrieval guarantee -- immediate, by construction.
+              "This fact may not reach a prompt", answered on every read,
+              before anything is returned.
+
+Nobody ships the second one, so the honest answer to "when was this
+forgotten?" is really "when did the sweeper get to it?" -- and in the gap
+between those two, a deleted document is still being returned as a
+well-scored result.
+
+Re-checking a deadline on the way out is not hard, and an application that
+knows to do it will do it correctly in the read path it was thinking about
+when it learned the lesson. Then it grows a second read path, and a fifth,
+and the rule is only as good as the next author's memory. A guarantee that
+must be remembered is not enforced, it is suggested.
+
+So this makes refusal structural. ``Forgetting`` is a read handle, and every
+read through it refuses forgotten facts. There is no "remember to filter"
+step, because there is no unfiltered ``find`` to reach for. Seeing everything
+remains possible -- audit and administration need it -- but it has a name a
+reviewer can grep for:
+
+    await docs.find({"owner": who})                        # reachable only
+    await docs.including_forgotten().find({"owner": who})  # deliberate
+
+The failure mode is inverted. Before, you had to remember to be safe. Now you
+have to declare that you want the unsafe thing.
+
+**Two enforcement points, always both.** The rule is pushed into the query
+where the query can express it (cheap: the database does the work) *and*
+re-checked per document on the way out (authoritative). That is not
+belt-and-braces paranoia. A vector index cannot filter on a deadline without
+an unmigratable index change -- see ``search.py`` for the measurements -- so
+hits arriving from ``$vectorSearch`` have never been filtered by anything.
+``reachable()`` is what a search path calls, and it is the guarantee; the
+query clause is the optimisation.
+
+**More than one reason to forget.** A deadline is only the common one:
+
+- ``deadline``    -- the expiry field has passed. Pinning is its absence.
+- ``revoked``     -- somebody said forget this, now. A subject erasure
+  request, a leaked credential, a retracted document. Unreachable on the next
+  read, whatever the sweeper is doing, and without waiting for it.
+- ``unreadable``  -- a deadline that is not a date, or cannot be compared.
+  Fails closed: a fact whose lifetime cannot be established has no business
+  in a prompt.
+
+Plus pinning, the absence of all three. Every case collapses to one question
+-- *may this reach a prompt?* -- answered in one place.
+
+**Refusals are counted, with their limits stated.** ``receipts()`` reports
+what was refused and why. ``revoked_total`` is exact. ``refused_at_boundary``
+is a lower bound and is named so, because the same rule runs inside the query
+and the database drops most forgotten facts server-side; counting those would
+mean issuing every read twice. A signal, not a ledger.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any, Iterable
+
+from .time import aware, living, now
+
+log = logging.getLogger("engine.forgetting")
+
+# Why a fact was refused. Stable strings: they are counted, logged, and end up
+# in an operator's dashboard.
+DEADLINE = "deadline"
+REVOKED = "revoked"
+UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True)
+class ForgettingSpec:
+    """Where a collection keeps the two facts that make a document forgettable."""
+
+    collection: str
+    at_field: str = "expire_at"
+    # Set by revoke(). Present means "refuse this", independently of the
+    # deadline, so an erasure request does not have to wait for a sweeper and
+    # does not depend on the TTL index existing at all.
+    mark_field: str = "forgotten"
+
+    def describe(self) -> str:
+        return (f"{self.collection}: refuses on {self.at_field} (deadline) "
+                f"and {self.mark_field} (revoked)")
+
+
+@dataclass
+class Receipts:
+    """What was refused and revoked. The audit artifact, with its limits.
+
+    ``refused`` counts documents this handle rejected *on the way out* -- the
+    authoritative per-document check. It is deliberately a **lower bound**,
+    and it is worth knowing why: most forgotten facts never reach the handle
+    at all, because the same rule is pushed into the query and MongoDB drops
+    them server-side. Counting those too would mean running every read twice.
+
+    So this is a signal, not a ledger. A non-zero ``refused`` means documents
+    are arriving at the boundary already forgotten -- which is normal for
+    search hits (the vector index has no deadline filter) and suspicious for
+    anything else. ``revoked`` is exact: every fact this handle made
+    unreachable, counted at the moment it happened.
+    """
+
+    refused: dict[str, int] = field(default_factory=dict)
+    revoked: int = 0
+    last_reason: str | None = None
+    last_at: datetime | None = None
+
+    def record(self, reason: str) -> None:
+        self.refused[reason] = self.refused.get(reason, 0) + 1
+        self.last_reason = reason
+        self.last_at = now()
+
+    def record_revocation(self, n: int, reason: str) -> None:
+        if n:
+            self.revoked += n
+            self.last_reason = reason
+            self.last_at = now()
+
+    @property
+    def total(self) -> int:
+        return sum(self.refused.values())
+
+    def as_dict(self) -> dict:
+        return {
+            # A lower bound: the query prunes most of these server-side.
+            "refused_at_boundary": self.total,
+            "refused_by_reason": dict(self.refused),
+            # Exact: counted when it happened.
+            "revoked_total": self.revoked,
+            "last_reason": self.last_reason,
+            "last_at": self.last_at.isoformat() if self.last_at else None,
+        }
+
+
+def why_unreachable(doc: dict, spec: ForgettingSpec,
+                    *, when: datetime | None = None) -> str | None:
+    """Why this document may not reach a prompt, or ``None`` if it may.
+
+    Never raises. A fact whose lifetime cannot be read is refused rather than
+    served, because the alternative -- an exception inside a filter -- is how
+    the filter gets skipped.
+    """
+    if doc.get(spec.mark_field) is not None:
+        return REVOKED
+
+    exp = doc.get(spec.at_field)
+    if exp is None:
+        return None                      # pinned: the absence of a deadline
+    if not isinstance(exp, datetime):
+        return UNREADABLE
+    try:
+        return None if aware(exp) > (when or now()) else DEADLINE
+    except (TypeError, ValueError, OverflowError):
+        return UNREADABLE
+
+
+class Forgetting:
+    """A read handle that cannot return a forgotten fact.
+
+    Install it on a model (``.forgettable()``) or build it directly. It is a
+    trait, so ``ensure()`` gives the mark field an index -- revocation has to
+    be cheap to filter on, or it will be skipped at scale.
+    """
+
+    kind = "forgetting"
+
+    def __init__(self, db, spec: ForgettingSpec, *, tenant: str | None = None):
+        self.db = db
+        self.spec = spec
+        self.collection = spec.collection
+        self.tenant = tenant
+        self.receipts_log = Receipts()
+        self._include = False
+
+    # ---- schema --------------------------------------------------------
+
+    async def ensure(self) -> bool:
+        """Index the mark field. Revocation must be cheap or it gets skipped."""
+        await self.db[self.collection].create_index(self.spec.mark_field,
+                                                    sparse=True)
+        return True
+
+    # ---- the escape hatch, deliberately named --------------------------
+
+    def including_forgotten(self) -> Forgetting:
+        """A handle that returns everything, including what was forgotten.
+
+        Audit, administration and the reaper itself need this. It is a
+        separate object rather than a flag on every call so that a review can
+        grep for the phrase and find every place the guarantee was set aside.
+        """
+        clone = Forgetting(self.db, self.spec, tenant=self.tenant)
+        clone.receipts_log = self.receipts_log
+        clone._include = True
+        return clone
+
+    # ---- the rule ------------------------------------------------------
+
+    def _query(self, filters: dict | None) -> dict:
+        """Push refusal into the query, where the query can express it."""
+        q = dict(filters or {})
+        if self._include:
+            return q
+        clauses = [living(self.spec.at_field),
+                   {"$or": [{self.spec.mark_field: None},
+                            {self.spec.mark_field: {"$exists": False}}]}]
+        existing = q.pop("$and", [])
+        q["$and"] = [*existing, *clauses] if existing else clauses
+        return q
+
+    def _admit(self, doc: dict | None, *, when: datetime | None = None):
+        """The authoritative check, on the way out.
+
+        The query above is an optimisation. *This* is the guarantee, and it is
+        the only one that holds for documents that never went through a query
+        -- every hit from ``$vectorSearch``, where the deadline is deliberately
+        not an index filter.
+        """
+        if doc is None or self._include:
+            return doc
+        reason = why_unreachable(doc, self.spec, when=when)
+        if reason is None:
+            return doc
+        self.receipts_log.record(reason)
+        log.debug("refused a %s document from %s", reason, self.collection)
+        return None
+
+    def reachable(self, docs: Iterable[dict], *,
+                  when: datetime | None = None) -> list[dict]:
+        """Filter documents that arrived from somewhere else.
+
+        This is the search path's entry point: ``$vectorSearch`` and
+        ``$rankFusion`` hits have not been through ``_query`` and never will
+        be, so they are admitted one at a time, here.
+        """
+        return [d for d in docs if self._admit(d, when=when) is not None]
+
+    # ---- reads: refusal is the default ---------------------------------
+
+    async def find_one(self, filters: dict | None = None, *args, **kw):
+        doc = await self.db[self.collection].find_one(self._query(filters),
+                                                      *args, **kw)
+        return self._admit(doc)
+
+    async def find(self, filters: dict | None = None, *args,
+                   limit: int = 0, sort: Any = None, **kw) -> list[dict]:
+        cur = self.db[self.collection].find(self._query(filters), *args, **kw)
+        if sort is not None:
+            cur = cur.sort(*sort) if isinstance(sort, tuple) else cur.sort(sort)
+        if limit:
+            cur = cur.limit(limit)
+        return [d async for d in cur if self._admit(d) is not None]
+
+    def match(self, filters: dict | None = None) -> dict:
+        """The refusing filter, for a pipeline that cannot use ``find``.
+
+        An aggregation is the one read shape this handle cannot wrap, so it
+        gets the rule as a value instead of a method: ``{"$match":
+        docs.match({...})}``. Still one source of truth -- if the definition
+        of "forgotten" changes, this changes with it.
+
+        Note what it is *not*: the per-document check. A pipeline that emits
+        whole documents should pass them through ``reachable()`` too. This is
+        the right tool for counting and grouping, where there is no document
+        to hand back.
+        """
+        return self._query(filters)
+
+    async def count(self, filters: dict | None = None) -> int:
+        """How many facts are *reachable*, which is the number a caller means.
+
+        Counted with the same query the reads use, so a count and a find
+        cannot disagree about what exists.
+        """
+        return await self.db[self.collection].count_documents(
+            self._query(filters))
+
+    async def exists(self, filters: dict | None = None) -> bool:
+        return await self.find_one(filters) is not None
+
+    # ---- forgetting, without waiting to be deleted ---------------------
+
+    async def revoke(self, filters: dict, *, reason: str = "revoked",
+                     erase_after: timedelta | None = None) -> int:
+        """Make matching facts unreachable now. Bytes leave on their own time.
+
+        This is the part no vector database has. ``delete_many`` is a storage
+        operation whose effect on retrieval is "eventually"; this is a
+        retrieval operation whose effect is "next read". The row is also given
+        a deadline so the reaper collects it -- unreachable first, erased
+        shortly after, in that order, because the reverse order is the bug.
+
+        ``erase_after`` keeps the tombstone readable for a while through
+        ``including_forgotten()``, for cases where you must prove *when* a fact
+        stopped being reachable. The default erases as soon as the reaper runs.
+        """
+        stamp = now()
+        mark = {"at": stamp, "reason": reason}
+        result = await self.db[self.collection].update_many(
+            self._query(filters),
+            {"$set": {self.spec.mark_field: mark,
+                      self.spec.at_field: stamp + (erase_after or timedelta(0))}},
+        )
+        self.receipts_log.record_revocation(result.modified_count, reason)
+        if result.modified_count:
+            log.info("revoked %d fact(s) in %s (%s); unreachable as of %s",
+                     result.modified_count, self.collection, reason,
+                     stamp.isoformat())
+        return result.modified_count
+
+    async def pin(self, filters: dict) -> int:
+        """Remove a deadline. Pinning is the absence of one, not a flag."""
+        return (await self.db[self.collection].update_many(
+            filters, {"$set": {self.spec.at_field: None}})).modified_count
+
+    # ---- proof ---------------------------------------------------------
+
+    def receipts(self) -> dict:
+        """What this handle has refused, and why.
+
+        Two numbers with different strengths, and the difference is the
+        honest part. ``revoked_total`` is exact. ``refused_at_boundary`` is a
+        lower bound -- the same rule runs inside the query, so most forgotten
+        facts are dropped by MongoDB and never counted here. Counting them
+        would mean issuing every read twice.
+
+        Read them as signals: a climbing ``unreadable`` means something is
+        writing deadlines it should not, and a ``revoked_total`` with no
+        erasure request behind it is worth a question.
+        """
+        return {"collection": self.collection,
+                "policy": self.spec.describe(),
+                **self.receipts_log.as_dict()}

@@ -1,0 +1,50 @@
+{% extends "console/base.html" %}
+{% block title %}Your namespaces · VOYD{% endblock %}
+
+{% block content %}
+<section class="stage stage-tight">
+  <div class="shell">
+    <div class="row-between">
+      <div>
+        <p class="kicker">Control plane</p>
+        <h1 class="stage-title sm">Your namespaces</h1>
+      </div>
+      <a class="btn" href="/new">+ New namespace</a>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="shell">
+    {% if voyds %}
+    <div class="deck">
+      {% for v in voyds %}
+      <article class="biz">
+        <div class="biz-head">
+          <h3>{{ v.name }}</h3>
+          <span class="pill">{{ v.slug }}</span>
+        </div>
+        <a class="biz-url" href="{{ v.url }}" target="_blank" rel="noopener">
+          {{ v.url | replace("http://", "") | replace("https://", "") }} ↗
+        </a>
+        <div class="metrics">
+          <div><strong>{{ v.stats.voids or 0 }}</strong><span class="dim">voids</span></div>
+          <div><strong>{{ v.stats.documents or 0 }}</strong><span class="dim">documents</span></div>
+        </div>
+        <div class="biz-foot">
+          <a class="tint small" href="/keys">API key</a>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">
+      <div class="empty-mark">◈</div>
+      <h2>No namespaces yet</h2>
+      <p class="dim">Insert the first one. It takes about ten seconds.</p>
+      <a class="btn btn-lg" href="/new">Create a namespace</a>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}VOYD{% endblock %}</title>
+  <link rel="stylesheet" href="/assets/console.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="/">
+        <span class="brand-mark">◈</span>
+        <span class="brand-name">VOYD</span>
+      </a>
+      <nav class="topbar-nav">
+        {% if owner %}
+          <a href="/">Voyds</a>
+          <a href="/keys">Developers</a>
+          <span class="who" title="{{ owner.email }}">{{ owner.email }}</span>
+          <form method="post" action="/logout" class="inline">
+            <button class="btn btn-quiet" type="submit">Sign out</button>
+          </form>
+        {% else %}
+          <a href="/login">Sign in</a>
+          <a class="btn btn-sm" href="/signup">Get started</a>
+        {% endif %}
+      </nav>
+    </div>
+  </header>
+
+  <main>{% block content %}{% endblock %}</main>
+
+  <footer class="foot">
+    <div class="shell">
+      <span class="dim">VOYD · the View left · ModelController</span>
+    </div>
+  </footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
