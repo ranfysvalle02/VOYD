@@ -1,18 +1,20 @@
-"""Background operations, driven entirely by MongoDB state.
+"""Background work, driven entirely by MongoDB state.
 
-Two loops, no external broker:
+One loop, no external broker. The **embed worker** (``embed_loop``) is a
+claim-based poller: a document with ``indexed: false`` *is* the job. It claims
+one atomically, asks Voyage for an embedding, and writes it back. Claiming is
+what makes it safe to run multiple replicas -- no queue, no broker, one
+``find_one_and_update``.
 
-1. **Embed worker** (``embed_loop``): a claim-based poller. A document with
-   ``indexed: false`` *is* the job. It claims one atomically, gets its text --
-   inline if the caller supplied it, otherwise a bounded window read from the
-   blob -- asks Voyage for an embedding, and writes it back. Claiming makes it
-   safe to run multiple replicas.
+There used to be a second loop. A change stream over ``voids``/``documents``
+turned every delete -- including a TTL expiration -- into the signal to
+reclaim the blob it pointed at. It went when the blob path did: with text
+stored inline on the document, a deleted row has nothing left behind it to
+collect, so the reaper is the whole of garbage collection.
 
-2. **GC worker** (``gc_loop``): a change stream over ``voids``/``documents``. A
-   delete event -- *including a TTL expiration* -- is the GC signal, so the
-   deadline on a void is what reclaims its bytes. Nobody schedules a sweep.
-   Requires a replica set with pre-images; on a standalone mongod it disables
-   itself and logs once.
+A deployment that adopts ``auto_embed`` has no work here at all: mongot
+produces the vectors, ``indexed: false`` never happens, and this loop finds
+nothing to claim.
 """
 
 from __future__ import annotations
@@ -22,35 +24,26 @@ import logging
 
 from .engine import backoff
 from .store.mongo import MAX_EMBED_ATTEMPTS, MongoStore
-from .storage import transient_storage_errors
-from .storage.base import NoObjectStorage, ObjectStorage
 from .intelligence.voyage import VoyageIntelligence
 
 log = logging.getLogger("voyd.ops")
 
 
 class Ops:
-    def __init__(self, store: MongoStore, storage: ObjectStorage,
-                 intelligence: VoyageIntelligence, *, poll_interval: float = 2.0):
+    def __init__(self, store: MongoStore, intelligence: VoyageIntelligence,
+                 *, poll_interval: float = 2.0):
         self.store = store
-        self.storage = storage
         self.intelligence = intelligence
         self.poll_interval = poll_interval
         self._tasks: list[asyncio.Task] = []
         self._stop = asyncio.Event()
         self._embed_failures = 0
-        self._reactor = None
 
     def start(self) -> None:
-        self._tasks = [
-            asyncio.create_task(self.embed_loop(), name="voyd-embed"),
-            asyncio.create_task(self.gc_loop(), name="voyd-gc"),
-        ]
+        self._tasks = [asyncio.create_task(self.embed_loop(), name="voyd-embed")]
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._reactor is not None:
-            await self._reactor.stop()
         for t in self._tasks:
             t.cancel()
         for t in self._tasks:
@@ -92,29 +85,9 @@ class Ops:
         return True
 
     async def _embed_document(self, doc: dict) -> None:
-        """Embed one document, wherever its text came from."""
+        """Embed one document. The text is on the row; there is nowhere else
+        it could be."""
         text = doc.get("text")
-        if text is None and doc.get("key"):
-            # The blob path: read a bounded window rather than the whole object.
-            try:
-                text = await self.storage.get_text_window(
-                    doc["key"], max_bytes=self.intelligence.config.max_input_chars
-                )
-            except NoObjectStorage:
-                # The API cannot create this row on a deployment with no object
-                # storage, but an older row can outlive the bucket's removal.
-                # No retry will ever find the bytes, so park it rather than let
-                # it cycle through its attempts forever.
-                log.error("document %s has a blob key but this deployment has "
-                          "no object storage; parking it as unembeddable",
-                          doc.get("_id"))
-                await self.store.set_embedding(doc["_id"], None)
-                return
-            except transient_storage_errors() as exc:
-                # Storage being unreachable is the world, not the document.
-                await self._embed_failed(doc, exc)
-                return
-
         if not (text or "").strip():
             # Nothing to embed is a property of the document: permanent.
             await self.store.set_embedding(doc["_id"], None)
@@ -162,55 +135,3 @@ class Ops:
         drift apart unnoticed.
         """
         return backoff(self._embed_failures, self.poll_interval)
-
-    # ---- GC worker -----------------------------------------------------
-
-    async def gc_loop(self) -> None:
-        """Reclaim stored objects when their documents disappear.
-
-        A delete event *is* the GC signal -- including TTL expirations. All the
-        hard parts (resume tokens, reconnection, stale-token recovery,
-        unsupported deployments) live in the engine's Reactor; what stays here
-        is the one thing that is about VOYD: which bucket key a deleted document
-        was holding.
-        """
-        reactor = self.store.engine.reactor(
-            name="voyd-gc",
-            restore=self.store.get_resume_token,
-            checkpoint=self.store.set_resume_token,
-        )
-
-        @reactor.on("delete", "documents")
-        async def _document_deleted(change):
-            await self._handle_delete(change)
-
-        @reactor.on("delete", "voids")
-        async def _void_deleted(change):
-            await self._handle_delete(change)
-
-        if getattr(self.store, "pre_images", None) is False:
-            # Stated here too: without pre-images a delete event carries no key,
-            # so this loop would run and reclaim nothing, forever.
-            log.warning("gc worker started without change-stream pre-images: "
-                        "R2 objects will not be reclaimed")
-
-        self._reactor = reactor
-        try:
-            await reactor.run()
-        finally:
-            self._reactor = None
-
-    async def _handle_delete(self, change: dict) -> None:
-        coll = change.get("ns", {}).get("coll")
-        pre = change.get("fullDocumentBeforeChange")
-        if not pre:
-            return  # no pre-image available -> cannot know the key
-        if coll == "documents":
-            key = pre.get("key")
-            if key:  # inline documents have no blob to reclaim
-                await self.storage.delete_key(key)
-        elif coll == "voids":
-            voyd = await self.store.db.voyds.find_one({"_id": pre.get("voyd_id")})
-            if voyd:
-                prefix = self.storage.void_prefix(voyd["slug"], pre["token"])
-                await self.storage.delete_prefix(prefix)

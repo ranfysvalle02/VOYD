@@ -9,50 +9,41 @@ from voyd.guards import (
     GuardError,
     build_void_policy,
     compile_guard_defaults,
-    enforce_download,
+    enforce_query,
 )
-from voyd.store.mongo import cosine, is_text_like
+from voyd.store.mongo import cosine
 
 
 def test_compile_guard_defaults():
-    defaults = compile_guard_defaults(
-        [Guard.require_passcode(), Guard.max_downloads(limit=5)]
-    )
+    defaults = compile_guard_defaults([Guard.require_passcode()])
     assert defaults["require_passcode"] is True
-    assert defaults["max_downloads"] == 5
     assert defaults["passcode_hash"] is None
 
 
 def test_build_void_policy_requires_passcode_when_voyd_requires_it():
     voyd_defaults = compile_guard_defaults([Guard.require_passcode()])
     with pytest.raises(GuardError):
-        build_void_policy(voyd_defaults, passcode=None, max_downloads=None)
+        build_void_policy(voyd_defaults, passcode=None)
 
-    policy = build_void_policy(voyd_defaults, passcode="hunter2", max_downloads=None)
+    policy = build_void_policy(voyd_defaults, passcode="hunter2")
     assert policy["require_passcode"] is True
     assert policy["passcode_hash"]  # argon2 hash present
 
 
-def test_enforce_download_passcode_and_limit():
+def test_a_query_is_a_read_and_the_passcode_gates_it():
+    """There is one door now. It used to also guard a byte path, and the rule
+    was that gating one and not the other made search the way around the
+    lock; with the bytes gone the rule is simply that reading needs the
+    passcode."""
     policy = build_void_policy(
-        compile_guard_defaults([Guard.require_passcode(), Guard.max_downloads(limit=2)]),
-        passcode="open-sesame",
-        max_downloads=None,
-    )
-    # wrong passcode
+        compile_guard_defaults([Guard.require_passcode()]),
+        passcode="open-sesame")
     with pytest.raises(GuardError):
-        enforce_download(policy, 0, passcode="nope")
-    # right passcode, under limit -> ok
-    enforce_download(policy, 1, passcode="open-sesame")
-    # right passcode, at limit -> blocked
+        enforce_query(policy, passcode="nope")
     with pytest.raises(GuardError):
-        enforce_download(policy, 2, passcode="open-sesame")
+        enforce_query(policy, passcode=None)
+    enforce_query(policy, passcode="open-sesame")  # no raise
 
-
-def test_void_override_max_downloads():
-    policy = build_void_policy({}, passcode=None, max_downloads=3)
-    assert policy["max_downloads"] == 3
-    assert policy["require_passcode"] is False
 
 
 def test_cosine():
@@ -61,9 +52,3 @@ def test_cosine():
     assert cosine([1, 0], [-1, 0]) == pytest.approx(-1.0)
     assert cosine([], [1]) == -1.0
 
-
-def test_is_text_like():
-    assert is_text_like("text/markdown")
-    assert is_text_like("application/json; charset=utf-8")
-    assert not is_text_like("image/png")
-    assert not is_text_like(None)

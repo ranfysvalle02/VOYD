@@ -24,9 +24,9 @@ property of the document, not a sidecar.
     await engine.ensure()           # wait until indexes are queryable
     engine.health()                 # degraded is a first-class state
 
-Six traits ship: ``searchable``, ``expiring``, ``forgettable``, ``memory`` and
-``queue`` chain onto a model, and ``reactor`` watches the replica set. Each is
-usable on its own if a single one is all you need. ``forgettable`` is the one
+Five traits ship, all of which chain onto a model: ``searchable``,
+``expiring``, ``forgettable``, ``memory`` and ``queue``. Each is usable on
+its own if a single one is all you need. ``forgettable`` is the one
 worth knowing about: it returns a read handle that *cannot* return an expired
 or revoked document, because a deadline enforced by convention is enforced
 exactly as reliably as it is remembered. ``model()`` is the main entry point:
@@ -52,7 +52,6 @@ from .forgetting import (DEADLINE, REVOKED, UNREADABLE, Forgetting,
 from .jobs import JobQueue, PermanentFailure, backoff
 from .memory import Memory, MemorySpec
 from .model import Model
-from .reactor import Reactor
 from .search import SearchEngine, SearchSpec, cosine
 from .time import UTC, aware, bind, deadline, live, living, now
 from .trait import Trait, collection_of, kind_of
@@ -63,7 +62,7 @@ class Engine:
 
     Operational resiliency is not a sidecar mesh. It is ``connect`` (probe),
     ``ensure`` (wait, never query a building index), ``queue`` (retry the
-    world, not the document), ``reactor`` (resume after election),
+    world, not the document), ``forgetting`` (refuse what is over),
     ``health`` (say the tier out loud), and the clock (UTC-aware on
     ``engine.db``, never inherited from the caller). Replica set plus these
     policies is the data-plane mesh. The documents never left.
@@ -82,10 +81,6 @@ class Engine:
         self._installed: dict[str, dict[str, object]] = {}
         self._memory: dict[str, Memory] = {}
         self._models: dict[str, Model] = {}
-        # Reactors are handed to a caller to run, but health() has to be able
-        # to report them: a reactor that gave up looks exactly like a quiet
-        # database from the outside.
-        self._reactors: list[Reactor] = []
 
     async def connect(self) -> Capabilities:
         self.capabilities = await detect(self.client, self.db)
@@ -202,11 +197,6 @@ class Engine:
             return existing
         return self.use(Forgetting(self.db, spec, tenant=tenant))
 
-    def reactor(self, **kw) -> Reactor:
-        r = Reactor(self.db, **kw)
-        self._reactors.append(r)
-        return r
-
     # ---- introspection -------------------------------------------------
 
     def health(self) -> dict:
@@ -238,11 +228,6 @@ class Engine:
             "forgetting": [t.receipts()
                            for t in self._installed.get("forgetting", {}).values()],
             "change_streams": self.capabilities.change_streams,
-            # Not the capability -- what the reactors actually did. A resume
-            # is routine; a lost window means deletes went uncollected and
-            # storage needs reconciling; unsupported means the handlers never
-            # ran at all. All three look identical without this.
-            "reactors": [r.health() for r in self._reactors],
             "time": {"tz": "UTC", "aware": True},
             "declared": {
                 "models": sorted(self._models),
@@ -263,7 +248,6 @@ __all__ = [
     "Memory", "MemorySpec",
     "Model",
     "JobQueue", "PermanentFailure", "backoff",
-    "Reactor",
     "ScopeRequired", "ScopeInvalid", "ScopeError", "FilterInvalid",
     "Trait", "kind_of", "collection_of",
     "now", "aware", "live", "living", "deadline", "bind", "UTC",

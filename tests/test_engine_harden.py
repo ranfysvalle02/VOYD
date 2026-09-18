@@ -9,7 +9,7 @@ from datetime import timedelta
 
 import pytest
 
-from voyd.engine import JobQueue, Reactor, ScopeRequired
+from voyd.engine import JobQueue, ScopeRequired
 from voyd.engine.capabilities import Capabilities
 from voyd.engine.errors import require_scope
 from voyd.engine.search import SearchSpec
@@ -85,21 +85,6 @@ async def test_a_crashed_worker_does_not_pin_the_job_forever(core):
     again = await q.claim()
     assert again is not None
     assert again["_id"] == held["_id"]
-
-
-async def test_reactor_does_not_pretend_a_failed_handler_succeeded():
-    r = Reactor(db=None, name="test")
-
-    @r.on("delete", "documents")
-    async def boom(_change):
-        raise RuntimeError("gc failed")
-
-    ok = await r._dispatch({
-        "operationType": "delete",
-        "ns": {"coll": "documents"},
-        "_id": "tok-1",
-    })
-    assert ok is False
 
 
 async def test_queue_ensure_builds_a_claim_index(core):

@@ -149,7 +149,7 @@ async def core():
 async def app():
     """The VOYD HTTP service on a throwaway database, dropped afterwards.
 
-    This is the full service: FastAPI, the store, embeddings, blob storage. Imported
+    This is the full service: FastAPI, the store, embeddings. Imported
     lazily so ``conftest`` itself does not pull the ``app`` extra -- an engine-only
     install can still collect and run the engine tests.
 
@@ -162,7 +162,7 @@ async def app():
     if not await _mongo_available(TEST_MONGO_URI):
         pytest.skip(f"no MongoDB at {TEST_MONGO_URI}")
 
-    from voyd import Intelligence, Storage, Store, Voyd
+    from voyd import Intelligence, Store, Voyd
     from voyd.web.vault import _passcode_limiter
 
     _passcode_limiter.clear()
@@ -170,8 +170,6 @@ async def app():
     voyd = Voyd(
         domain="voyd.test",
         store=Store.Mongo(TEST_MONGO_URI, db_name=db_name),
-        storage=Storage.R2(endpoint="https://example.invalid", key_id="k",
-                           secret_key="s", bucket="test"),
         intelligence=Intelligence.Voyage(api_key="vy-test"),
     )
     await voyd.store.connect()

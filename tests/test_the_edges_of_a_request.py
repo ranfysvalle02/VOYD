@@ -3,7 +3,7 @@
 `vault.py` opens by claiming that request bodies are Pydantic models "so a
 malformed call is refused before any row is written rather than half-way
 through the batch". That was true of the fields somebody thought to bound. A
-second adversarial pass found three that nobody had:
+second adversarial pass found two that nobody had:
 
 - ``ttl_seconds`` was unbounded above. A deadline becomes a ``datetime``, so
   ``now() + timedelta(seconds=10**15)`` raised ``OverflowError`` straight out
@@ -15,13 +15,12 @@ second adversarial pass found three that nobody had:
   the same row -- and 17MB raised ``DocumentTooLarge`` from the driver as
   another uncaught 500.
 
-- ``max_downloads`` accepted 0 and negatives over HTTP, while
-  ``Guard.max_downloads()`` had always refused anything below 1. The same
-  policy was rejected by the library and accepted by the API.
+Neither is a breach. Both are a 500 where a 422 belongs, or a documented
+bound that did not hold, which is the same class of "true in the place we
+tested" the rest of this suite exists to catch.
 
-None of the three is a breach. All three are a 500 where a 422 belongs, or a
-documented bound that did not hold, which is the same class of "true in the
-place we tested" the rest of this suite exists to catch.
+A third, ``max_downloads`` accepting 0 and negatives over HTTP while the
+library refused them, went away with the byte path it bounded.
 """
 
 from __future__ import annotations
@@ -125,28 +124,6 @@ async def test_unserialisable_metadata_is_refused_rather_than_stored(client, ns)
         json={"documents": [{"text": "x", "metadata": "not an object"}]},
         headers=ns)
     assert dropped.status_code == 200, dropped.text
-
-
-# ---- max_downloads ---------------------------------------------------
-
-@pytest.mark.parametrize("limit", [0, -1, -100])
-async def test_a_read_limit_below_one_is_refused_like_the_library_does(
-        client, ns, limit):
-    """`Guard.max_downloads()` raises below 1. The API now agrees.
-
-    A limit of 0 is not "unlimited" -- unlimited is omitting the field. Left
-    accepted, it stored a policy that refused every read with a 410, which is
-    a confusing way to spell "denied".
-    """
-    r = await client.post("/v1/voids", json={"max_downloads": limit},
-                          headers=ns)
-    assert r.status_code == 422, r.text
-    assert "max_downloads" in r.text
-
-
-async def test_a_read_limit_of_one_is_the_smallest_real_policy(client, ns):
-    r = await client.post("/v1/voids", json={"max_downloads": 1}, headers=ns)
-    assert r.status_code == 200, r.text
 
 
 # ---- the bounds that already existed, kept honest --------------------

@@ -107,43 +107,34 @@ async def test_a_document_cannot_be_added_to_a_foreign_scope(client, two_namespa
 
 @pytest.fixture
 async def guarded(client, two_namespaces):
-    """A passcode-protected scope with one blob-backed document, two reads."""
-    r = await client.post("/v1/voids",
-                          json={"passcode": "hunter2", "max_downloads": 2},
-                          headers=on("alpha", two_namespaces["alice_key"]))
+    """A passcode-protected scope holding one document."""
+    key = two_namespaces["alice_key"]
+    r = await client.post("/v1/voids", json={"passcode": "hunter2"},
+                          headers=on("alpha", key))
     token = r.json()["token"]
-    f = await client.post(f"/v1/voids/{token}/files",
-                          json={"name": "invoice.txt", "mime": "text/plain"},
-                          headers=on("alpha", two_namespaces["alice_key"]))
-    return {"token": token, "doc_id": f.json()["doc_id"], **two_namespaces}
+    await client.post(f"/v1/voids/{token}/documents",
+                      json={"documents": [{"text": "invoice 4491, overdue"}]},
+                      headers=on("alpha", key))
+    return {"token": token, **two_namespaces}
 
 
-async def test_a_download_without_the_passcode_is_refused(client, guarded):
-    """The link is shareable, so the guard is the only thing between a stranger
-    and the bytes. No key is required here -- that is the point."""
-    r = await client.get(
-        f"/v1/voids/{guarded['token']}/files/{guarded['doc_id']}",
-        headers=on("alpha"))
-    assert r.status_code == 401
+async def test_the_passcode_gates_the_only_way_in(client, guarded):
+    """A void is a retrieval boundary, and search is now the only way to
+    cross it. There used to be two doors -- query and download -- and the
+    rule was that gating one and not the other made search the way around
+    the lock. One door is fewer ways to leave it open.
 
-
-async def test_the_passcode_also_gates_search_inside_the_boundary(client, guarded):
-    """A void is a retrieval boundary, so reading it by query must be gated the
-    same way as reading it by download. Otherwise search is the way around."""
+    No API key is used here: the link is shareable, so the passcode is the
+    only thing between a stranger and the contents. That is the point.
+    """
     r = await client.post(f"/v1/voids/{guarded['token']}/search",
                           json={"query": "invoice"}, headers=on("alpha"))
     assert r.status_code == 401
 
-
-async def test_the_download_limit_is_enforced_on_the_byte_path(client, guarded):
-    """``max_downloads`` is a promise about the bytes, not a display field."""
-    headers = {**on("alpha"), "X-Passcode": "hunter2"}
-    url = f"/v1/voids/{guarded['token']}/files/{guarded['doc_id']}"
-
-    assert (await client.get(url, headers=headers)).status_code == 200
-    assert (await client.get(url, headers=headers)).status_code == 200
-    # 410 Gone, not 403: the allowance is spent, and no credential brings it back.
-    assert (await client.get(url, headers=headers)).status_code == 410, "spent"
+    # The accepted-passcode path is asserted in test_vault_validation.py,
+    # which stubs the embedder -- a successful search here would reach
+    # Voyage for real and fail on the test key, proving nothing about the
+    # guard.
 
 
 async def test_the_passcode_hash_never_leaves_the_process(client, guarded):

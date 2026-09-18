@@ -79,7 +79,7 @@ curl -X POST http://acme.voyd.com/v1/voids \
   -d '{"ttl_seconds": 3600}'
 # -> {"token": "k6kC2pJz", "expires": "2026-09-18T15:02:11+00:00"}
 
-# text straight in -- no bucket, no presign, no upload round trip
+# text straight in -- the only way in, and the only one worth having
 curl -X POST http://acme.voyd.com/v1/voids/k6kC2pJz/documents \
   -H "Authorization: Bearer $VOYD_KEY" \
   -d '{"documents": [{"text": "fault code P0301 on cylinder 1", "name": "scan.md"}]}'
@@ -128,9 +128,12 @@ vector outlives the document. The bytes outlive the row. The lifecycle rule was
 never applied to the new prefix. Now a deleted document is still answering
 queries, and nothing anywhere is wrong enough to page you.
 
-VOYD is one document with one `expire_at`, inherited by every row in the scope,
-collected by one TTL index — and the resulting delete event is itself what
-reclaims the bytes. One thing owns the deadline, so there is nothing to drift.
+VOYD is one document with one `expire_at`, inherited by every row in the
+scope, collected by one TTL index. One thing owns the deadline, so there is
+nothing to drift — and the bottom row of that table does not exist here at
+all, because the text is a field on the document rather than an object in a
+bucket. There is no second store to keep in step, which is a stronger answer
+than keeping it in step well.
 
 That fixes *who* owns the deadline. It does not fix *when* it takes effect,
 because deletion is eventually consistent no matter who owns it — which is the
@@ -336,13 +339,8 @@ surfaces are the JSON API, the MCP tools, and `import voyd`. An API key is
 the only credential. `*.localhost` resolves to `127.0.0.1` on macOS and most
 Linux with no `/etc/hosts` edits; otherwise send `-H 'X-Voyd: acme'`.
 
-R2 is only needed for the blob path — inline text needs no object storage at
-all. Leave `VOYD_R2_*` unset and the service boots on `NullStorage`: documents,
-search and the deadline all work, and the three blob endpoints answer
-`501 Not Implemented` rather than handing out a presigned URL to a bucket that
-does not exist. The `r2` extra is only imported when you configure it, so
-`pip install 'voyd[app]'` is enough to run. Voyage is only needed to compute
-embeddings.
+Voyage is only needed to compute embeddings, and only until a deployment
+can do it server-side — see `auto_embed`.
 
 ## Examples, in order
 
@@ -418,30 +416,6 @@ curl -s localhost:8000/healthz | jq .search
 # }
 ```
 
-The same rule applies to the part that has no results to look wrong: a change
-stream. A reactor that resumed after a primary election is healthy, a reactor
-whose resume token aged out of the oplog window has dropped deletes on the
-floor, and a reactor on a deployment that cannot do change streams has never
-run at all — and from outside the process all three look exactly like a quiet
-database.
-
-```bash
-curl -s localhost:8000/healthz | jq '.reactors[0]'
-# {
-#   "name": "voyd-gc",
-#   "watching": ["delete:documents", "delete:voids"],
-#   "events_dispatched": 41,
-#   "resumes": 2,           # elections and blips: routine, ignore
-#   "windows_lost": 0,      # >0 means deletes went uncollected: reconcile storage
-#   "events_skipped": 0,    # poison events dropped after 3 handler failures
-#   "unsupported": false    # true means no handler has ever run
-# }
-```
-
-`windows_lost` is deliberately not counted as a `resume`, so an alert on it
-cannot be drowned out by ordinary failover noise. Each of those was previously
-a single log line, and a log line is not something you can page on.
-
 Startup blocks until indexes are queryable, because a `$vectorSearch` against a
 building index returns **zero rows instead of raising** — indistinguishable from
 an empty scope.
@@ -507,17 +481,21 @@ while it rebuilds.
 | Primitive | Replaces | Where |
 |---|---|---|
 | TTL indexes | a lifecycle rule + a cron reaper | `engine.expiry` |
-| Change streams + pre-images | a GC queue | `engine.reactor` → blob delete |
 | `$rankFusion` (8.1+) | a reranker + score glue | `engine.search` |
 | `$vectorSearch` + `$search` | Pinecone + Elasticsearch | same index |
 | `find_one_and_update` | Celery + Redis | `engine.jobs` |
 | Search index filters | scope checks you remember to write | both `$rankFusion` legs |
 
-No Redis. No Kafka. No Elasticsearch. No vector database. One connection string.
+No Redis. No Kafka. No Elasticsearch. No vector database. No object storage.
+One connection string.
 
-The limits are the product: the reactor is not Kafka — no consumer groups, no
-fan-out, no replay past the oplog window, at-least-once delivery. A handler that
-runs twice must be idempotent.
+That last one used to be untrue. Documents could arrive as presigned uploads
+to R2, which meant bytes to reclaim when a deadline passed, which meant a
+change stream over deletes to reclaim them, which meant pre-images, resume
+tokens, and a reactor that had to survive primary elections. All of it was
+machinery for keeping a second store in step with the first. Text is a field
+on the row now, so a deleted document leaves nothing behind and the TTL
+reaper is the whole of garbage collection.
 
 ## Numbers
 
@@ -598,8 +576,6 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 | An unreadable deadline fails closed too | a `datetime.max` that cannot be shifted to UTC is dead, not an exception |
 | The embedding leaves with the document | after the reaper runs, no vector survives its row |
 | Pinning is the absence of a deadline | a null `expire_at` sibling survives in the same collection |
-| Text needs no object storage | ingest passes with storage pointed at an unroutable host |
-| No object storage is a configuration, not a fork | `voyd.app` imports with the `r2` extra made unimportable; inline ingest + search run on `NullStorage` |
 | The void is the retrieval boundary | a sibling scope's doc is not a hit, on both `$rankFusion` legs |
 | A tenant id cannot be an operator | `{"$ne": ...}` in the tenant position is refused on all three tiers, not served |
 | Search cannot walk around the lock | a passcode-gated scope refuses to be queried |
@@ -615,7 +591,6 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 | Forgetting is not deletion renamed | after `forget`, `describe` reports 0 and the rows are still on disk |
 | A stale index cannot pass for a current one | a changed spec is corrected, or named in `stale_indexes` |
 | Atlas filling in its own index defaults is not drift | or every start-up would rewrite every index |
-| The blob path is genuinely optional | the inline path works end to end against `NullStorage` |
 
 ## Security
 
@@ -638,9 +613,9 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
   not a bound. In-process, therefore per-replica: the honest trade for not
   needing Redis, and the first thing to fix on more than one process.
 - CORS is wildcard-open on `/v1`, which is the whole public surface.
-- On the blob path, bytes never traverse the API: clients PUT/GET presigned URLs.
-  With no object storage configured that path is closed at the door (501), not
-  papered over with placeholder credentials that presign against nothing.
+- There is no byte path and no object storage, so there are no presigned URLs
+  to leak, no bucket policy to get wrong, and nothing to reclaim out of band
+  when a scope expires.
 
 ## License
 

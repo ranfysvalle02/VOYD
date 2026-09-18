@@ -38,7 +38,7 @@ from datetime import datetime
 from typing import Any
 
 from bson import ObjectId
-from pymongo import AsyncMongoClient, ReturnDocument
+from pymongo import AsyncMongoClient
 from pymongo.errors import CollectionInvalid, OperationFailure
 
 from ..config import MongoConfig
@@ -72,27 +72,6 @@ PREIMAGE_UNSUPPORTED_CODES = {
 # How many times a failing embed job is retried before it is parked as an error.
 MAX_EMBED_ATTEMPTS = 5
 
-# Text-like MIME types we will embed. Everything else is stored but not indexed.
-TEXT_LIKE_PREFIXES = ("text/",)
-TEXT_LIKE_EXACT = {
-    "application/json",
-    "application/xml",
-    "application/x-yaml",
-    "application/yaml",
-    "application/markdown",
-    "application/x-tex",
-    "application/javascript",
-    "application/sql",
-}
-
-
-def is_text_like(mime: str | None) -> bool:
-    if not mime:
-        return False
-    m = mime.split(";")[0].strip().lower()
-    return m.startswith(TEXT_LIKE_PREFIXES) or m in TEXT_LIKE_EXACT
-
-
 class MongoStore:
     """The durable half of VOYD. Owns no HTTP and no opinions about surfaces."""
 
@@ -101,10 +80,6 @@ class MongoStore:
         self.client: AsyncMongoClient | None = None
         self.db = None
         self.engine: Engine | None = None
-        # None = not yet attempted. False = delete events will not carry the
-        # pre-image, so blob GC cannot know which key to reclaim. Ops reports
-        # this rather than letting a silent no-op look like an idle GC worker.
-        self.pre_images: bool | None = None
         # Built in _declare(), once the engine exists.
         self.forgetting_documents = None
         self.forgetting_voids = None
@@ -153,7 +128,7 @@ class MongoStore:
 
         # Ensure collections exist so we can enable pre-images for GC.
         existing = set(await db.list_collection_names())
-        for name in ("owners", "voyds", "voids", "documents", "ops"):
+        for name in ("owners", "voyds", "voids", "documents"):
             if name not in existing:
                 try:
                     await db.create_collection(name)
@@ -179,37 +154,8 @@ class MongoStore:
         await db.documents.create_index([("indexed", 1)])
         await db.documents.create_index("expire_at", expireAfterSeconds=0)
 
-        # Change-stream pre-images let delete events carry the object key for R2
-        # GC. If this silently fails, blob GC never reclaims anything and looks
-        # exactly like an idle GC worker -- a bill that grows forever with no log
-        # line. So the outcome is always stated, and recorded on ``pre_images``.
-        await self._enable_pre_images()
-
         if self.search:
             await self._ensure_search_indexes(vector_dimensions)
-
-    async def _enable_pre_images(self) -> None:
-        """Turn on ``changeStreamPreAndPostImages`` for the GC-relevant
-        collections, and say out loud whether it worked."""
-        db = self.db
-        for name in ("voids", "documents"):
-            try:
-                await db.command({"collMod": name,
-                                  "changeStreamPreAndPostImages": {"enabled": True}})
-            except OperationFailure as exc:
-                self.pre_images = False
-                if exc.code in PREIMAGE_UNSUPPORTED_CODES:
-                    log.info("change-stream pre-images unsupported on this "
-                             "deployment (%s): blob GC via change stream is "
-                             "disabled; expired voids will leave objects in R2. "
-                             "Run a replica set to enable it.",
-                             (exc.details or {}).get("codeName", exc))
-                else:
-                    log.error("could not enable change-stream pre-images on %s "
-                              "(%s): blob GC will not reclaim objects", name,
-                              (exc.details or {}).get("codeName", exc))
-                return
-        self.pre_images = True
 
     def _declare(self, dims: int) -> None:
         """Everything this app wants MongoDB to maintain, in one place.
@@ -365,42 +311,11 @@ class MongoStore:
         return await self.forgetting_voids.find(
             {"voyd_id": voyd_id}, sort=("created_at", -1))
 
-    async def claim_download(self, voyd_id: ObjectId, token: str,
-                             limit: int | None) -> bool:
-        """Consume one download against the void's allowance. Atomically.
-
-        Reading ``download_count`` and then incrementing it is a TOCTOU: two
-        concurrent readers both see ``limit - 1``, both pass the guard, and
-        both increment -- so a void with ``max_downloads: 10`` serves 11.
-        Measured: limit 3, twelve concurrent readers, four served.
-
-        So the limit goes *into the filter*. The increment only happens for a
-        request that actually held a slot, which is the same
-        ``find_one_and_update`` discipline the job queue uses -- and, unlike a
-        Python-side check, it holds across replicas.
-
-        Returns False when the allowance is spent, which the caller turns into
-        a 410. An absent ``download_count`` counts as zero: ``$inc`` creates
-        it, and a void created before this field existed must not be
-        immortal.
-        """
-        q: dict[str, Any] = {"voyd_id": voyd_id, "token": token}
-        if limit is not None:
-            q["$or"] = [
-                {"download_count": {"$lt": int(limit)}},
-                {"download_count": {"$exists": False}},
-            ]
-        doc = await self.db.voids.find_one_and_update(
-            q, {"$inc": {"download_count": 1}},
-            return_document=ReturnDocument.AFTER,
-        )
-        return doc is not None
-
     # ---- documents -----------------------------------------------------
     #
-    # One row per document, whether the text arrived inline or came from a
-    # blob. ``indexed: False`` is the embed job. ``expire_at`` is inherited
-    # from the void, so the row and its vector die with the scope.
+    # One row per document. ``indexed: False`` is the embed job.
+    # ``expire_at`` is inherited from the void, so the row and its vector die
+    # with the scope.
 
     def _doc(self, voyd_id: ObjectId, token: str, doc_id: str, *,
              name: str, expire_at: datetime | None, **extra) -> dict:
@@ -410,14 +325,12 @@ class MongoStore:
             "doc_id": doc_id,
             "name": name,
             "text": None,
-            "key": None,
-            "mime": None,
             "size": None,
             "metadata": {},
             "indexed": False,
             "embedding": None,
-            # The document inherits the void's deadline: text, vector and bytes
-            # expire together or the boundary is a lie.
+            # The document inherits the void's deadline: the text and its
+            # vector expire together, because they are one row.
             "expire_at": expire_at,
             "created_at": _utcnow(),
             **extra,
@@ -426,45 +339,21 @@ class MongoStore:
     async def add_document(self, voyd_id: ObjectId, token: str, doc_id: str, *,
                            text: str, name: str, metadata: dict | None = None,
                            expire_at: datetime | None = None) -> dict:
-        """Text straight in. No blob, no presign, no upload round trip.
+        """Text straight in. The only way in, and formerly the primary of two.
 
-        This is the primary path: the caller already has the text, so making
-        it stage bytes in object storage just to get them embedded would add a
-        round trip and a failure mode for nothing.
+        The alternative was a presigned upload to object storage, read back
+        by the embed worker. It bought a round trip, a second failure mode,
+        and a second thing to reclaim when the deadline passed. Callers of a
+        retrieval scope have the text.
         """
         doc = self._doc(voyd_id, token, doc_id, name=name, expire_at=expire_at,
                         text=text, metadata=metadata or {},
-                        mime="text/plain", size=len(text.encode("utf-8")))
+                        size=len(text.encode("utf-8")))
         await self.db.documents.insert_one(doc)
         await self.db.voids.update_one(
             {"voyd_id": voyd_id, "token": token}, {"$inc": {"doc_count": 1}}
         )
         return doc
-
-    async def create_file(self, voyd_id: ObjectId, token: str, doc_id: str, *,
-                          name: str, key: str, mime: str,
-                          expire_at: datetime | None) -> dict:
-        """The blob path: a document whose text will be read from storage.
-
-        Still one row in one collection -- retrieval must not care whether the
-        text arrived inline or came out of a bucket.
-        """
-        doc = self._doc(voyd_id, token, doc_id, name=name, expire_at=expire_at,
-                        key=key, mime=mime,
-                        indexed=False if is_text_like(mime) else "skip")
-        await self.db.documents.insert_one(doc)
-        await self.db.voids.update_one(
-            {"voyd_id": voyd_id, "token": token}, {"$inc": {"doc_count": 1}}
-        )
-        return doc
-
-    async def complete_file(self, voyd_id: ObjectId, token: str, doc_id: str,
-                            *, size: int | None) -> dict | None:
-        return await self.db.documents.find_one_and_update(
-            {"voyd_id": voyd_id, "token": token, "doc_id": doc_id},
-            {"$set": {"size": size, "completed_at": _utcnow()}},
-            return_document=ReturnDocument.AFTER,
-        )
 
     async def forget_documents(self, voyd_id: ObjectId, token: str, *,
                                doc_ids: list[str] | None = None,
@@ -610,13 +499,3 @@ class MongoStore:
             flt["token"] = token
         return flt
 
-    # ---- ops singleton (change-stream resume token) -------------------
-
-    async def get_resume_token(self) -> Any:
-        doc = await self.db.ops.find_one({"_id": "change_stream"})
-        return doc.get("resume_token") if doc else None
-
-    async def set_resume_token(self, token: Any) -> None:
-        await self.db.ops.update_one(
-            {"_id": "change_stream"}, {"$set": {"resume_token": token}}, upsert=True
-        )

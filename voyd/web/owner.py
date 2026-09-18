@@ -15,7 +15,6 @@ from pymongo.errors import DuplicateKeyError
 from ..auth import new_api_key
 from ..guards import compile_guard_defaults
 from ..slugs import RESERVED_SLUGS, SLUG_RE
-from ..storage import transient_storage_errors
 from .deps import get_engine, hash_api_key, jsonify, require_apex, require_owner
 
 log = logging.getLogger("voyd.web.owner")
@@ -91,11 +90,8 @@ async def delete_voyd(request: Request, slug: str, owner: dict = Depends(require
     if voyd.get("owner_id") != owner["_id"]:
         raise HTTPException(403, "You do not own this voyd.")
     await engine.store.delete_voyd(slug)
-    # Best-effort byte cleanup for the whole namespace.
-    try:
-        await engine.storage.delete_prefix(engine.storage.voyd_prefix(slug))
-    except transient_storage_errors() as exc:
-        # The voyd is already gone from Mongo, so the delete still succeeded --
-        # but orphaned bytes keep costing money and must be findable.
-        log.warning("could not reclaim objects for voyd %s: %s", slug, exc)
+    # Nothing to reclaim elsewhere: the documents and their vectors are rows
+    # in the same database, so deleting the namespace deletes them. This used
+    # to be followed by a best-effort sweep of an object store, which is the
+    # kind of second cleanup call that fails quietly and bills monthly.
     return {"deleted": slug}

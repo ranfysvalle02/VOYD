@@ -53,7 +53,7 @@ on queries and on bytes alike.
     hits = await mem.recall(session, qvec, text="E_QUOTA_429")
 
 ``Engine`` is the core -- ``pip install voyd`` is Engine and a MongoDB driver,
-and importing it does not load FastAPI, R2, or Voyage. ``Voyd`` is the HTTP
+and importing it does not load FastAPI or Voyage. ``Voyd`` is the HTTP
 service built on it, and needs the ``app`` extra. :mod:`voyd.mcp` is the same
 API as four agent tools, none of which is a delete.
 """
@@ -72,7 +72,6 @@ _LAZY_EXPORTS = {
     "Voyd": (".app", "Voyd"),
     "Guard": (".guards", "Guard"),
     "Intelligence": (".intelligence", "Intelligence"),
-    "Storage": (".storage", "Storage"),
     "Store": (".store", "Store"),
 }
 
@@ -92,6 +91,6 @@ def __dir__():
 
 __all__ = [
     "Engine", "PermanentFailure",
-    "Voyd", "Store", "Storage", "Intelligence", "Guard",
+    "Voyd", "Store", "Intelligence", "Guard",
     "__version__",
 ]

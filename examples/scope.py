@@ -35,7 +35,7 @@ async def main() -> None:
     token = scope["token"]
     print(f"scope {token} expires {scope['expires']}")
 
-    # 2. Text straight in. No bucket, no presign, no upload round trip.
+    # 2. Text straight in. It is a field on the row, not an upload.
     await voyd.add(token, NOTES)
 
     # 3. Embedding is asynchronous, so wait for the index rather than

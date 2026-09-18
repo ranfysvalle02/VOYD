@@ -1,7 +1,7 @@
 """Configuration value objects for VOYD.
 
 These are plain dataclasses returned by the public constructors
-(``Store.Mongo``, ``Storage.R2``, ``Intelligence.Voyage``, ``Guard.*``).
+(``Store.Mongo``, ``Intelligence.Voyage``, ``Guard.*``).
 They carry no behaviour beyond holding validated settings so the rest of the
 engine can stay dependency-light and easy to test.
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-GuardKind = Literal["require_passcode", "max_downloads"]
+GuardKind = Literal["require_passcode"]
 
 
 @dataclass(frozen=True)
@@ -24,20 +24,6 @@ class MongoConfig:
     # There is deliberately no ``looks_like_atlas`` here. Guessing capability
     # from the URI is what made Atlas Local "not Atlas" for months, silently.
     # Capability is probed -- see ``voyd.engine.capabilities.detect``.
-
-
-@dataclass(frozen=True)
-class R2Config:
-    """Cloudflare R2 (S3-compatible) settings.
-
-    Secrets live only in the process environment/config, never in MongoDB.
-    """
-
-    endpoint: str
-    key_id: str
-    secret_key: str
-    bucket: str
-    region: str = "auto"
 
 
 @dataclass(frozen=True)

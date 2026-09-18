@@ -148,18 +148,6 @@ async def test_permanent_failure_skips_the_retries(core):
     assert await q.claim() is None
 
 
-async def test_reactor_registers_handlers_for_any_collection(core):
-    app, _ = core
-    reactor = app.reactor(name="recipes-gc")
-
-    @reactor.on("delete", "recipes")
-    async def on_delete(change):
-        pass
-
-    ops, colls = reactor.watches()
-    assert ops == {"delete"} and colls == {"recipes"}
-
-
 async def test_health_reports_the_tier_for_any_app(recipes):
     app, _ = recipes
     health = app.health()

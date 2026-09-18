@@ -1,7 +1,7 @@
 """The product: open a scope, put documents in it, query it, forget it exists.
 
 A void is a vector index with a TTL, and a read path that refuses what it has
-forgotten. Five calls are the whole API:
+forgotten. Five calls are the whole API, and text goes in as text:
 
     POST /v1/voids                      open a scope with a deadline
     POST /v1/voids/{token}/documents    text straight in, no upload dance
@@ -13,10 +13,6 @@ The fifth is the only destructive-sounding one and it deletes nothing: it
 gives facts a deadline in the past, so the TTL index that already collects
 expired scopes collects these too. There is no erasure subsystem because an
 erasure request is a deadline that has already passed.
-
-Everything else here is the blob path -- presigned PUT/GET for callers whose
-text is already sitting in object storage. It lands in the same rows, because
-retrieval must not care where the bytes came from.
 
 Search is always filtered by ``voyd_id``, and narrowed to ``token`` when the
 caller scoped it to one void. Both filters are pushed into the search index --
@@ -40,11 +36,9 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ..guards import (GuardError, build_void_policy, enforce_download,
-                      enforce_query)
+from ..guards import GuardError, build_void_policy, enforce_query
 from ..ratelimit import RateLimiter, client_ip
 from ..engine.search import MAX_LIMIT as SEARCH_MAX_LIMIT
-from ..store.mongo import is_text_like
 from .deps import get_current_voyd, get_engine, jsonify, require_voyd_owner
 
 router = APIRouter(prefix="/v1")
@@ -149,10 +143,6 @@ class CreateVoidRequest(BaseModel):
     # should get a 422, not a 500.
     ttl_seconds: int | None = Field(default=None, le=MAX_TTL_SECONDS)
     passcode: str | None = None
-    # `Guard.max_downloads()` has always refused a limit below 1; the HTTP path
-    # did not, so the same policy was rejected by the library and accepted by
-    # the API. A limit of 0 is not "unlimited" -- unlimited is null.
-    max_downloads: int | None = Field(default=None, ge=1)
 
 
 class DocumentIn(BaseModel):
@@ -216,33 +206,6 @@ class AddDocumentsRequest(BaseModel):
         return data
 
 
-class AddFileRequest(BaseModel):
-    """The blob handshake: we need a name to presign against, nothing else."""
-
-    name: str
-    mime: str = "application/octet-stream"
-
-    @field_validator("name")
-    @classmethod
-    def _name_is_required(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("name is required.")
-        return v
-
-    @field_validator("mime", mode="before")
-    @classmethod
-    def _default_mime(cls, v) -> str:
-        return (v or "application/octet-stream").strip() if isinstance(
-            v, (str, type(None))) else v
-
-
-class CompleteFileRequest(BaseModel):
-    """``size`` is only a hint: storage is asked first and wins if it answers."""
-
-    size: int | None = None
-
-
 class ForgetRequest(BaseModel):
     """What to forget. Omitting ``doc_ids`` forgets the whole scope."""
 
@@ -286,7 +249,6 @@ async def create_void(request: Request,
         policy = build_void_policy(
             voyd.get("guards"),
             passcode=body.passcode,
-            max_downloads=body.max_downloads,
         )
     except GuardError as e:
         raise HTTPException(e.status_code, e.detail)
@@ -367,96 +329,6 @@ async def add_documents(request: Request, token: str,
 
 # ---- the blob path (text already in object storage) --------------------
 
-NO_BYTE_PATH = (
-    "This deployment has no object storage, so the byte path is not offered. "
-    "Send the text inline: POST /v1/voids/{token}/documents.")
-
-
-def _require_byte_path(engine) -> None:
-    """Refuse the blob endpoints when the deployment has no bucket.
-
-    501 rather than 409: nothing about the void's state is in conflict, and no
-    retry or state change makes this call work -- the *server* does not
-    implement the byte path here. 404 would be a lie (the void exists), and a
-    500 would claim we broke, when in fact we are answering correctly.
-    """
-    if not engine.storage.offers_bytes:
-        raise HTTPException(501, NO_BYTE_PATH)
-
-
-@router.post("/voids/{token}/files")
-async def add_file(request: Request, token: str,
-                   body: AddFileRequest = Body(...),
-                   voyd: dict = Depends(require_voyd_owner)):
-    engine = get_engine(request)
-    _require_byte_path(engine)
-    void = await engine.store.get_void(voyd["_id"], token)
-    if not void:
-        raise HTTPException(404, "void not found.")
-
-    name, mime = body.name, body.mime
-    doc_id = secrets.token_hex(8)
-    key = engine.storage.key_for(voyd["slug"], token, doc_id)
-
-    await engine.store.create_file(
-        voyd["_id"], token, doc_id, name=name, key=key, mime=mime,
-        expire_at=void.get("expire_at"),
-    )
-    upload_url = await engine.storage.presign_put(key, content_type=mime)
-    return {"doc_id": doc_id, "key": key, "upload_url": upload_url,
-            "will_index": is_text_like(mime)}
-
-
-@router.post("/voids/{token}/files/{doc_id}/complete")
-async def complete_file(request: Request, token: str, doc_id: str,
-                        body: CompleteFileRequest = Body(
-                            default_factory=CompleteFileRequest),
-                        voyd: dict = Depends(require_voyd_owner)):
-    engine = get_engine(request)
-    _require_byte_path(engine)
-    f = await engine.store.get_document(voyd["_id"], token, doc_id)
-    if not f:
-        raise HTTPException(404, "file not found.")
-
-    head = await engine.storage.head(f["key"])
-    size = head["size"] if head else body.size
-    updated = await engine.store.complete_file(voyd["_id"], token, doc_id, size=size)
-    return {"file": jsonify(updated), "confirmed_in_storage": head is not None}
-
-
-@router.get("/voids/{token}/files/{doc_id}")
-async def download_file(request: Request, token: str, doc_id: str,
-                        voyd: dict = Depends(get_current_voyd)):
-    """Guard-gated download. No owner required: share the link + passcode."""
-    engine = get_engine(request)
-    _require_byte_path(engine)
-    void = await engine.store.get_void(voyd["_id"], token)
-    if not void:
-        raise HTTPException(404, "void not found.")
-    f = await engine.store.get_document(voyd["_id"], token, doc_id)
-    if not f:
-        raise HTTPException(404, "file not found.")
-
-    # Two steps, in this order, for two different reasons. The guard runs
-    # first so a wrong passcode is a 401 that costs nothing: if the allowance
-    # were consumed before the credential was checked, a stranger with the
-    # link could spend a legitimate reader's downloads. It reads the count it
-    # already has, which makes the common "already spent" case a clean 410.
-    _gate_read(request, voyd, token, void, lambda policy: enforce_download(
-        policy, void.get("download_count", 0),
-        passcode=_passcode_from(request)))
-
-    # Then the slot is claimed atomically, because the check above raced: the
-    # count it read is stale the moment another reader arrives. This is the
-    # decision, and it is the one that holds across replicas.
-    if not await engine.store.claim_download(
-            voyd["_id"], token, (void.get("guards") or {}).get("max_downloads")):
-        raise HTTPException(410, "Download limit reached for this void.")
-
-    url = await engine.storage.presign_get(f["key"], filename=f["name"])
-    return {"download_url": url, "filename": f["name"]}
-
-
 @router.post("/voids/{token}/forget")
 async def forget(request: Request, token: str,
                  body: ForgetRequest = Body(default=ForgetRequest()),
@@ -471,9 +343,9 @@ async def forget(request: Request, token: str,
     Which is the whole design collapsing into one field. Forgetting a fact is
     giving it a deadline in the past -- the same ``expire_at`` the scope
     already uses -- so a subject erasure request and an ordinary expiry are
-    the same mechanism, collected by the same TTL index, with the same change
-    stream event reclaiming the same bytes. There is no erasure subsystem
-    because an erasure request is a deadline that has already passed.
+    the same mechanism, collected by the same TTL index. There is no erasure
+    subsystem because an erasure request is a deadline that has already
+    passed.
 
     The response reports when the fact stopped being reachable, because that
     is the timestamp somebody will eventually have to defend -- not the one
@@ -562,11 +434,5 @@ async def _present_matches(engine, matches: list[dict], *,
         if text:
             hit["text"] = text[:snippet_chars]
             hit["truncated"] = len(text) > snippet_chars
-        # ``offers_bytes`` guards the presign: a row can carry a key from
-        # before object storage was removed, and one such hit must not turn a
-        # whole search response into an error.
-        if m.get("key") and engine.storage.offers_bytes:
-            hit["download_url"] = await engine.storage.presign_get(
-                m["key"], filename=m.get("name"))
         out.append(hit)
     return out

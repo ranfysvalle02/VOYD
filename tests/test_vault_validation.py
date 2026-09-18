@@ -96,21 +96,6 @@ async def test_the_right_passcode_clears_the_count(client, gated):
             headers=gated["ns"])).status_code == 401
 
 
-async def test_the_download_path_shares_the_same_bound(client, gated):
-    """Search and download are the same boundary, so one of them cannot be the
-    unmetered way in."""
-    f = await client.post(f"/v1/voids/{gated['token']}/files",
-                          json={"name": "invoice.txt", "mime": "text/plain"},
-                          headers=gated["headers"])
-    url = f"/v1/voids/{gated['token']}/files/{f.json()['doc_id']}"
-
-    for _ in range(10):
-        assert (await client.get(
-            url, headers={**gated["ns"], "X-Passcode": "wrong"})).status_code == 401
-    assert (await client.get(
-        url, headers={**gated["ns"], "X-Passcode": "wrong"})).status_code == 429
-
-
 async def test_an_ungated_void_is_never_rate_limited(client, public):
     """Throttling public traffic would buy no security and cost availability."""
     url = f"/v1/voids/{public['token']}/search"

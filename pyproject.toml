@@ -28,18 +28,14 @@ app = [
 voyage = [
     "voyageai>=0.3.2",
 ]
-# The vault byte-path. S3-compatible blob storage.
-r2 = [
-    "aioboto3>=13.0",
-]
 # The MCP server: four tools, so any agent runtime is a channel not a rival.
 mcp = [
     "mcp>=2.0",           # 2.x: FastMCP was renamed MCPServer
     "httpx>=0.27",
 ]
-# Everything: the HTTP service + embeddings + blobs + the MCP server.
+# Everything: the HTTP service + embeddings + the MCP server.
 all = [
-    "voyd[app,voyage,r2,mcp]",
+    "voyd[app,voyage,mcp]",
 ]
 # The drift exhibit only: the four-owners stack it argues against. Not
 # needed to run VOYD, and deliberately not in `all` -- nothing VOYD ships

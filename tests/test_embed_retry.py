@@ -37,21 +37,12 @@ class BrokenIntelligence:
         raise RuntimeError("Provided API key is invalid.")
 
 
-class FakeStorage:
-    """The bytes are in R2 in production; here they are a dict. The worker only
-    ever asks for a bounded text window, which is the whole coupling."""
-
-    def __init__(self, text="brake pad replacement"):
-        self.text = text
-
-    async def get_text_window(self, key, max_bytes=None):
-        return self.text
-
-
-async def seed_job(store, name="notes.txt"):
+async def seed_job(store, name="notes.txt", text="brake pad replacement"):
+    """A document is the job. The text is on the row -- there is nowhere else
+    it could be, now that the blob path is gone."""
     res = await store.db.documents.insert_one({
         "voyd_id": ObjectId(), "token": "tok", "doc_id": ObjectId().binary.hex(),
-        "name": name, "key": f"k/{name}", "mime": "text/plain",
+        "name": name, "text": text,
         "indexed": False, "embedding": None,
     })
     return res.inserted_id
@@ -59,7 +50,7 @@ async def seed_job(store, name="notes.txt"):
 
 async def test_a_failed_embed_is_retried_not_consumed(app):
     store = app.store
-    ops = Ops(store, FakeStorage(), BrokenIntelligence())
+    ops = Ops(store, BrokenIntelligence())
     job_id = await seed_job(store)
 
     assert await ops._embed_tick() is True
@@ -73,7 +64,7 @@ async def test_a_valid_key_later_backfills_what_the_bad_key_failed(app):
     store = app.store
     job_id = await seed_job(store)
 
-    broken = Ops(store, FakeStorage(), BrokenIntelligence())
+    broken = Ops(store, BrokenIntelligence())
     await broken._embed_tick()
     failed = await store.db.documents.find_one({"_id": job_id})
     assert failed["indexed"] is False and failed["embedding"] is None
@@ -82,7 +73,7 @@ async def test_a_valid_key_later_backfills_what_the_bad_key_failed(app):
         async def embed_document(self, text):
             return [0.5] * 1024
 
-    await Ops(store, FakeStorage(), Working())._embed_tick()
+    await Ops(store, Working())._embed_tick()
     doc = await store.db.documents.find_one({"_id": job_id})
     assert doc["indexed"] is True
     assert doc["embedding"] == [0.5] * 1024
@@ -91,7 +82,7 @@ async def test_a_valid_key_later_backfills_what_the_bad_key_failed(app):
 async def test_a_hopeless_job_is_eventually_parked(app):
     """Retrying must be bounded, or one poisoned document blocks the queue."""
     store = app.store
-    ops = Ops(store, FakeStorage(), BrokenIntelligence())
+    ops = Ops(store, BrokenIntelligence())
     job_id = await seed_job(store)
 
     for _ in range(MAX_EMBED_ATTEMPTS + 2):
@@ -105,8 +96,8 @@ async def test_a_hopeless_job_is_eventually_parked(app):
 async def test_empty_text_is_permanent_not_retried(app):
     """Nothing to embed is the document's own property: no point retrying."""
     store = app.store
-    ops = Ops(store, FakeStorage(text="   "), BrokenIntelligence())
-    job_id = await seed_job(store, name="blank.txt")
+    ops = Ops(store, BrokenIntelligence())
+    job_id = await seed_job(store, name="blank.txt", text="   ")
 
     assert await ops._embed_tick() is True
     doc = await store.db.documents.find_one({"_id": job_id})
@@ -115,7 +106,7 @@ async def test_empty_text_is_permanent_not_retried(app):
 
 
 async def test_repeated_failures_back_off(app):
-    ops = Ops(app.store, FakeStorage(), BrokenIntelligence(), poll_interval=2.0)
+    ops = Ops(app.store, BrokenIntelligence(), poll_interval=2.0)
     assert ops._embed_pause == 2.0
     ops._embed_failures = 5
     assert ops._embed_pause > 2.0

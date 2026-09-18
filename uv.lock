@@ -2835,7 +2835,6 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
-    { name = "aioboto3" },
     { name = "argon2-cffi" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -2866,9 +2865,6 @@ mcp = [
     { name = "httpx" },
     { name = "mcp" },
 ]
-r2 = [
-    { name = "aioboto3" },
-]
 voyage = [
     { name = "voyageai" },
 ]
@@ -2876,7 +2872,6 @@ voyage = [
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", marker = "extra == 'drift'", specifier = ">=13.0" },
-    { name = "aioboto3", marker = "extra == 'r2'", specifier = ">=13.0" },
     { name = "argon2-cffi", marker = "extra == 'app'", specifier = ">=23.1" },
     { name = "asyncpg", marker = "extra == 'drift'", specifier = ">=0.29" },
     { name = "fastapi", marker = "extra == 'app'", specifier = ">=0.115" },
@@ -2891,9 +2886,9 @@ requires-dist = [
     { name = "qdrant-client", marker = "extra == 'drift'", specifier = ">=1.9" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'app'", specifier = ">=0.30" },
     { name = "voyageai", marker = "extra == 'voyage'", specifier = ">=0.3.2" },
-    { name = "voyd", extras = ["app", "voyage", "r2", "mcp"], marker = "extra == 'all'" },
+    { name = "voyd", extras = ["app", "voyage", "mcp"], marker = "extra == 'all'" },
 ]
-provides-extras = ["app", "voyage", "r2", "mcp", "all", "drift", "dev"]
+provides-extras = ["app", "voyage", "mcp", "all", "drift", "dev"]
 
 [[package]]
 name = "watchfiles"

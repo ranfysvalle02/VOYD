@@ -18,7 +18,6 @@ from .config import GuardSpec
 from .host import VoydHostMiddleware
 from .intelligence.voyage import VoyageIntelligence
 from .ops import Ops
-from .storage.base import ObjectStorage
 from .store.mongo import MongoStore
 from .web import owner, vault
 
@@ -37,13 +36,12 @@ class ApiCORSMiddleware(CORSMiddleware):
 
 
 class Voyd:
-    def __init__(self, *, store: MongoStore, storage: ObjectStorage,
+    def __init__(self, *, store: MongoStore,
                  intelligence: VoyageIntelligence,
                  domain: str = "voyd.com",
                  guards: list[GuardSpec] | None = None,
                  allow_signup: bool = True):
         self.store = store
-        self.storage = storage
         self.intelligence = intelligence
         self.domain = domain
         self.guard_specs = guards or []
@@ -58,7 +56,7 @@ class Voyd:
             await self.store.connect()
             await self.store.ensure_schema(
                 vector_dimensions=self.intelligence.config.dimensions)
-            self.ops = Ops(self.store, self.storage, self.intelligence)
+            self.ops = Ops(self.store, self.intelligence)
             self.ops.start()
             try:
                 yield
