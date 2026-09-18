@@ -9,9 +9,23 @@ the caller is a model, not a person with a browser.
     add(documents)              text straight in
     search(query)               query inside the boundary
     describe()                  what is in it, and how much is queryable
+    forget(doc_ids, reason)     make facts unreachable now
 
-There is deliberately no ``delete`` tool. A scope has a deadline; an agent
-that has to remember to clean up is the failure this exists to remove.
+There is deliberately no ``delete`` tool, and ``forget`` is not one wearing a
+different name -- which is the distinction worth being precise about, because
+the surface looks similar and the promise is not.
+
+A delete tool would hand the agent a cleanup obligation, and an agent that has
+to remember to clean up is the failure this exists to remove. ``forget``
+hands it no obligation at all: nothing is removed, nothing is scheduled,
+nothing needs a follow-up call. It changes *reachability*, and erasure stays
+where it already was -- on the scope's deadline.
+
+Which is why it costs nothing to add. Forgetting a fact is giving it a
+deadline in the past, the same ``expire_at`` the scope already runs on, so
+"the user asked me to forget that" and "the scope expired" are one mechanism
+collected by one TTL index. The agent gets the verb it actually needs and
+still cannot leave anything behind.
 
 Run it over stdio::
 
@@ -88,9 +102,16 @@ class VoydClient:
     async def describe(self, token: str, passcode: str | None = None) -> dict:
         return await self._get(f"/v1/voids/{token}", passcode)
 
+    async def forget(self, token: str, doc_ids: list[str] | None = None,
+                     reason: str = "revoked") -> dict:
+        payload: dict[str, Any] = {"reason": reason}
+        if doc_ids:
+            payload["doc_ids"] = list(doc_ids)
+        return await self._post(f"/v1/voids/{token}/forget", payload)
+
 
 def build_server(client: VoydClient):
-    """Register the four tools on an MCP server and return it.
+    """Register the five tools on an MCP server and return it.
 
     ``MCPServer`` is the mcp 2.x name for what 1.x called ``FastMCP``; this
     targets 2.x, which is what ``voyd[mcp]`` resolves to.
@@ -159,6 +180,26 @@ def build_server(client: VoydClient):
         above zero means embeddings are still being built.
         """
         return await client.describe(token, passcode=passcode)
+
+    @mcp.tool()
+    async def forget(token: str, doc_ids: list[str] | None = None,
+                     reason: str = "revoked") -> dict:
+        """Make facts in a scope unreachable, now. Not a delete.
+
+        Use this when a user says "forget that" -- a retracted statement, a
+        credential they pasted by mistake, a document they asked you to drop.
+        The facts stop coming back on the very next search, including this
+        one's own.
+
+        You are not being handed a cleanup job. Nothing is removed by this
+        call and nothing needs a follow-up: the rows stay where they are and
+        the scope's deadline still erases them on schedule. What changes is
+        only whether they can reach a prompt.
+
+        Omit ``doc_ids`` to forget everything in the scope. ``reason`` is
+        recorded with the fact, so an audit can ask why later.
+        """
+        return await client.forget(token, doc_ids=doc_ids, reason=reason)
 
     return mcp
 

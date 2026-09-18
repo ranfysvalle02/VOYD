@@ -492,6 +492,26 @@ class MongoStore:
             return_document=ReturnDocument.AFTER,
         )
 
+    async def forget_documents(self, voyd_id: ObjectId, token: str, *,
+                               doc_ids: list[str] | None = None,
+                               reason: str = "revoked") -> int:
+        """Make documents unreachable now. Erasure stays the deadline's job.
+
+        The elegant part is that there is no second mechanism here. Forgetting
+        a fact *is* giving it a deadline in the past: ``revoke()`` stamps the
+        same ``expire_at`` the scope already uses, plus a mark recording why.
+        So one TTL index collects user-requested erasure and time-based expiry
+        alike, and the same change-stream delete event reclaims the blobs for
+        both. An erasure request is not a special case -- it is a deadline
+        that has already passed.
+
+        ``doc_ids`` omitted means the whole scope.
+        """
+        flt: dict[str, Any] = {"voyd_id": voyd_id, "token": token}
+        if doc_ids:
+            flt["doc_id"] = {"$in": list(doc_ids)}
+        return await self.forgetting_documents.revoke(flt, reason=reason)
+
     async def get_document(self, voyd_id: ObjectId, token: str,
                            doc_id: str) -> dict | None:
         return await self.forgetting_documents.find_one(

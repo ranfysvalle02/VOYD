@@ -36,7 +36,7 @@ two halves: [one owner](#why-the-deadline-is-trustworthy) so nothing drifts,
 the gap before deletion is not a window in which anything is served.
 
 A **void** is a retrieval scope built on both: it expires, and it refuses.
-`pip install voyd` is the library; the service on top is four HTTP calls.
+`pip install voyd` is the library; the service on top is five HTTP calls.
 
 ## See it forget
 
@@ -70,7 +70,7 @@ Then `t+9.3s`: the row and its embedding leave together, because they were never
 two things. The pinned memory beside it is untouched — the deadline is per
 document, not a collection-wide wipe.
 
-## Four calls
+## Five calls
 
 ```bash
 # open a scope that lives for an hour
@@ -93,14 +93,23 @@ curl -X POST http://acme.voyd.com/v1/voids/k6kC2pJz/search \
 curl http://acme.voyd.com/v1/voids/k6kC2pJz \
   -H "Authorization: Bearer $VOYD_KEY"
 # -> "index": { "total": 1, "indexed": 0, "pending": 1, "failed": 0 }
+
+# forget something now -- the fifth call, and it deletes nothing
+curl -X POST http://acme.voyd.com/v1/voids/k6kC2pJz/forget \
+  -H "Authorization: Bearer $VOYD_KEY" \
+  -d '{"reason": "user retracted it"}'
+# -> {"forgotten": 1, "unreachable_since": "...", "note": "the rows are
+#     still on disk and are erased by the scope's deadline, not by this call"}
 ```
 
-Embedding is asynchronous, so the fourth call is not an afterthought: "added"
-and "searchable" are different facts, and an index that is still building must
-never be mistaken for an empty scope.
+Embedding is asynchronous, so `GET /v1/voids/{token}` is not an afterthought:
+"added" and "searchable" are different facts, and an index that is still
+building must never be mistaken for an empty scope.
 
 An hour later the documents, the embeddings and any bytes are gone together.
-You did not schedule that. There is no delete call in the happy path.
+You did not schedule that. There is no delete call in the happy path — and
+`forget` is not one either: it moves a deadline into the past so the same TTL
+index does the same work sooner.
 
 ## Why the deadline is trustworthy
 
@@ -285,9 +294,19 @@ VOYD_URL=http://acme.localhost:8000 VOYD_API_KEY=voyd_... \
 | `add(documents)` | text straight in, up to 100 per call |
 | `search(query)` | hybrid query inside the boundary |
 | `describe()` | what is in it, and how much is queryable yet |
+| `forget(doc_ids, reason)` | make facts unreachable now — and *not* a delete |
 
-**There is deliberately no `delete` tool.** An agent that has to remember to
-clean up is the failure this exists to remove. A test asserts the absence.
+**There is deliberately no `delete` tool**, and `forget` is not one wearing a
+different name. A delete tool hands the agent a cleanup obligation, and an
+agent that has to remember to clean up is the failure this exists to remove.
+`forget` hands it none: nothing is removed, nothing is scheduled, no
+follow-up call exists. It changes reachability, and erasure stays on the
+scope's deadline — which is why it costs nothing to offer.
+
+CI asserts the property rather than the headcount: no tool may be named for
+reclaiming anything, and `forget` must be present. The old gate froze the
+surface at exactly four names, which made keeping the principle look like
+breaking it.
 
 Embedding is asynchronous, so `add` reports how much is indexed and `describe`
 tells you when it has caught up. An index that is still building must never
@@ -585,7 +604,9 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 | A 500 is not input validation | an unrepresentable `ttl_seconds` and an oversized `metadata` are 422s |
 | A 429 is not a bad document | failed embeds retry; a later valid key backfills |
 | A namespace URL cannot expose the console | `/login`, `/new`, `/keys` 404 on a voyd host |
-| There is no way to leak a cleanup chore | no delete tool exists on the MCP surface |
+| There is no way to leak a cleanup chore | no tool is named for reclaiming anything, and `forget` reclaims nothing |
+| Forgetting is reachable from the product | `POST /v1/voids/{token}/forget` and a `forget` tool, not engine-only |
+| Forgetting is not deletion renamed | after `forget`, `describe` reports 0 and the rows are still on disk |
 | A stale index cannot pass for a current one | a changed spec is corrected, or named in `stale_indexes` |
 | Atlas filling in its own index defaults is not drift | or every start-up would rewrite every index |
 | The blob path is genuinely optional | the inline path works end to end against `NullStorage` |

@@ -1,12 +1,18 @@
 """The product: open a scope, put documents in it, query it, forget it exists.
 
 A void is a vector index with a TTL, and a read path that refuses what it has
-forgotten. Four calls are the whole API:
+forgotten. Five calls are the whole API:
 
     POST /v1/voids                      open a scope with a deadline
     POST /v1/voids/{token}/documents    text straight in, no upload dance
     POST /v1/voids/{token}/search       query inside the boundary
     GET  /v1/voids/{token}              what is in it, and how much is ready
+    POST /v1/voids/{token}/forget       make facts unreachable now
+
+The fifth is the only destructive-sounding one and it deletes nothing: it
+gives facts a deadline in the past, so the TTL index that already collects
+expired scopes collects these too. There is no erasure subsystem because an
+erasure request is a deadline that has already passed.
 
 Everything else here is the blob path -- presigned PUT/GET for callers whose
 text is already sitting in object storage. It lands in the same rows, because
@@ -237,6 +243,13 @@ class CompleteFileRequest(BaseModel):
     size: int | None = None
 
 
+class ForgetRequest(BaseModel):
+    """What to forget. Omitting ``doc_ids`` forgets the whole scope."""
+
+    doc_ids: list[str] | None = Field(default=None, max_length=MAX_BATCH)
+    reason: str = Field(default="revoked", max_length=200)
+
+
 class SearchRequest(BaseModel):
     """A query, and how many hits to bring back."""
 
@@ -442,6 +455,47 @@ async def download_file(request: Request, token: str, doc_id: str,
 
     url = await engine.storage.presign_get(f["key"], filename=f["name"])
     return {"download_url": url, "filename": f["name"]}
+
+
+@router.post("/voids/{token}/forget")
+async def forget(request: Request, token: str,
+                 body: ForgetRequest = Body(default=ForgetRequest()),
+                 voyd: dict = Depends(require_voyd_owner)):
+    """Make documents unreachable now. Do not wait for the deadline.
+
+    This is the only destructive-sounding verb in the API, and it is
+    deliberately not a delete: nothing is removed here, and the caller is
+    given no way to remove anything. The rows stay on disk and stop being
+    reachable, and the scope's existing deadline still owns erasure.
+
+    Which is the whole design collapsing into one field. Forgetting a fact is
+    giving it a deadline in the past -- the same ``expire_at`` the scope
+    already uses -- so a subject erasure request and an ordinary expiry are
+    the same mechanism, collected by the same TTL index, with the same change
+    stream event reclaiming the same bytes. There is no erasure subsystem
+    because an erasure request is a deadline that has already passed.
+
+    The response reports when the fact stopped being reachable, because that
+    is the timestamp somebody will eventually have to defend -- not the one
+    the sweeper happens to write later.
+    """
+    engine = get_engine(request)
+    void = await engine.store.get_void(voyd["_id"], token)
+    if not void:
+        raise HTTPException(404, "void not found.")
+
+    at = datetime.now(timezone.utc)
+    n = await engine.store.forget_documents(
+        voyd["_id"], token, doc_ids=body.doc_ids, reason=body.reason)
+    return {
+        "forgotten": n,
+        "unreachable_since": at.isoformat(),
+        "reason": body.reason,
+        # Said plainly, because "forgotten" and "deleted" are different
+        # promises and only one of them is being made.
+        "note": ("unreachable on the next read; the rows are still on disk "
+                 "and are erased by the scope's deadline, not by this call"),
+    }
 
 
 # ---- search ------------------------------------------------------------

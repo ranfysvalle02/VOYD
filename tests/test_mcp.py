@@ -1,4 +1,4 @@
-"""The MCP surface: four tools, and no way to delete anything.
+"""The MCP surface: five tools, and no way to delete anything.
 
 The tool *descriptions* are load-bearing -- they are the only documentation a
 model reads before deciding whether to call something -- so the shape of the
@@ -38,6 +38,10 @@ class Recorder:
         self.calls.append(("describe", token))
         return {"index": {"total": 0}}
 
+    async def forget(self, token, doc_ids=None, reason="revoked"):
+        self.calls.append(("forget", token, doc_ids, reason))
+        return {"forgotten": 1, "unreachable_since": "2026-09-18T00:00:00+00:00"}
+
 
 @pytest.fixture
 def server():
@@ -51,19 +55,48 @@ async def tools(server) -> dict:
 
 # ---- the surface -------------------------------------------------------
 
-async def test_the_surface_is_exactly_four_tools(server):
+async def test_the_surface_is_the_five_tools_and_nothing_else(server):
     srv, _ = server
     assert set((await tools(srv)).keys()) == {
-        "open_scope", "add", "search", "describe"}
+        "open_scope", "add", "search", "describe", "forget"}
 
 
-async def test_there_is_no_way_to_delete_a_scope(server):
-    """Deliberate. A scope has a deadline; an agent that has to remember to
-    clean up is the failure this product exists to remove. If a delete tool
-    ever appears here, the pitch has quietly become 'a bucket'."""
+async def test_no_tool_hands_the_agent_a_cleanup_obligation(server):
+    """The invariant, stated as the property rather than as a headcount.
+
+    This assertion used to be "the surface is exactly these four names",
+    which froze the surface instead of protecting the rule -- adding
+    ``forget`` read as a violation when it is the rule being kept. What must
+    never appear is a verb that makes the agent responsible for reclaiming
+    something, because an agent that has to remember to clean up is the
+    failure this product exists to remove.
+    """
     srv, _ = server
     names = (await tools(srv)).keys()
-    assert not any(w in n for n in names for w in ("delete", "remove", "drop", "clear"))
+    banned = ("delete", "remove", "drop", "clear", "purge", "destroy",
+              "cleanup", "collect")
+    assert not any(w in n for n in names for w in banned)
+
+
+async def test_forget_is_offered_as_reachability_not_deletion(server):
+    """A model reads the description and nothing else, so the description is
+    where the promise is either kept or broken. It must not imply that
+    calling this reclaims anything, and it must not imply a follow-up."""
+    srv, _ = server
+    desc = (await tools(srv))["forget"].description.lower()
+    assert "not a delete" in desc or "nothing is removed" in desc
+    assert "unreachable" in desc or "stop coming back" in desc
+    # The agent must be told it owes nothing afterwards.
+    assert "follow-up" in desc or "cleanup" in desc or "deadline" in desc
+
+
+async def test_forget_passes_the_reason_through(server):
+    """``reason`` is the audit trail; dropping it silently would make the
+    endpoint's record useless."""
+    srv, rec = server
+    await srv.call_tool("forget", {"token": "tok", "doc_ids": ["d1"],
+                                   "reason": "user retracted it"})
+    assert ("forget", "tok", ["d1"], "user retracted it") in rec.calls
 
 
 async def test_every_tool_tells_the_model_what_it_is_for(server):

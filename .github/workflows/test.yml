@@ -80,10 +80,16 @@ jobs:
           assert 'base.html' in html, f'templates missing from the wheel: {html}'
           print('wheel[app]: service imports, templates shipped:', len(html), 'files')"
 
-      - name: The MCP server has no delete tool
-        # The pitch is that a scope collects itself. If a delete tool ever shows
-        # up on the surface, the product has quietly become a bucket -- so this
-        # is checked in CI and not only in the unit suite.
+      - name: No agent tool can leave a cleanup obligation
+        # The pitch is that a scope collects itself. An agent that has to
+        # remember to clean up is the failure this exists to remove.
+        #
+        # This gate used to assert an exact set of four tool names, which was
+        # the wrong invariant: it froze the surface instead of protecting the
+        # property, so adding `forget` -- a tool that hands the agent no
+        # obligation at all -- looked like a violation when it is the
+        # principle being honoured. The rule is about what a tool *promises*,
+        # not how many there are.
         run: |
           uv run --no-sync python -c "
           import asyncio
@@ -91,8 +97,12 @@ jobs:
           class Stub:
               def __getattr__(self, n): raise AssertionError('no network in CI')
           names = {t.name for t in asyncio.run(build_server(Stub()).list_tools())}
-          assert names == {'open_scope', 'add', 'search', 'describe'}, names
-          print('MCP surface:', sorted(names))"
+          banned = {'delete', 'remove', 'destroy', 'purge', 'drop', 'cleanup',
+                    'expire', 'gc', 'collect'}
+          leaked = names & banned
+          assert not leaked, f'a cleanup obligation reached the agent: {leaked}'
+          assert 'forget' in names, 'forgetting must be reachable by an agent'
+          print('MCP surface:', sorted(names), '-- no delete, forget present')"
 
       - name: Test
         env:
