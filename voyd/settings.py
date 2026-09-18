@@ -51,7 +51,7 @@ class VoydSettings(BaseSettings):
     require_passcode: bool = False
     max_downloads: int = 0  # 0 = no cap
 
-    # Set false on a private instance to lock the console after the first owner.
+    # Set false on a private instance to refuse new owners after the first.
     allow_signup: bool = True
 
 

@@ -1,1 +1,1 @@
-"""HTTP layer: shared dependencies and routers (owner console, vault)."""
+"""HTTP layer: shared dependencies and routers (owner plane, vault)."""

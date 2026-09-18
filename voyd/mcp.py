@@ -1,4 +1,4 @@
-"""VOYD as an MCP server: four tools, and forgetting is one of them.
+"""VOYD as an MCP server: five tools, and forgetting is one of them.
 
 Agent runtimes are not the competition, they are the channel. AgentCore,
 Vertex and Claude managed agents all run agents and all hand the result back

@@ -51,10 +51,8 @@ async def null_app():
         pytest.skip(f"no MongoDB at {TEST_MONGO_URI}")
 
     from voyd import Intelligence, Store, Voyd
-    from voyd.web.console import _credential_limiter
     from voyd.web.vault import _passcode_limiter
 
-    _credential_limiter.clear()
     _passcode_limiter.clear()
     db_name = f"voyd_test_{uuid.uuid4().hex[:12]}"
     voyd = Voyd(
@@ -71,7 +69,6 @@ async def null_app():
     finally:
         await voyd.store.client.drop_database(db_name)
         await voyd.store.close()
-        _credential_limiter.clear()
         _passcode_limiter.clear()
 
 

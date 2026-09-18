@@ -34,7 +34,7 @@ Design rules honoured here:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from bson import ObjectId
@@ -153,7 +153,7 @@ class MongoStore:
 
         # Ensure collections exist so we can enable pre-images for GC.
         existing = set(await db.list_collection_names())
-        for name in ("owners", "sessions", "voyds", "voids", "documents", "ops"):
+        for name in ("owners", "voyds", "voids", "documents", "ops"):
             if name not in existing:
                 try:
                     await db.create_collection(name)
@@ -167,10 +167,6 @@ class MongoStore:
 
         await db.owners.create_index("api_key_hash", unique=True, sparse=True)
         await db.owners.create_index("email", unique=True, sparse=True)
-
-        # Logins expire the same way voids do: Mongo's TTL reaper.
-        await db.sessions.create_index("expire_at", expireAfterSeconds=0)
-        await db.sessions.create_index("owner_id")
 
         await db.voyds.create_index("slug", unique=True)
         await db.voyds.create_index("owner_id")
@@ -242,7 +238,7 @@ class MongoStore:
         ))
 
         # Expiry as declaration rather than scattered create_index calls.
-        for coll in ("sessions", "voids", "documents"):
+        for coll in ("voids", "documents"):
             self.engine.expiring(ExpirySpec(collection=coll, at_field="expire_at"))
 
     async def _ensure_search_indexes(self, dims: int, *, wait_s: float = 90.0) -> None:
@@ -253,12 +249,10 @@ class MongoStore:
     # ---- owners --------------------------------------------------------
 
     async def create_owner(self, email: str, api_key_hash: str, *,
-                           password_hash: str | None = None,
                            name: str = "") -> ObjectId:
         res = await self.db.owners.insert_one({
             "email": email,
             "api_key_hash": api_key_hash,
-            "password_hash": password_hash,
             "name": name,
             "created_at": _utcnow(),
         })
@@ -280,26 +274,6 @@ class MongoStore:
         await self.db.owners.update_one(
             {"_id": owner_id}, {"$set": {"api_key_hash": api_key_hash}}
         )
-
-    # ---- sessions ------------------------------------------------------
-
-    async def create_session(self, owner_id: ObjectId, token_hash: str,
-                             ttl_days: int) -> None:
-        await self.db.sessions.insert_one({
-            "_id": token_hash,
-            "owner_id": owner_id,
-            "created_at": _utcnow(),
-            "expire_at": _utcnow() + timedelta(days=ttl_days),
-        })
-
-    async def get_owner_by_session(self, token_hash: str) -> dict | None:
-        session = await self.db.sessions.find_one({"_id": token_hash})
-        if not session:
-            return None
-        return await self.get_owner(session["owner_id"])
-
-    async def delete_session(self, token_hash: str) -> None:
-        await self.db.sessions.delete_one({"_id": token_hash})
 
     # ---- voyds (namespaces) -------------------------------------------
 
@@ -336,7 +310,7 @@ class MongoStore:
         return base  # caller surfaces the duplicate error
 
     async def stats_for_voyds(self, voyd_ids: list[ObjectId]) -> dict:
-        """Counts per voyd for the console dashboard."""
+        """Counts per voyd, for the owner plane."""
         out: dict = {vid: {"voids": 0, "documents": 0} for vid in voyd_ids}
         if not voyd_ids:
             return out

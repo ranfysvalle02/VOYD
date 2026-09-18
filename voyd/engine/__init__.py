@@ -54,7 +54,7 @@ from .memory import Memory, MemorySpec
 from .model import Model
 from .reactor import Reactor
 from .search import SearchEngine, SearchSpec, cosine
-from .time import UTC, aware, bind, deadline, live, living, now, window
+from .time import UTC, aware, bind, deadline, live, living, now
 from .trait import Trait, collection_of, kind_of
 
 
@@ -266,5 +266,5 @@ __all__ = [
     "Reactor",
     "ScopeRequired", "ScopeInvalid", "ScopeError", "FilterInvalid",
     "Trait", "kind_of", "collection_of",
-    "now", "aware", "live", "living", "deadline", "window", "bind", "UTC",
+    "now", "aware", "live", "living", "deadline", "bind", "UTC",
 ]

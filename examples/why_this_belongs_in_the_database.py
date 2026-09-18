@@ -45,9 +45,8 @@ What this script does
 ---------------------
 It reconstructs that state from scratch and runs the same query twice: once
 the way the code did before the fix (raw ``engine.search``, scoped by tenant,
-no deadline clause), and once through ``store.vector_search``, which applies
-``_unexpired()`` / ``live()``. Then it counts what remembering the deadline
-actually costs: one clause, on every read path that can reach the data.
+no deadline clause), and once through ``store.vector_search``, which refuses
+expired rows. Then it shows where that rule ended up living.
 
 The TTL monitor is parked at ``ttlMonitorSleepSecs=3600`` for the duration, so
 nothing below can be attributed to the reaper, and restored in a ``finally``.
@@ -61,6 +60,13 @@ This is an argument about layering, not about any vendor. The point is only
 this: a deadline enforced by remembering to write a clause is enforced as
 reliably as it is remembered, and the number of places to remember it grows
 with every read path anyone adds.
+
+Which is why it is no longer written that way. Those six call sites now go
+through one ``Forgetting`` handle with no unfiltered read on it, and the
+``_unexpired()`` helper they each had to remember to call is deleted. This
+exhibit still reproduces the leak, because the leak is a property of the
+database and not of our code -- but the second half now shows a rule that
+cannot be forgotten rather than one that merely was not.
 """
 
 from __future__ import annotations
@@ -86,14 +92,16 @@ DB_NAME = "voyd_exhibit_forgotten_deadline"
 PARKED_TTL_SECS = 3600
 
 # The six read paths in voyd/store/mongo.py that can reach void or document
-# data, and therefore each have to carry the deadline clause themselves.
+# data. Each one used to carry the deadline clause itself, by hand; the second
+# column is what it goes through now. One object, six callers, nothing to
+# remember.
 READ_PATHS = (
-    ("get_void", "_unexpired()"),
-    ("list_voids", "_unexpired()"),
-    ("get_document", "_unexpired()"),
-    ("list_documents", "_unexpired()"),
-    ("count_indexed", "_unexpired() inside $match"),
-    ("vector_search", "live() post-filter, doubled fetch budget"),
+    ("get_void", "forgetting_voids.find_one()"),
+    ("list_voids", "forgetting_voids.find()"),
+    ("get_document", "forgetting_documents.find_one()"),
+    ("list_documents", "forgetting_documents.find()"),
+    ("count_indexed", "forgetting_documents.match() inside $match"),
+    ("vector_search", "forgetting_documents.reachable(), doubled fetch budget"),
 )
 
 T0 = time.monotonic()
@@ -233,7 +241,7 @@ async def main() -> int:
         # ---- the guarded query: the same search, one clause added ----------
         head("2. the same search through store.vector_search()")
         print("     identical scope, identical vector. the only difference is")
-        print("     _unexpired() / live(), applied on the read path.\n")
+        print("     the Forgetting handle, refusing on the read path.\n")
 
         guarded = await store.vector_search(voyd_id, vec(0.9), token="deadvoid")
         say(f"void-scoped on the EXPIRED void -> {names(guarded)}")
@@ -330,8 +338,9 @@ async def main() -> int:
         print("     stays correct on the in-process cosine fallback, where there")
         print("     is no index to push anything into.")
         print()
-        print("     That is the best a library can do from up here. It is still")
-        print("     six places to remember.")
+        print("     And it is no longer six places to remember: those six read")
+        print("     paths go through one handle with no unfiltered find on it,")
+        print("     so the naive read and the safe read are the same read.")
 
         print(f"\n  {clock()}  exhibit holds. every assertion above passed.")
         return 0

@@ -54,8 +54,7 @@ jobs:
         # never worked. Nothing caught it, because nothing built the artifact.
         #
         # So: build it, install it alone in a clean venv, and re-assert the
-        # engine-only contract against what a stranger would actually get --
-        # including that the templates the console needs are really in there.
+        # engine-only contract against what a stranger would actually get.
         run: |
           uv build
           uv venv /tmp/wheelcheck
@@ -72,13 +71,12 @@ jobs:
           print('wheel: Engine imports clean, no FastAPI')"
           VIRTUAL_ENV=/tmp/wheelcheck uv pip install "voyd[app] @ ./dist/$(ls dist | grep whl)"
           /tmp/wheelcheck/bin/python -c "
-          from pathlib import Path
-          import voyd, voyd.app
-          from voyd import Voyd
-          themes = Path(voyd.__file__).parent / 'themes' / 'console'
-          html = sorted(p.name for p in themes.glob('*.html'))
-          assert 'base.html' in html, f'templates missing from the wheel: {html}'
-          print('wheel[app]: service imports, templates shipped:', len(html), 'files')"
+          import voyd.app
+          from voyd.web import owner, vault
+          paths = {r.path for r in vault.router.routes} | {r.path for r in owner.router.routes}
+          for needed in ('/v1/voids', '/v1/voids/{token}/forget', '/v1/owners'):
+              assert needed in paths, f'{needed} missing from the built wheel: {sorted(paths)}'
+          print('wheel[app]: service imports and the API surface is intact')"
 
       - name: No agent tool can leave a cleanup obligation
         # The pitch is that a scope collects itself. An agent that has to

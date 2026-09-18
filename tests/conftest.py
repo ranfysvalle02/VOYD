@@ -154,20 +154,17 @@ async def app():
     install can still collect and run the engine tests.
 
     The Ops background workers are left off: these tests exercise request
-    handling, not the embed/GC loops. The process-global credential limiter is
-    reset here (not autouse) so one test's failed logins cannot lock out the
-    next -- and so engine tests never import the console to do it. The vault's
-    passcode limiter is process-global for the same reason and is cleared here
-    too, or one test's wrong guesses would 429 the next test's good ones.
+    handling, not the embed loop. The vault's passcode limiter is
+    process-global, so it is cleared here (not autouse, so engine tests never
+    import the service to do it) -- otherwise one test's wrong guesses would
+    429 the next test's good ones.
     """
     if not await _mongo_available(TEST_MONGO_URI):
         pytest.skip(f"no MongoDB at {TEST_MONGO_URI}")
 
     from voyd import Intelligence, Storage, Store, Voyd
-    from voyd.web.console import _credential_limiter
     from voyd.web.vault import _passcode_limiter
 
-    _credential_limiter.clear()
     _passcode_limiter.clear()
     db_name = f"voyd_test_{uuid.uuid4().hex[:12]}"
     voyd = Voyd(
@@ -185,7 +182,6 @@ async def app():
     finally:
         await voyd.store.client.drop_database(db_name)
         await voyd.store.close()
-        _credential_limiter.clear()
         _passcode_limiter.clear()
 
 

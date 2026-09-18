@@ -13,13 +13,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The HTTP service: FastAPI runtime, templates, auth. `python -m voyd` needs this.
+# The HTTP service: FastAPI runtime and the guard's passcode hashing.
+# `python -m voyd` needs this. No jinja2 or python-multipart: there is no HTML
+# surface to render and no form to parse -- the API is JSON, and argon2 is
+# here for void passcodes, not for owner passwords, which no longer exist.
 app = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "argon2-cffi>=23.1",
-    "jinja2>=3.1",
-    "python-multipart>=0.0.9",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
 ]
@@ -63,10 +64,6 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# `packages` already ships everything under voyd/, templates included. A
-# force-include of voyd/themes on top of that added every theme file a second
-# time at the same archive path, which hatchling refuses outright -- so the
-# wheel could not be built at all and `pip install voyd` had never worked.
 packages = ["voyd"]
 
 [tool.ruff]

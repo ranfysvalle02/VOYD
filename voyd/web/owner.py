@@ -12,7 +12,7 @@ import logging
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pymongo.errors import DuplicateKeyError
 
-from ..auth import hash_password, new_api_key
+from ..auth import new_api_key
 from ..guards import compile_guard_defaults
 from ..slugs import RESERVED_SLUGS, SLUG_RE
 from ..storage import transient_storage_errors
@@ -41,14 +41,9 @@ async def create_owner(request: Request, payload: dict = Body(...)):
         if not existing:
             raise HTTPException(401, "Invalid owner key.")
 
-    # An optional password lets an API-created owner also sign in to the console.
-    password = payload.get("password") or None
     api_key = new_api_key()
     try:
-        owner_id = await store.create_owner(
-            email, hash_api_key(api_key),
-            password_hash=hash_password(password) if password else None,
-        )
+        owner_id = await store.create_owner(email, hash_api_key(api_key))
     except DuplicateKeyError:
         # The unique index on ``email`` is the only arbiter here.
         raise HTTPException(409, "An owner with that email already exists.")

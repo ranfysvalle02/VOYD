@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from .config import GuardSpec
 from .host import VoydHostMiddleware
@@ -22,16 +20,15 @@ from .intelligence.voyage import VoyageIntelligence
 from .ops import Ops
 from .storage.base import ObjectStorage
 from .store.mongo import MongoStore
-from .web import console, owner, vault
-
-THEMES_DIR = Path(__file__).resolve().parent / "themes"
+from .web import owner, vault
 
 log = logging.getLogger("voyd.app")
 
 
 class ApiCORSMiddleware(CORSMiddleware):
-    """CORS for ``/v1`` only. Console pages fall through untouched, so a browser
-    will not attach a cross-origin response there."""
+    """CORS for ``/v1`` only. Nothing else is a browser surface, and a
+    wildcard on paths that are not the public JSON API is a habit worth not
+    forming."""
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or not scope.get("path", "").startswith("/v1"):
@@ -73,20 +70,16 @@ class Voyd:
         app = FastAPI(title="VOYD", version="0.1.0", lifespan=lifespan)
         app.state.engine = self
 
-        # Wide-open CORS is right for the public JSON API and wrong for the
-        # cookie-authed console, so it is scoped to /v1 rather than mounted app-wide.
+        # Wide-open CORS is right for the public JSON API and wrong everywhere
+        # else, so it is scoped to /v1 rather than mounted app-wide.
         app.add_middleware(
             ApiCORSMiddleware, allow_origins=["*"], allow_methods=["*"],
             allow_headers=["*"], allow_credentials=False,
         )
         app.add_middleware(VoydHostMiddleware, domain=self.domain)
 
-        assets_dir = THEMES_DIR / "console" / "static"
-        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
-
         app.include_router(owner.router)
         app.include_router(vault.router)
-        app.include_router(console.router)
 
         @app.get("/healthz", include_in_schema=False)
         async def healthz():

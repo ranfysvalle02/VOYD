@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 log = logging.getLogger("engine.time")
 
@@ -96,17 +95,6 @@ def living(at_field: str = "expire_at", *, when: datetime | None = None) -> dict
         {at_field: {"$exists": False}},
         {at_field: {"$gt": instant}},
     ]}
-
-
-def window(since: datetime | None = None, until: datetime | None = None) -> dict:
-    """A closed time range, both ends coerced, so a naive ``since`` cannot
-    silently miss every aware row."""
-    w: dict[str, Any] = {}
-    if since is not None:
-        w["$gte"] = aware(since)
-    if until is not None:
-        w["$lte"] = aware(until)
-    return w
 
 
 def bind(db):

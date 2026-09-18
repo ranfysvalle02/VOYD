@@ -167,12 +167,7 @@ async def test_owner_routes_reject_bad_credentials(client, two_namespaces, heade
 
 # ---- the two planes ----------------------------------------------------
 
-@pytest.mark.parametrize("path", ["/login", "/signup", "/new", "/keys"])
-async def test_console_paths_404_on_a_voyd_host(client, two_namespaces, path):
-    assert (await client.get(path, headers=on("alpha"))).status_code == 404
-    # On the apex they exist: either they render, or they bounce to /login.
-    assert (await client.get(path)).status_code in (200, 303)
-
+# ---- the two planes ----------------------------------------------------
 
 async def test_namespace_management_is_apex_only(client, two_namespaces):
     key = two_namespaces["alice_key"]
@@ -180,40 +175,31 @@ async def test_namespace_management_is_apex_only(client, two_namespaces):
     assert (await client.get("/v1/voyds", headers=on("alpha", key))).status_code == 404
 
 
-async def test_the_console_root_does_not_exist_on_a_namespace_host(client, two_namespaces):
-    assert (await client.get("/")).status_code == 200
-    assert (await client.get("/", headers=on("alpha"))).status_code == 404
 
+async def test_cors_is_open_on_the_api_only(client, two_namespaces):
+    """The wildcard belongs to the public JSON API and nowhere else.
 
-# ---- credential hardening ----------------------------------------------
-
-async def test_login_is_rate_limited(client, app):
-    """Argon2 bounds the cost of a guess; this bounds the number of guesses."""
-    from voyd.web import console
-
-    form = {"email": "nobody@example.com", "password": "wrong-password"}
-    seen = [(await client.post("/login", data=form)).text for _ in range(12)]
-
-    assert any("Wrong email or password" in t for t in seen), "real attempts happen first"
-    assert console.TOO_MANY in seen[-1], "and then the door closes"
-
-
-async def test_cors_is_open_on_the_api_and_absent_on_the_console(client, two_namespaces):
-    """The wildcard belongs to the public JSON API, not to cookie-authed pages."""
+    There is no browser surface left to protect, which is precisely why the
+    scoping stays: a future page must not inherit a wildcard nobody
+    reconsidered.
+    """
     api = await client.get(f"/v1/voids/{two_namespaces['alpha_token']}",
                            headers={"X-Voyd": "alpha",
                                     "Origin": "https://evil.example",
                                     **auth(two_namespaces["alice_key"])})
-    console = await client.get("/", headers={"Origin": "https://evil.example"})
+    other = await client.get("/healthz", headers={"Origin": "https://evil.example"})
 
     assert api.headers.get("access-control-allow-origin") == "*"
-    assert "access-control-allow-origin" not in console.headers
+    assert "access-control-allow-origin" not in other.headers
 
 
-async def test_session_cookie_is_hardened(client, app):
-    r = await client.post("/signup", data={"email": "carol@example.com",
-                                           "password": "a-good-password"})
-    cookie = r.headers["set-cookie"].lower()
-    assert "httponly" in cookie
-    assert "samesite=lax" in cookie
-    assert "secure" not in cookie, "plain http in dev; set over https"
+async def test_there_is_no_browser_surface_left(client, two_namespaces):
+    """The console is gone: one credential, and it is an API key.
+
+    Asserted rather than assumed, because a stray router re-added later would
+    bring sessions and cookies back with it.
+    """
+    for path in ("/", "/login", "/signup", "/new", "/keys"):
+        for headers in ({}, on("alpha")):
+            r = await client.get(path, headers=headers)
+            assert r.status_code == 404, f"{path} still answers: {r.status_code}"

@@ -322,12 +322,19 @@ cp .env.example .env
 
 uv sync --all-extras
 uv run python -m voyd
-open http://localhost:8000
+
+# the first owner is open; after that minting one needs an existing key
+curl -X POST localhost:8000/v1/owners -d '{"email": "you@example.com"}'
+# -> {"api_key": "voyd_...", "note": "Store this key now; it will not be shown again."}
+
+curl -X POST localhost:8000/v1/voyds -H "Authorization: Bearer $VOYD_KEY" \
+  -d '{"slug": "acme", "name": "Acme"}'
 ```
 
-Sign in, name a namespace, take your API key. `*.localhost` resolves to
-`127.0.0.1` on macOS and most Linux with no `/etc/hosts` edits; otherwise send
-`-H 'X-Voyd: acme'`.
+There is no sign-in page, because there is nothing to sign in to: the
+surfaces are the JSON API, the MCP tools, and `import voyd`. An API key is
+the only credential. `*.localhost` resolves to `127.0.0.1` on macOS and most
+Linux with no `/etc/hosts` edits; otherwise send `-H 'X-Voyd: acme'`.
 
 R2 is only needed for the blob path — inline text needs no object storage at
 all. Leave `VOYD_R2_*` unset and the service boots on `NullStorage`: documents,
@@ -603,7 +610,6 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 | A lost oplog window is not silent | `windows_lost` on `health()`, separate from routine `resumes` |
 | A 500 is not input validation | an unrepresentable `ttl_seconds` and an oversized `metadata` are 422s |
 | A 429 is not a bad document | failed embeds retry; a later valid key backfills |
-| A namespace URL cannot expose the console | `/login`, `/new`, `/keys` 404 on a voyd host |
 | There is no way to leak a cleanup chore | no tool is named for reclaiming anything, and `forget` reclaims nothing |
 | Forgetting is reachable from the product | `POST /v1/voids/{token}/forget` and a `forget` tool, not engine-only |
 | Forgetting is not deletion renamed | after `forget`, `describe` reports 0 and the rows are still on disk |
@@ -624,11 +630,14 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 - Passwords and passcodes argon2; sessions and API keys stored only as SHA-256.
 - The passcode hash is stripped from every API response. Verified across every
   endpoint, not just the obvious one.
-- Login/signup rate limited per IP and per email (10 / 5 min). In-process,
-  therefore per-replica — the honest trade for not needing Redis, and the first
-  thing to fix if this runs on more than one process.
-- Session cookie is `HttpOnly`, `SameSite=Lax`, `Secure` on https.
-- CORS is wildcard-open on `/v1` only. The cookie-authed console is out.
+- One credential, and it is an API key: `voyd_` + 32 random bytes, stored only
+  as a SHA-256 hash. There are no passwords and no sessions, because there is
+  no browser surface left to have them for.
+- Passcode attempts on a guarded void are rate limited per IP *and* per void
+  (10 / 5 min), before the argon2 verify runs — a slow hash is a cost ceiling,
+  not a bound. In-process, therefore per-replica: the honest trade for not
+  needing Redis, and the first thing to fix on more than one process.
+- CORS is wildcard-open on `/v1`, which is the whole public surface.
 - On the blob path, bytes never traverse the API: clients PUT/GET presigned URLs.
   With no object storage configured that path is closed at the door (501), not
   papered over with placeholder credentials that presign against nothing.

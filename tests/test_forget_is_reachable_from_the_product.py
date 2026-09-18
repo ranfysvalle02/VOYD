@@ -1,7 +1,7 @@
 """The headline capability has to exist on the surface people actually use.
 
 For a while it did not. ``revoke()`` lived on the engine, the README led with
-it, and a caller holding an API key -- or an agent holding the four tools --
+it, and a caller holding an API key -- or an agent holding the tools --
 had no way to reach it. The story and the product disagreed, which is a worse
 failure than a missing feature: it is a promise the thing cannot keep.
 

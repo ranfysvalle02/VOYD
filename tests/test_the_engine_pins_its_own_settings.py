@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tests.conftest import TEST_MONGO_URI, _mongo_available
-from voyd.engine import Engine, aware, deadline, live, living, now, window
+from voyd.engine import Engine, aware, deadline, live, living, now
 from voyd.engine.time import UTC, bind
 
 
@@ -64,13 +64,6 @@ def test_living_is_the_query_ttl_is_not():
         isinstance(clause.get("expire_at"), dict) and "$gt" in clause["expire_at"]
         for clause in q["$or"]
     )
-
-
-def test_window_coerces_both_ends():
-    naive = datetime(2026, 1, 1)
-    w = window(since=naive, until=naive + timedelta(days=1))
-    assert w["$gte"].tzinfo is UTC
-    assert w["$lte"].tzinfo is UTC
 
 
 def test_deadline_none_is_pinned():

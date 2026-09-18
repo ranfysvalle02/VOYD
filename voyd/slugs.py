@@ -1,4 +1,4 @@
-"""Slug rules, shared by the console UI and the JSON API.
+"""Slug rules for namespaces.
 
 A human types a business name ("Auto Repair Orlando"); VOYD derives the
 namespace ("auto-repair-orlando") and shows them the resulting URL before they
