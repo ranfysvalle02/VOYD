@@ -376,3 +376,47 @@ async def test_a_collection_with_no_tenant_is_unaffected(core):
     await engine.ensure(search_wait_s=0)
     await db.free.insert_one({"text": "anyone can read this"})
     assert [r["text"] for r in await free.find({})] == ["anyone can read this"]
+
+
+# ---- declaration order must not decide the boundary -------------------
+
+async def test_two_declarations_that_disagree_about_the_tenant_collide(core):
+    """Handles are deduplicated per collection, so the tenant has to be part
+    of what a handle *is*.
+
+    It was not, and the consequence was silent: whichever declaration ran
+    first decided whether the boundary was enforced at all. A collision is
+    the only safe answer -- the alternative is a config-order-dependent
+    security property.
+    """
+    engine, _ = core
+    engine.model("notes", tenant="scope").forgettable()
+
+    with pytest.raises(ValueError) as caught:
+        engine.forgetting("notes", tenant="a_different_field")
+    assert "already forgettable" in str(caught.value)
+
+    # Declaring it the same way twice is not a conflict; it is the same handle.
+    again = engine.model("notes", tenant="scope").forgettable()
+    assert again is engine.installed("forgetting")["notes"]
+
+
+async def test_memory_scopes_its_own_handle(core):
+    """The route the bug actually arrived by.
+
+    ``Memory`` builds a Forgetting handle for its collection. Built
+    unscoped, a later ``model(tenant=...).forgettable()`` on that collection
+    got the unscoped object back and inherited "no tenant" -- silently
+    undoing the enforcement, from a declaration that looked correct.
+    """
+    engine, db = core
+    engine.model("notes", tenant="scope").memory()
+    docs = engine.model("notes", tenant="scope").forgettable()
+    await engine.ensure(search_wait_s=0)
+
+    assert docs.tenant == "scope"
+    await db.notes.insert_many([{"scope": "a", "text": "A"},
+                                {"scope": "b", "text": "B"}])
+    with pytest.raises(ScopeRequired):
+        await docs.find({})
+    assert [r["text"] for r in await docs.find({"scope": "a"})] == ["A"]

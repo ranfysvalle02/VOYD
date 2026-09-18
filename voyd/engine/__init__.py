@@ -185,17 +185,19 @@ class Engine:
         asking twice gets the same object.
         """
         spec = ForgettingSpec(collection, at_field=at_field,
-                              mark_field=mark_field)
+                              mark_field=mark_field, tenant=tenant)
         existing = self._installed.get("forgetting", {}).get(collection)
         if existing is not None:
             if existing.spec != spec:
                 raise ValueError(
-                    f"{collection} is already forgettable on "
-                    f"{existing.spec.at_field}/{existing.spec.mark_field}; "
-                    f"refusing to redeclare it on {at_field}/{mark_field}, "
-                    f"because two rules for one collection is how they drift")
+                    f"{collection} is already forgettable as "
+                    f"{existing.spec.describe()}; refusing to redeclare it "
+                    f"as {spec.describe()}. Two rules for one collection is "
+                    f"how they drift -- and when they disagree about the "
+                    f"tenant, whichever was declared first would silently "
+                    f"decide whether the boundary is enforced at all")
             return existing
-        return self.use(Forgetting(self.db, spec, tenant=tenant))
+        return self.use(Forgetting(self.db, spec))
 
     # ---- introspection -------------------------------------------------
 

@@ -189,3 +189,39 @@ async def test_reconciling_an_unchanged_index_is_a_no_op(searchable, caplog):
         await engine.search_engine.ensure_indexes(wait_s=90.0)
     assert engine.search_engine.stale == []
     assert [r for r in caplog.records if "drift" in r.message.lower()] == []
+
+
+# ---- the model is part of the definition -----------------------------
+
+def test_drift_sees_the_embedding_model_change():
+    """The semantics of an autoEmbed index *are* its model.
+
+    Reducing the field to ``("autoEmbed", path)`` made voyage-4 and
+    voyage-4-large identical signatures, so changing the declared model
+    produced no drift, the index kept the old one, and every later query was
+    embedded by a model the application no longer declared. Ordinary-looking
+    results, wrong embeddings, no signal -- the exact failure drifted()
+    exists to catch, hiding on the newest index type.
+    """
+    from voyd.engine.search import SearchSpec, drifted
+
+    base = SearchSpec("docs", text_paths=("text",),
+                      auto_embed="voyage-4").auto_embed_definition()
+    other_model = SearchSpec("docs", text_paths=("text",),
+                             auto_embed="voyage-4-large").auto_embed_definition()
+    other_modality = SearchSpec("docs", text_paths=("text",),
+                                auto_embed="voyage-4",
+                                auto_embed_modality="image").auto_embed_definition()
+
+    assert drifted("vectorSearch", other_model, base) is True
+    assert drifted("vectorSearch", other_modality, base) is True
+    assert drifted("vectorSearch", base, base) is False
+
+
+def test_drift_still_sees_a_dimension_change_on_a_client_vector_index():
+    """The control: the older index type must keep working the same way."""
+    from voyd.engine.search import SearchSpec, drifted
+
+    wide = SearchSpec("docs", dimensions=1024).vector_definition()
+    narrow = SearchSpec("docs", dimensions=512).vector_definition()
+    assert drifted("vectorSearch", narrow, wide) is True

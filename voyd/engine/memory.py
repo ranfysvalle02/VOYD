@@ -86,9 +86,14 @@ class Memory:
         self.spec = spec
         self.collection = spec.collection
         # One object owns "may this reach a prompt?". Memory does not
-        # re-implement the rule, it asks the thing whose job it is.
+        # re-implement the rule, it asks the thing whose job it is -- and
+        # declares its own scope field as the tenant, so the handle enforces
+        # the same boundary recall does. Building it unscoped meant a later
+        # ``model(tenant=...).forgettable()`` on the same collection got this
+        # handle back and quietly inherited "no tenant".
         self.forgetting = engine.forgetting(spec.collection,
-                                            at_field="expire_at")
+                                            at_field="expire_at",
+                                            tenant=spec.scope_field)
 
     async def remember(self, scope: Any, text: str, vector: list[float], *,
                        kind: str = "note", ttl: timedelta | None = ...,

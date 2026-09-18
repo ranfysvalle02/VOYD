@@ -81,14 +81,27 @@ def _declared_vector_fields(definition: dict) -> set[tuple]:
 
     A vectorSearch definition round-trips unchanged, so this is a faithful
     comparison rather than a heuristic.
+
+    ``autoEmbed`` carries its semantics in ``model`` and ``modality``, and
+    those have to be in the signature. Reducing the field to
+    ``("autoEmbed", path)`` meant swapping one model name for another
+    produced an identical signature, so ``drifted()`` said no, the index kept
+    the old model, and every later query was embedded by a model the
+    application no longer declared -- silently, and with results that look
+    entirely ordinary. That is the exact failure this function exists to
+    catch, hiding on the newest index type.
     """
     out: set[tuple] = set()
     for f in definition.get("fields", []):
-        if f.get("type") == "vector":
+        kind = f.get("type")
+        if kind == "vector":
             out.add(("vector", f.get("path"), f.get("numDimensions"),
                      f.get("similarity")))
+        elif kind == "autoEmbed":
+            out.add(("autoEmbed", f.get("path"), f.get("model"),
+                     f.get("modality")))
         else:
-            out.add((f.get("type"), f.get("path")))
+            out.add((kind, f.get("path")))
     return out
 
 

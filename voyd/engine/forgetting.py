@@ -92,10 +92,19 @@ class ForgettingSpec:
     # deadline, so an erasure request does not have to wait for a sweeper and
     # does not depend on the TTL index existing at all.
     mark_field: str = "forgotten"
+    # Part of the spec, and therefore part of identity, because handles are
+    # deduplicated per collection by spec equality. It was not, and the
+    # consequence was that declaration order silently decided whether the
+    # tenant was enforced at all: a Memory builds an unscoped handle for its
+    # collection, and a later ``model(tenant=...).forgettable()`` got that
+    # same unscoped object back. Two declarations disagreeing about the
+    # boundary must collide loudly, not resolve to whichever ran first.
+    tenant: str | None = None
 
     def describe(self) -> str:
+        scope = f", scoped by {self.tenant}" if self.tenant else ""
         return (f"{self.collection}: refuses on {self.at_field} (deadline) "
-                f"and {self.mark_field} (revoked)")
+                f"and {self.mark_field} (revoked){scope}")
 
 
 @dataclass
@@ -179,11 +188,11 @@ class Forgetting:
 
     kind = "forgetting"
 
-    def __init__(self, db, spec: ForgettingSpec, *, tenant: str | None = None):
+    def __init__(self, db, spec: ForgettingSpec):
         self.db = db
         self.spec = spec
         self.collection = spec.collection
-        self.tenant = tenant
+        self.tenant = spec.tenant
         self.receipts_log = Receipts()
         self._include = False
 
@@ -208,7 +217,7 @@ class Forgetting:
         is an operational need; seeing another tenant's forgotten rows is a
         breach with a nicer name.
         """
-        clone = Forgetting(self.db, self.spec, tenant=self.tenant)
+        clone = Forgetting(self.db, self.spec)
         clone.receipts_log = self.receipts_log
         clone._include = True
         return clone
