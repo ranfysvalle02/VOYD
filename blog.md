@@ -354,9 +354,9 @@ build the next surface without assembling the logo pile first.
 Eight primitives was a mesh with better names. Two nouns is an architecture.
 
 **Model** is a collection of documents. The document is the record, the
-vector, the deadline, the claim, the event. Traits are optional —
-searchable, expiring, memory, queue, reactor, and `use()` for one this
-package does not ship. The document is not. Tenant is a field you write
+vector, the deadline, the claim. Traits are optional — searchable,
+expiring, forgettable, memory, queue, and `use()` for one this package does
+not ship. The document is not. Tenant is a field you write
 once and the index is not allowed to forget.
 
 **Controller** is what the runtime does when the world is broken, which

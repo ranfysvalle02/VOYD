@@ -81,17 +81,12 @@ class Voyd:
 
         @app.get("/healthz", include_in_schema=False)
         async def healthz():
-            """Includes the search tier and whether change-stream pre-images are
-            on, so a degraded deployment is visible to a probe instead of only
-            showing up as quietly worse results -- or, for pre-images, as blobs
-            that are never reclaimed."""
+            """The search tier, what refusal has refused, and who owns the
+            embedding -- so a degraded deployment is visible to a probe
+            rather than only as quietly worse results."""
             engine = self.store.engine
             health = engine.health() if engine else {}
-            return {"ok": True, "domain": self.domain,
-                    # None = not attempted; False = blob GC via change stream
-                    # is off, so expired voids leave their objects behind.
-                    "pre_images": getattr(self.store, "pre_images", None),
-                    **health}
+            return {"ok": True, "domain": self.domain, **health}
 
         return app
 

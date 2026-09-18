@@ -1,6 +1,6 @@
 """A primitive is a trait. That is the extension point.
 
-The six builtins are not a closed set. They are objects with a ``kind``,
+The five builtins are not a closed set. They are objects with a ``kind``,
 a ``collection``, and ``async ensure()`` -- schema the replica set should
 maintain. ``Engine.use()`` installs one. ``ensure()`` builds every installed
 trait, then TTL, then search (search waits). ``health()`` lists them.

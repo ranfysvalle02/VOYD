@@ -5,6 +5,8 @@
 **Component:** `mongodb/mongodb-atlas-local` (Atlas Local / `localDev` mongot edition)
 **Severity:** low for correctness, high for developer experience
 **Type:** feature-parity gap, plus a misleading error message
+**Confirmed against production Atlas:** the feature works there (mongod
+9.0.1, `voyage-4`); this is specifically about the local edition
 
 ---
 
@@ -37,6 +39,26 @@ defect:
 
 I am not assuming (1) is a bug. It may be a deliberate boundary of the local
 edition. The ask is a decision and a clear signal, not necessarily a feature.
+
+**Since filing, I ran the same code against a real Atlas cluster and it works
+end to end** -- index created, documents embedded server-side, text queries
+returning the right rows, tenant filters intact. So the feature is sound and
+this report is narrowly about the local-development story.
+
+That comparison also sharpens point (2). Production says:
+
+    Unsupported model 'voyage-3-large' in index: ae. Supported models are:
+    [voyage-code-4, voyage-4, voyage-code-3, voyage-4-large, voyage-4-lite]
+
+which is a genuinely good error -- it names the alternatives and I fixed my
+code from it in one attempt. Atlas Local says:
+
+    CanonicalModel: voyage-3-large not registered yet, supported models are: []
+
+Same failure class, and the empty list plus "not registered yet" reads as a
+transient or misconfigured state rather than an unsupported edition. Making
+the local message say what the production one says -- minus the list, plus
+the reason it is empty -- would close the entire gap between them.
 
 ---
 
@@ -147,19 +169,25 @@ Recorded so nobody repeats it:
 
 The pattern Atlas Local exists to support is "develop against the same engine
 you deploy to, with no Atlas account." That holds well for `$vectorSearch`,
-`$search`, `$rankFusion`, change streams with pre-images, and TTL — all of
-which this project depends on and tests locally, in CI, with no mock tier.
+`$search`, `$rankFusion`, TTL indexes and change streams — all of which this
+project depends on and tests locally, in CI, with no mock tier.
 
-`autoEmbed` is the one feature where that breaks, and it breaks in the
+`autoEmbed` is the one feature where it breaks, and it breaks in the
 direction that costs the most: a project can adopt it, ship it, and only
-discover at deploy time that its local suite never covered it. In my case the
-consequence was the reverse and cheaper — I evaluated adopting automatic
-embedding, found it untestable locally, and declined, because making it the
-default would have broken a quickstart whose whole promise is "docker compose
-up, no account, no API key."
+discover at deploy time that its local suite never covered a line of it.
 
-That is a reasonable outcome for me. It is also a feature going unadopted for
-an environmental reason rather than a technical one.
+What I did instead, and would recommend to anyone in the same position: treat
+the capability as *declared* rather than assumed. The application names the
+model it wants; index creation either succeeds or is refused, and a refusal
+falls back to a client-computed vector index — logged, counted, and visible
+on a health endpoint. The same code then takes the server-side path wherever
+models exist. That made it safe to adopt before the local edition caught up,
+and the fallback is what CI exercises every run.
+
+It is still a worse outcome than parity. The happy path had to be written
+blind, from error messages, and sat unverified until a cluster was available.
+It turned out to be correct -- but "turned out to be" is doing real work in
+that sentence.
 
 ---
 

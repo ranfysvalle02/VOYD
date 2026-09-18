@@ -22,8 +22,8 @@ def main() -> None:
     try:
         app = build_app(settings)
     except ModuleNotFoundError as exc:
-        # VOYD_R2_* configured without the 'r2' extra. The message already
-        # names the install, so print it rather than a traceback.
+        # An extra is configured but not installed. The message already names
+        # the install, so print it rather than a traceback.
         raise SystemExit(str(exc)) from exc
     app.run(host=settings.host, port=settings.port)
 

@@ -9,7 +9,8 @@ The reason a deadline here is trustworthy is that one thing owns it. Split this
 across Postgres for metadata, Pinecone for vectors, S3 for blobs and a cron for
 cleanup, and you have four expiries with four owners and four ways to drift --
 the vector outliving the document is the bug class. Here it is one document
-with one ``expire_at``, and the delete event is itself the GC trigger.
+with one ``expire_at``, and the row carries its own text and vector, so
+there is no second store to keep in step.
 
 - **Scope** -- a ``voyd`` is a namespace the Host header selects; a void is a
   scope inside it. Every query below is filtered by ``voyd_id``, and the filter
@@ -19,16 +20,15 @@ with one ``expire_at``, and the delete event is itself the GC trigger.
 - **Refusal** -- the reaper is eventual, so every read below goes through a
   ``Forgetting`` handle that cannot return an expired or revoked row. The
   deadline is enforced before the sweeper arrives, not by it.
-- **Guard** -- an access policy on the scope: passcode, max reads. Enforced on
-  every query and every byte fetched.
+- **Guard** -- an access policy on the scope: a passcode on every read.
 
 Design rules honoured here:
 - Embeddings live on document rows, never nested in a void (16MB wall;
   ``$vectorSearch`` returns parent docs).
-- Work is a document: ``indexed: false`` is the embed job; a delete event is
-  the blob GC event.
-- Text may arrive inline or be read from a blob. Both land in the same row,
-  because retrieval should not care where the bytes came from.
+- Work is a document: ``indexed: false`` is the embed job, claimed with
+  ``find_one_and_update`` rather than handed to a broker.
+- Text is a field. There is no upload path, so there is nothing to reclaim
+  when a deadline passes beyond the row itself.
 """
 
 from __future__ import annotations
@@ -58,19 +58,9 @@ TEXT_INDEX = "voyd_text_index"
 # list_collection_names() and our create_collection(). Benign by definition.
 NAMESPACE_EXISTS = 48
 
-# collMod refusing changeStreamPreAndPostImages for a reason no retry can fix:
-# a standalone mongod (no oplog) or a server too old to know the option. These
-# mean "no blob GC here", which is a deployment fact, not a fault.
-PREIMAGE_UNSUPPORTED_CODES = {
-    20,     # IllegalOperation
-    59,     # CommandNotFound
-    72,     # InvalidOptions
-    115,    # CommandNotSupported
-    40415,  # unknown field in command
-}
-
 # How many times a failing embed job is retried before it is parked as an error.
 MAX_EMBED_ATTEMPTS = 5
+
 
 class MongoStore:
     """The durable half of VOYD. Owns no HTTP and no opinions about surfaces."""
@@ -126,7 +116,8 @@ class MongoStore:
         db = self.db
         assert db is not None
 
-        # Ensure collections exist so we can enable pre-images for GC.
+        # Create the collections up front: a search index cannot be built
+        # on a namespace that does not exist yet.
         existing = set(await db.list_collection_names())
         for name in ("owners", "voyds", "voids", "documents"):
             if name not in existing:

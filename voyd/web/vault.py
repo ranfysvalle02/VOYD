@@ -23,8 +23,8 @@ collects eventually and a scope that is over has to read as gone now.
 
 Request bodies are Pydantic models, so the shape of a call is declared once and
 shows up in the OpenAPI schema instead of living in hand-rolled ``if`` ladders.
-Reading a guarded void -- by query or by byte -- is rate limited before the
-argon2 verify runs, because a slow hash is a cost ceiling and not a bound.
+Reading a guarded void is rate limited before the argon2 verify runs,
+because a slow hash is a cost ceiling and not a bound.
 """
 
 from __future__ import annotations
@@ -119,8 +119,8 @@ def _gate_read(request: Request, voyd: dict, token: str, void: dict,
     try:
         enforce(policy)
     except GuardError as e:
-        # 401 is the only credential failure. Anything else (a spent download
-        # allowance) means the passcode was accepted, so it clears the count.
+        # 401 is the only credential failure. Anything else means the
+        # passcode was accepted, so it clears the count.
         if e.status_code != 401:
             for key in keys:
                 _passcode_limiter.reset(key)
@@ -327,7 +327,7 @@ async def add_documents(request: Request, token: str,
     }
 
 
-# ---- the blob path (text already in object storage) --------------------
+# ---- forgetting --------------------------------------------------------
 
 @router.post("/voids/{token}/forget")
 async def forget(request: Request, token: str,
@@ -381,7 +381,7 @@ async def search_void(request: Request, token: str,
     if not void:
         raise HTTPException(404, "void not found.")
 
-    # Querying a guarded scope is reading it: same gate as the byte path.
+    # Querying a guarded scope is reading it, and reading is the only way in.
     _gate_read(request, voyd, token, void, lambda policy: enforce_query(
         policy, passcode=_passcode_from(request, body.passcode)))
 

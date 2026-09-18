@@ -106,10 +106,10 @@ Embedding is asynchronous, so `GET /v1/voids/{token}` is not an afterthought:
 "added" and "searchable" are different facts, and an index that is still
 building must never be mistaken for an empty scope.
 
-An hour later the documents, the embeddings and any bytes are gone together.
-You did not schedule that. There is no delete call in the happy path — and
-`forget` is not one either: it moves a deadline into the past so the same TTL
-index does the same work sooner.
+An hour later the documents and their embeddings are gone together, because
+they were always one row. You did not schedule that. There is no delete call
+in the happy path — and `forget` is not one either: it moves a deadline into
+the past so the same TTL index does the same work sooner.
 
 ## Why the deadline is trustworthy
 
@@ -277,8 +277,9 @@ breach that arrives as an answer.
 scope, collected by one TTL index, and enforced by a handle with no unfiltered
 read on it. The substrate, not a feature — see above for both halves.
 
-**Guard.** A passcode and a read limit on the scope, enforced on queries *and*
-on bytes — otherwise search is simply the way around the lock.
+**Guard.** A passcode on the scope, enforced on the read path. There used to
+be two doors — query and download — and gating one without the other would
+have made search the way around the lock. There is one door now.
 
 ## For agents
 
@@ -318,7 +319,7 @@ look like an empty one.
 ## Quickstart
 
 ```bash
-# Atlas Local: mongod + mongot. Vector search, $rankFusion, change streams, TTL.
+# Atlas Local: mongod + mongot. Vector search, $rankFusion, TTL.
 # No Atlas account.
 docker compose up -d
 cp .env.example .env
@@ -423,6 +424,24 @@ an empty scope.
 Hybrid exists because `P0301` has no useful embedding. Semantic search is bad at
 identifiers, and the things agents put in a scope are full of them. Fusion
 happens in the database: one round trip, no hand-normalised scores.
+
+Embedding has two owners, and which one is a deployment fact rather than a
+code path. `SearchSpec.auto_embed="voyage-4"` asks mongot to produce the
+vectors: the index holds text, the query is text, and nothing in this process
+ever computes an embedding — so a client-side embedder cannot drift from the
+index's model, because there is only one of them. A deployment that cannot
+do it refuses at index creation and the engine falls back to a
+client-supplied vector index, logged and reported as
+`embedding_owner` on `/healthz`. Declaring it is therefore safe before
+every deployment supports it.
+
+**Verified against Atlas** (mongod 9.0.1, `voyage-4`): documents stored with
+no vector field, text queries returning the right rows, the tenant boundary
+intact on the autoEmbed index shape, and `forget` still refusing a document
+whose vector this process never computed. **Not available on Atlas Local**,
+which registers no models — see [`BUG.md`](BUG.md). The models the cluster
+offered were `voyage-4`, `voyage-4-large`, `voyage-4-lite`, `voyage-code-4`
+and `voyage-code-3`; the voyage-3 family is not among them.
 
 | Tier | Requires | Used for |
 |---|---|---|
@@ -582,6 +601,9 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 | A read limit cannot be raced | twelve concurrent readers against a limit of three are served three |
 | "Added" is not "searchable" | `describe` reports pending vs indexed separately |
 | A wrong-width vector is not "indexed" | a 512-wide vector in a 1024 index is parked as `failed`, not counted as searchable |
+| The server can own the embedding | verified on Atlas: text in, no vector field stored, text query returns the right row |
+| Asking for it is safe where it is unavailable | Atlas Local refuses, the engine falls back to a client vector index, loudly |
+| Forgetting survives the server owning the vector | `revoke()` still refuses a row this process never embedded |
 | A cold index cannot look empty | unready indexes route to cosine, logged and counted |
 | A lost oplog window is not silent | `windows_lost` on `health()`, separate from routine `resumes` |
 | A 500 is not input validation | an unrepresentable `ttl_seconds` and an oversized `metadata` are 422s |

@@ -1,40 +1,36 @@
-"""The half that cannot be checked without a real cluster.
+"""Server-side embedding, verified against a real cluster.
 
-Everything else about ``auto_embed`` is asserted in
-``test_the_server_can_own_the_embedding.py``, against Atlas Local, which
-refuses the feature. That file proves *declaring* it is safe. It cannot prove
-the feature works, because nothing local can: mongot on the ``localDev``
-edition registers no models at all (see BUG.md).
+``auto_embed`` asks mongot to produce the vectors: the index holds text, the
+query is text, and nothing in this process ever computes an embedding. The
+companion file test_the_server_can_own_the_embedding.py proves that
+*declaring* it is safe on a deployment that cannot honour it -- Atlas Local
+registers no models at all, so it falls back, loudly (see BUG.md).
 
-This file is the other half, and it is skipped unless you hand it a cluster:
+This file is the other half, skipped unless handed a cluster:
 
-    VOYD_ATLAS_URI="mongodb+srv://..." uv run pytest tests/test_atlas_autoembed.py -v
+    VOYD_ATLAS_URI="mongodb+srv://..." uv run pytest tests/test_atlas_autoembed.py
 
-Point it at a deployment with an embedding model registered and it answers
-the question the local suite cannot: does the server actually embed, and does
-a text query actually come back with the right document?
+It was written before one was available, which is the point: three things
+could not be checked locally, and all three were settled on 18 September 2026
+against Atlas (mongod 9.0.1, model ``voyage-4``). All five tests passed.
 
-**Read the failures carefully.** Several assertions below encode beliefs that
-were derived from error messages rather than from a working system, and the
-useful outcome of a failure here is usually "the design was wrong", not "the
-cluster is broken". Each one says which is which.
+  1. The ``autoEmbed`` definition is complete. Local validation stopped at
+     the model check, so a required field could have been hiding behind it.
+     None is.
+  2. Writes need nothing extra. Rows go in as text and come back with no
+     ``embedding`` field -- the application genuinely never holds a vector.
+  3. Retrieval works, and so do the guarantees that matter more than it: the
+     tenant boundary holds on this index shape, and ``revoke()`` still
+     refuses a document whose vector this process never computed.
 
-What was already confirmed by the server, without a cluster, and so is *not*
-in doubt:
+Two shapes were confirmed earlier by the server itself, without a cluster,
+and both proved correct: ``autoEmbed`` requires ``model`` and
+``modality``, and ``$vectorSearch`` takes ``query`` for text, mutually
+exclusive with ``queryVector`` ("Exactly one and only one of query and
+queryVector can be present").
 
-- ``autoEmbed`` requires ``model`` and ``modality`` -- mongot demanded each
-  by name during validation.
-- ``$vectorSearch`` takes ``query`` for text, and it is mutually exclusive
-  with ``queryVector``: "Exactly one and only one of query and queryVector
-  can be present". The engine sends exactly one.
-
-What remains genuinely unknown, and is what this file exists to settle:
-
-- whether the ``autoEmbed`` field definition is *complete*, or whether more
-  required fields sit behind the model check that local validation never
-  reached,
-- whether writes need anything the application is not doing,
-- whether retrieval actually returns the document.
+These stay as tests rather than becoming a changelog entry: they are the only
+thing that will notice when a model is retired or the index shape changes.
 """
 
 from __future__ import annotations
@@ -46,7 +42,11 @@ import uuid
 import pytest
 
 ATLAS_URI = os.environ.get("VOYD_ATLAS_URI")
-MODEL = os.environ.get("VOYD_ATLAS_EMBED_MODEL", "voyage-3-large")
+# Verified against Atlas (mongod 9.0.1) on 18 Sep 2026. The cluster reports:
+#   voyage-4, voyage-4-large, voyage-4-lite, voyage-code-4, voyage-code-3
+# The voyage-3 family is *not* offered for autoEmbed, which is worth knowing
+# because it is what the documentation era suggests and it fails closed.
+MODEL = os.environ.get("VOYD_ATLAS_EMBED_MODEL", "voyage-4")
 
 pytestmark = pytest.mark.skipif(
     not ATLAS_URI,
