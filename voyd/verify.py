@@ -100,7 +100,7 @@ class Check:
 
 
 class Verifier:
-    """The four checks, and the parked-sweeper scaffolding they need."""
+    """The six checks, and the parked-sweeper scaffolding they need."""
 
     def __init__(self, client, db, *, quiet: bool = False):
         self.client = client
@@ -159,7 +159,7 @@ class Verifier:
 
         # A second collection, because clearance is a policy a collection
         # either has or does not, and bolting it onto the collection above
-        # would change what the other three checks are testing.
+        # would change what the other checks are measuring.
         classified = self.engine.model("verify_classified", tenant="scope")
         classified.searchable(text_paths=("text",), dimensions=DIMS)
         self.classified = classified.admitting(

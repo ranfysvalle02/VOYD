@@ -122,8 +122,8 @@ LIFT_BATCH = 1000
 class Rule(Protocol):
     """One reason a document may not reach a prompt.
 
-    Two optional class attributes change how a rule is treated, and both
-    default to the behaviour of the original three rules:
+    Three optional class attributes change how a rule is treated, and all
+    three default to the behaviour of the original rules:
 
     ``needs_caller``  the rule compares the document against *who is asking*,
                       so it is handed the caller's claims. A rule without it

@@ -571,10 +571,14 @@ actually degraded to.
   [ok  ] starvation: a page of refusals is refilled, not truncated
          filled 5 of 5 after examining 46 candidates, refusing 40
   [ok  ] clearance: a document above the caller's clearance is absent, not ranked
+  [ok  ] reversal: a hold can be lifted, an erasure cannot, and both reach the chain
+         held, unreachable, and no deadline on the evidence
+         an erasure refused to be lifted, as it must
+         a hold can escalate to an erasure; reasons stack
   [ok  ] chain: the refusal ledger recomputes intact
 ```
 
-Four of the five checks are worth reading closely for what they refuse to
+Five of the six checks are worth reading closely for what they refuse to
 accept as a pass:
 
 - **revocation** asserts the row is *still there* afterwards. A version that
@@ -583,6 +587,11 @@ accept as a pass:
 - **clearance** compares *both enforcement points against each other* per
   level, because the failure that matters is them disagreeing. The
   `$vectorSearch` path only ever uses one of the two.
+- **reversal** attacks the asymmetry from both sides, because a deployment
+  that has it backwards looks completely healthy. The 3am "support needs to
+  un-forget a document" patch passes every other check in the suite. So does
+  quarantine implemented as revoke-with-a-different-field-name — right reads,
+  right mark, right chain, and the evidence gone in a minute.
 - **chain** refuses to accept `intact` alone, because an empty chain verifies
   vacuously. A deployment recording nothing at all would have passed.
 - **deadline** reports that the unwrapped primitive *does* still leak. A
@@ -591,7 +600,7 @@ accept as a pass:
   after somebody removed the thing it tests.
 
 CI runs it on every commit. And `tests/test_the_falsifier_can_fail.py` breaks
-the guarantee six different ways to prove each check bites — because a checker
+the guarantee eight different ways to prove each check bites — because a checker
 that cannot fail is worse than no checker. It converts an unknown into a false
 assurance, and then somebody makes a promise on it.
 
@@ -762,11 +771,14 @@ cannot be forgotten by the next author. The answer reports what it refused, so
 a model cannot mistake withheld for absent. The revocation is a link in a
 chain, and you keep the receipt, so the record is evidence rather than
 testimony. And the caller's claims are part of the question, so one scope can
-hold documents of different sensitivity without becoming four boundaries.
+hold documents of different sensitivity without becoming four boundaries. And
+a reason declares whether it can be taken back, so a hold is an investigation
+rather than a graveyard, and an erasure stays an erasure.
 
-372 tests, five skipped. A falsifier that has failed on purpose six ways and
-caught one real bug on its first run. Three bugs found in the proof, and one
-found by writing an example. Every number in this essay is in `bench/` or
+397 tests, six skipped. A falsifier that has failed on purpose eight ways and
+caught one real bug on its first run. Three bugs found in the proof, one found
+by writing an example, and three silent no-ops found by asking whether a
+refusal should be undoable. Every number in this essay is in `bench/` or
 `drift/` and re-runnable on a laptop.
 
 The row is still on disk. That is not the part that went wrong.

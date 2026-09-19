@@ -357,6 +357,18 @@ Neither costs anything when unused: no extra round trip is issued unless
 thing is the default, the dangerous thing exists and has a word a reviewer can
 grep for.
 
+```bash
+uv run python examples/hold.py       # ~5 seconds, no API key, no vendor
+```
+
+**Scope, stated plainly:** holds are an engine primitive and are deliberately
+not on the HTTP or MCP surface yet. Deciding *who may release* is an
+authorisation question this service does not have an answer for — the passcode
+gates a scope, not a review workflow — and shipping `release` before that
+answer exists would put "re-admit a document a detector flagged" behind the
+same credential as "read the scope". The reviewer queue is the next piece;
+`engine.queue(when=…)` already exists and the document is already the job.
+
 ### An embedding is a (vector, model) pair
 
 `EmbeddedWith` is the rule that justifies the whole shape, because the bug it
@@ -425,9 +437,11 @@ That row is deliberately still on disk. It isn't a failure to clean up — it's
 the proof. **Unreachable first, erased second**, because the reverse order is
 the bug.
 
-Four reasons a fact may not reach a prompt, one question, one place that
-answers it: a **deadline** passed, it was **revoked**, its deadline is
-**unreadable** (fails closed), or — the absence of all three — it is **pinned**.
+Four answers to one question, from one place: a **deadline** passed, it was
+**revoked**, its deadline is **unreadable** (fails closed), or — the absence
+of all three — it is **pinned**. Reasons beyond those are rules you add, and
+[they compose](#a-hold-is-not-an-erasure-and-the-reason-knows-which-it-is):
+a held document can still be erased.
 
 Two enforcement points, always both: the rule is pushed into the query where
 the query can express it, *and* re-checked per document on the way out. That
@@ -635,7 +649,7 @@ install voyd`: no app extra, no running server, and it only ever touches a
 scratch database it creates and drops.
 
 CI runs it on every commit, and `tests/test_the_falsifier_can_fail.py` breaks
-the guarantee four different ways to prove each check bites. A checker that
+the guarantee eight different ways to prove each check bites. A checker that
 cannot fail is worse than no checker — it turns an unknown into a false
 assurance somebody then makes a promise on.
 
@@ -734,6 +748,7 @@ purpose: the point being demonstrated is the database, not the model.
 | `examples/why_this_belongs_in_the_database.py` | The exhibit. Parks the TTL monitor, runs the query *as it was written before the deadline check existed* — an expired document comes back as a confident, scored, well-formed hit — then the same search refusing it. Self-checking. |
 | `examples/worker.py` | A queue with no queue. The document *is* the job; `fail()` decides whether the failure was the world (retry) or the document (park). |
 | `examples/agent.py` | Memory that forgets: hybrid recall + TTL, pinning as the absence of a deadline. What an agent backend actually needs. |
+| `examples/hold.py` | The asymmetry, end to end: a detector flags a document, it is held without a deadline, reviewed and released — then a second one is held, escalated to an erasure, and refuses to be taken back. Both directions on the chain, three counters that mean different things, and a reason this package has never seen behaving identically. |
 | `examples/clearance.py` | The same query, three callers, one scope. What a document is classified plus what a caller is cleared for, compared per hit — and the audit handle that can waive a revocation but not a clearance. |
 | `examples/scope.py` | The HTTP product end to end, through the same client the MCP server wraps. Needs a running server and an API key. |
 
@@ -1082,7 +1097,18 @@ that has nothing to do with either of them.
 | A chain cannot fork under concurrency | twelve concurrent revocations produce twelve linear links |
 | A hash survives its own round trip | the stored entry hashes to the receipt handed out, field by field |
 | An unrecordable refusal still refuses | a broken ledger cannot turn a completed revocation into an error |
-| The falsifier can fail | four ways of breaking the guarantee, each caught by the check that claims it |
+| The falsifier can fail | eight ways of breaking the guarantee, each caught by the check that claims it |
+| An erasure cannot be taken back | `lift()` raises on an irreversible reason, and `release()` is not a way around it |
+| A hold can be | imposed, lifted, and counted apart from erasure, because overruling a detector is its own number |
+| A hold does not destroy its own evidence | imposing a reversible reason stamps no erase deadline |
+| Reasons stack | a quarantined document can still be erased; an expired one can still answer an erasure request |
+| A revocation never extends a row's life | the deadline moves earlier or not at all, so `erase_after` is a cap |
+| A retry cannot buy an erased row a new lease | already-marked documents are excluded from the write, not re-stamped |
+| Re-admitting is not a way past clearance | `lift()` runs the per-document check, because it is the only verb that *grants* reachability |
+| Un-refusing reaches the chain too | a record of one direction of a two-direction transition is intact and false |
+| Forgetting the whole scope has to be said out loud | a filter that narrows nothing beyond the tenant raises unless `everything=True` |
+| A write with no undo checks its blast radius first | `expect=n` counts before it writes, and writes nothing on a mismatch |
+| A caller-supplied reason cannot be an expression | `$`-prefixed reasons are stored verbatim, not read as a field path |
 | No module reaches past the handle | the AST of every module in the package, not a review comment |
 | A caller with no clearance claim gets nothing | absence is the lowest level, asserted for four shapes of missing |
 | An unrecognised classification is refused, not ranked low | a renamed level cannot become world-readable |

@@ -38,6 +38,15 @@ next read while its row is still on disk -- deletion is a storage event,
 refusal is a retrieval guarantee, and only the second one can be immediate.
 See ``examples/refuse.py``.
 
+Not every refusal is an erasure, and the difference is declared on the reason
+rather than decided by the verb. ``revoked()`` is an instruction about the
+world and cannot be taken back; ``quarantined()`` is a hypothesis, so
+``quarantine()`` holds a document without giving its row a deadline -- the row
+is the evidence -- and ``release()`` lifts it. One word on the rule,
+``reversible``, decides whether ``lift()`` works, whether imposing it schedules
+the reaper, and what the chain records on the way back out. See
+``examples/hold.py``.
+
 **Guard** -- an access policy on the *scope*: a passcode, enforced on the
 read path. ``Guard`` asks whether this caller may read the
 scope and ``Admission`` asks whether this document may reach a prompt; the
