@@ -712,8 +712,8 @@ class Page(list):
     ``starved`` is the field worth wiring to an alert, and its definition is
     narrower than it first looks. It is not "short", and it is not "short and
     something was refused" -- that was the first definition here and it was
-    wrong, and the falsifier shipped alongside it caught the mistake within
-    the hour: it flagged a page that asked for 50, got 1, and was *complete*: one live document existed, the rest were
+    wrong, and the deployment check shipped alongside it caught the mistake
+    within the hour: it flagged a page that asked for 50, got 1, and was *complete*: one live document existed, the rest were
     expired, and nothing further down the ranking was being withheld. A short
     answer over an exhausted candidate list is the whole truth, however many
     refusals it took to establish. Flagging it would have trained whoever

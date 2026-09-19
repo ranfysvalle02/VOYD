@@ -74,9 +74,9 @@ returns what survives — **zero hits**. Six live, indexed, on-disk documents,
 reported as an empty scope. The caller's model then answers *"I don't have
 information about that,"* confidently, and the user believes it.
 
-This shipped. It was caught by the falsifier written alongside it, which
-also flagged a healthy page on its first run and taught us that "short" and
-"short **and** withholding" are different states.
+This shipped. It was caught by a deployment check written alongside it,
+which also flagged a *healthy* page on its first run and taught us that
+"short" and "short **and** withholding" are different states.
 
 → `Page.starved` is set only when candidates remained, and the page is
 refilled from the refusal rate just measured.
@@ -175,11 +175,8 @@ what the failure defeats.
 
 So the response is structural rather than vigilant. The unfiltered read does
 not exist. The plaintext write is refused by the server. The mark travels
-down the edge on its own. And the experiment that would prove all of it
-wrong ships in the box:
+down the edge on its own.
 
-```bash
-voyd verify --uri "$MONGO_URI"    # 0 = every claim held on your deployment
-```
-
-If it exits non-zero, believe it over this file.
+And where a claim cannot be made structural, it is stated rather than
+implied — [`ISSUES.md`](ISSUES.md) lists what is unproven in what already
+ships, and `drift/` runs the counter-argument instead of asserting it.

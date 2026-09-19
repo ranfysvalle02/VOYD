@@ -671,3 +671,71 @@ async def test_the_model_rule_holds_on_both_enforcement_points(core):
     raw = [d async for d in db.notes.find({"t": "a"})]
     assert {d["text"] for d in docs.reachable(raw)} == {"current", "queued"}
     assert docs.receipts()["refused_by_reason"][WRONG_MODEL] == 1
+
+
+# ---- every read path, and the one that is not a read path -------------
+
+async def test_every_read_path_on_the_handle_refuses(core):
+    """The historical bug was never "the rule is wrong" -- it was "one read
+    path did not apply it". Six read paths once went to MongoDB with a
+    tenant filter and no deadline, so a check that exercised one of them
+    would have passed on the day they all leaked.
+
+    So they are enumerated. A new one added to ``Admission`` and not added
+    here is the gap this test exists to make visible.
+    """
+    engine, db = core
+    model = engine.model("facts", tenant="t")
+    model.searchable(text_paths=("name",), dimensions=8)
+    docs = model.forgettable()
+    await engine.ensure(search_wait_s=0)
+    await db.facts.insert_many([
+        {"t": "a", "name": "live", "embedding": [0.1] * 8},
+        {"t": "a", "name": "expired", "expire_at": at(hours=-1),
+         "embedding": [0.1] * 8},
+    ])
+
+    paths = {
+        "find": [d["name"] for d in await docs.find({"t": "a"})],
+        "find_one": [d["name"] for d in
+                     [await docs.find_one({"t": "a", "name": "expired"})] if d],
+        "search": [d["name"] for d in
+                   await docs.search([0.1] * 8, limit=10, filters={"t": "a"})],
+    }
+    for path, names in paths.items():
+        assert "expired" not in names, f"{path} returned a forgotten fact"
+    assert await docs.count({"t": "a"}) == 1
+
+
+async def test_the_search_primitive_still_leaks_which_is_the_point(core):
+    """The non-tautology guard, and it asserts a *failure* on purpose.
+
+    ``engine.search`` is the primitive, not a read path: it returns what
+    the index ranked, and the deadline is deliberately not in the vector
+    index. If that ever stopped being true, the test above would quietly
+    become a tautology -- it would keep passing after somebody removed the
+    thing it tests, because the primitive would be doing the work.
+
+    A falsified expectation is worth knowing too, which is why this asserts
+    the sharp edge is still sharp rather than that it has been filed off.
+    """
+    engine, db = core
+    # Declared so the collection has the same shape as above; the point is
+    # that the primitive does not go through the handle.
+    model = engine.model("facts", tenant="t")
+    model.searchable(text_paths=("name",), dimensions=8)
+    model.forgettable()
+    await engine.ensure(search_wait_s=0)
+    await db.facts.insert_one({"t": "a", "name": "expired",
+                               "expire_at": at(hours=-1),
+                               "embedding": [0.1] * 8})
+
+    leaked = await engine.search("facts", [0.1] * 8, limit=10,
+                                 filters={"t": "a"})
+
+    assert [d["name"] for d in leaked] == ["expired"], (
+        "the unwrapped primitive no longer returns forgotten documents. "
+        "Either the deadline was pushed into the index -- which search.py "
+        "measured and rejected -- or the handle's guarantee is now being "
+        "provided by something else, and the read-path tests above have "
+        "become tautologies")

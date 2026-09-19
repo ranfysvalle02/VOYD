@@ -399,7 +399,7 @@ class Ledger:
         correct number of callers. Verifying a signature with the same key
         that just produced it cannot fail: it is a tautology, and a check that
         cannot fail is worse than no check, because it reads as one. (That was
-        tried. The deployment falsifier grew a signature check, and the check
+        tried. A deployment check once grew a signature check, and the check
         passed after the key was swapped out from under it.)
 
         So this is the *reader's* half of ``sign()`` -- for the auditor, or

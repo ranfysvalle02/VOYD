@@ -148,31 +148,29 @@ schedule, on purpose, on record.
 
 ## Don't believe a word of this
 
-Here's the part no other retrieval pitch will offer you.
+Here's the part no other retrieval pitch will offer you: a list of what's
+wrong with it.
 
-Every system's README makes claims. None of them hands you the experiment
-that would disprove them — which is worst precisely here, because this
-failure is **silent by construction**. A property whose violation is
-invisible can't be checked by looking. It has to be attacked.
+[`ISSUES.md`](ISSUES.md) ships in the repo — defects, unproven claims and
+imprecisions in what already works, each with what would close it. Including
+the one that costs us something: **the enterprise KMS path has never been
+run against a real KMS.** The shapes are unit-tested and share a code path
+with the local rung. That is not the same claim, and we say so rather than
+letting the feature list imply otherwise.
 
-```bash
-voyd verify --uri "$MONGO_URI"
-# 0 = every claim above held on YOUR deployment
-# 1 = one of them didn't, and you should believe it over this file
-```
+The rest is checkable without trusting us:
 
-It parks your TTL monitor so "still on disk" is a fact rather than a race.
-It plants documents that must not be reachable and asks for them every way
-the code can be asked. Eight checks. Thirteen proven ways to break them,
-because *a checker that can't fail converts an unknown into a false
-assurance.*
+- **The tests run against a real MongoDB.** No mock tier. The properties
+  here are only true if the *queries* are right, so CI stands up Atlas Local
+  and runs against real `mongot`.
+- **`drift/` runs the counter-argument.** `exhibit.py` stands up Postgres,
+  Qdrant and MinIO and shows the deleted document answering a query.
+  `refusal_on_postgres.py` ports the entire thesis to pgvector — no MongoDB
+  in the file — and states plainly what is *harder* there.
+- **The engine is one dependency.** `pymongo`. Read it in an afternoon.
 
-We also publish [`ISSUES.md`](ISSUES.md) — what's wrong, unproven or
-imprecise in what already ships. Including the one claim we haven't yet
-tested against a real cloud KMS.
-
-Marketing that ships its own falsifier and its own defect list is either
-confident or unwell. **Run it and find out.**
+Marketing that ships its own defect list is either confident or unwell.
+**Read the issues first and decide.**
 
 ---
 

@@ -330,7 +330,7 @@ async def test_a_sealed_sink_that_actually_caches_plaintext_is_caught():
 
 async def test_a_sealed_sink_with_no_verify_is_unchecked_not_passing():
     """A claim nobody checked and a claim that was checked must not look
-    the same -- the same argument ``voyd verify`` makes about a skipped
+    the same -- the same argument this package makes about a skipped
     test."""
     p = Perimeter().register(a_sink("quiet", SEALED))
     ack = (await p.audit(shredded_id="x"))[0]

@@ -354,7 +354,7 @@ class Perimeter:
         A sink with no ``verify`` is reported **unverified rather than
         passing**, which is the whole point -- a claim nobody checked and a
         claim that was checked must not look the same, and that is the same
-        argument the falsifier makes about a skipped test.
+        argument this package makes about a skipped test.
 
         **This is a pre-flight check, and on its own that is not enough.**
         A sink that starts caching plaintext the day after an audit is

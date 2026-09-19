@@ -46,13 +46,13 @@ only the first is currently true.
   tokens, an IAM change — see issue 2, which is now fixed but has only
   ever been tested against a simulated failure.
 
-**Closing it needs more than one run.** This project's standard is that
-`voyd verify` exits non-zero on *your* deployment and the falsifier proves
-each check bites. Holding that for KMS means credentials in CI, which means
-org secrets, which means the falsifier cannot run on forks. The honest
-resolution is probably an opt-in job gated on secrets that **skips loudly**
-— the pattern already used for `crypt_shared`. A one-off manual run is
-worth doing first, and is not the same thing.
+**Closing it needs more than one run.** This project's standard is that a
+claim is checked against real infrastructure in CI rather than asserted.
+Holding that for KMS means credentials in CI, which means org secrets,
+which means forks cannot run the suite in full. The honest resolution is
+probably an opt-in job gated on secrets that **skips loudly** — the
+pattern already used for `crypt_shared`. A one-off manual run is worth
+doing first, and is not the same thing.
 
 ---
 

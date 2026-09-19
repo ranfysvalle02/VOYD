@@ -36,11 +36,10 @@ worker that retries erasures is a worker with credentials for every
 registered sink, and where that runs is a deployment decision this package
 should not make quietly.
 
-**`audit()` has no home in `voyd verify`.** It needs a genuinely shredded
-id, which the shredding check already produces — so the two belong
-together, and a deployment could then be told "your mirror claims to hold
-ciphertext and caches plaintext" by the same command that proves
-everything else.
+**`audit()` has no scheduled caller.** It needs a genuinely shredded id to
+hand a sink, which makes it natural to run right after a shred — so a
+deployment could be told "your mirror claims to hold ciphertext and caches
+plaintext" at the moment the claim matters, rather than never.
 
 **Class C is findable but not indexed.** See item 2.
 

@@ -32,7 +32,7 @@ PACKAGE = Path(__file__).resolve().parents[1] / "voyd"
 
 # ``admission.py`` is where the wrapping lives, so it must call the
 # primitive. ``verify.py`` calls it deliberately to assert that the unwrapped
-# version really does leak -- if that stopped being true, the falsifier's
+# version really does leak -- if that stopped being true, the read-path
 # read-path check would have become a tautology, so it is a call worth
 # keeping and worth exempting by name.
 ALLOWED = {"admission.py", "verify.py"}

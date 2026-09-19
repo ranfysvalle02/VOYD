@@ -88,7 +88,7 @@ async def test_a_short_page_over_exhausted_candidates_is_not_starved():
     One live document exists and five were asked for. The page is short and
     it is also the *whole truth* -- there is nothing further down the ranking
     being withheld, however many refusals it took to establish that. This
-    was the first definition of ``starved`` and it was wrong: ``voyd verify``
+    was the first definition of ``starved`` and it was wrong: a check
     flagged exactly this shape on a healthy deployment, and a warning that
     fires when nothing is wrong is a warning people learn to ignore.
     """

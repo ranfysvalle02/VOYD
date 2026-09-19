@@ -322,7 +322,7 @@ whoever reads the field to ignore it, which costs more than not having the
 field. So `starved` now means: the search gave up while candidates remained.
 There is more, and this page could not reach it.
 
-I did not work that out by thinking. The falsifier told me, on its first run,
+I did not work that out by thinking. A deployment check told me, on its first run,
 about the feature I had shipped alongside it.
 
 ## What a guarantee owes an auditor
@@ -543,84 +543,39 @@ detects an event that was never written to it. Re-admitting erased information
 is a new document with new provenance — a different operation, with a
 different audit story.
 
-## Ship the experiment that would disprove you
+## Check it against the real thing, not a mock
 
-Every retrieval system's README makes claims. None of them hands you the thing
-that would falsify the claims, and that asymmetry is worst precisely here:
-this failure is **silent by construction**. A forgotten document answering a
-query looks like a working system. A property whose violation is invisible
-cannot be checked by looking at it. It has to be attacked.
+Every retrieval system's test suite proves its properties against whatever
+the author happened to run. That is worth less than it looks here, because
+this failure lives in the *queries*: a search index that is missing or still
+building returns zero rows rather than raising, a tier that silently
+degraded takes a different code path, and a driver that decodes dates naive
+skips the filter entirely.
 
-```bash
-voyd verify --uri "$MONGO_URI"    # exit 0 = the guarantee held here
-```
+So there is no mock tier. CI stands up Atlas Local and runs the suite
+against real `mongot`, the same path a laptop uses, and the tests are
+written as arguments rather than as coverage:
 
-It parks the TTL monitor so "still on disk" is a fact rather than a race,
-plants documents that must not be reachable, asks for them through every read
-path that carries the guarantee, and exits non-zero if any of them answers —
-against your indexes, your MongoDB version, and whatever tier your deployment
-actually degraded to.
+- **`test_admission_is_structural.py`** writes the naive read — the query a
+  developer produces when they have never heard of `expire_at` — and
+  asserts it is still safe. It also asserts the *unwrapped primitive still
+  leaks*, because if that stopped being true the other checks would quietly
+  become tautologies: they would keep passing after somebody removed the
+  thing they test.
+- **`test_no_module_reaches_past_the_handle.py`** walks the AST of every
+  module in the package and fails if one calls the search primitive on a
+  collection that refuses. Two files are exempt, each with a stated reason.
+- **`test_a_third_party_rule_is_a_first_class_reason.py`** installs two
+  rules this package does not ship and asserts they survive the whole loop,
+  with both enforcement points agreeing.
 
-```
-  mongodb 8.2.11  tier=hybrid  search=True
+And `drift/` runs the counter-argument instead of asserting it: three real
+services, a document that outlives its deletion, and a port of the entire
+thesis to pgvector that says out loud what is *harder* there.
 
-  [ok  ] deadline: an expired document is unreachable while its row is on disk
-         the row is still on disk (TTL monitor parked), so every refusal below
-         is the read path and not the sweeper
-  [ok  ] revocation: a revoked fact is refused on the next read, and its row stays
-  [ok  ] starvation: a page of refusals is refilled, not truncated
-         filled 5 of 5 after examining 46 candidates, refusing 40
-  [ok  ] clearance: a document above the caller's clearance is absent, not ranked
-  [ok  ] shredding: destroying a scope's key makes its ciphertext unreadable
-         everywhere, not just here
-  [ok  ] inheritance: forgetting a fact forgets what was written out of it
-         the source, its summary and the summary's summary all went, in one
-         query, at any depth
-  [ok  ] reversal: a hold can be lifted, an erasure cannot, and both reach the chain
-         held, unreachable, and no deadline on the evidence
-         an erasure refused to be lifted, as it must
-         a hold can escalate to an erasure; reasons stack
-  [ok  ] chain: the refusal ledger recomputes intact
-```
-
-Six of the eight checks are worth reading closely for what they refuse to
-accept as a pass:
-
-- **revocation** asserts the row is *still there* afterwards. A version that
-  deleted on `forget` would pass any check asking only "is it unreachable" and
-  would break the actual promise — you cannot investigate what you erased.
-- **clearance** compares *both enforcement points against each other* per
-  level, because the failure that matters is them disagreeing. The
-  `$vectorSearch` path only ever uses one of the two.
-- **reversal** attacks the asymmetry from both sides, because a deployment
-  that has it backwards looks completely healthy. The 3am "support needs to
-  un-forget a document" patch passes every other check in the suite. So does
-  quarantine implemented as revoke-with-a-different-field-name — right reads,
-  right mark, right chain, and the evidence gone in a minute.
-- **inheritance** is the one that found a hole rather than guarding one. An
-  agent summarises a document and writes the summary back; the erasure
-  request arrives; `revoke()` honours it against the source and the summary
-  keeps scoring well forever. The erasure is satisfied, the information is
-  not gone, and every receipt says the system worked. It checks both halves,
-  because either alone is decoration: the mark must travel down the
-  derivation edge to work already written, *and* a new derivation from an
-  erased parent must be refused — otherwise you revoke at 14:02, summarise
-  at 14:03, and the contamination is clean.
-- **chain** refuses to accept `intact` alone, because an empty chain verifies
-  vacuously. A deployment recording nothing at all would have passed.
-- **deadline** reports that the unwrapped primitive *does* still leak. A
-  falsified expectation is worth knowing too: if that stopped being true, the
-  read-path check would have quietly become a tautology and would keep passing
-  after somebody removed the thing it tests.
-
-CI runs it on every commit. And `tests/test_the_falsifier_can_fail.py` breaks
-the guarantee thirteen different ways to prove each check bites — because a checker
-that cannot fail is worse than no checker. It converts an unknown into a false
-assurance, and then somebody makes a promise on it.
-
-The best argument for building this is the first thing it did: it flagged a
-healthy deployment, because my definition of `starved` was wrong. The tool
-found the feature it shipped with.
+The honest limit: all of that runs against infrastructure I chose. What is
+unproven on yours is listed in `ISSUES.md`, including the one that costs
+something — the enterprise KMS path has never been run against a real KMS.
 
 ## Why MongoDB, specifically — and what that does not mean
 
@@ -895,7 +850,7 @@ So custody is typed and it is a ladder: `Ephemeral` (demo; nothing survives
 a restart, and it warns) → `LocalFile` (durable; custody is a file
 permission) → `Aws`/`Azure`/`Gcp`/`Kmip` (destroying the CMK is somebody
 else's audited operation). `durable` and `audited` are attributes rather
-than prose, so `voyd verify` *prints* the custody story instead of leaving a
+than prose, so a deployment *prints* its custody story instead of leaving a
 reader to infer it — and on the weak rungs it says, in the same output as
 the passing check, that "the key was destroyed" is still this deployment's
 own word.
@@ -955,16 +910,16 @@ hold documents of different sensitivity without becoming four boundaries. And
 a reason declares whether it can be taken back, so a hold is an investigation
 rather than a graveyard, and an erasure stays an erasure.
 
-568 tests, six skipped. A falsifier that has failed on purpose thirteen ways and
-caught one real bug on its first run. Three bugs found in the proof, one found
-by writing an example, and three silent no-ops found by asking whether a
-refusal should be undoable. Every number in this essay is in `bench/` or
-`drift/` and re-runnable on a laptop.
+553 tests, six skipped, run against real `mongot` rather than a mock.
+Three bugs found in the proof, one found by writing an example, three
+silent no-ops found by asking whether a refusal should be undoable, and two
+more found by chasing flakes instead of retrying them. Every number in this
+essay is in `bench/` or `drift/` and re-runnable on a laptop.
 
 The row is still on disk. That is not the part that went wrong.
 
 ```bash
 docker compose up -d
 uv run python examples/forget.py     # ~10 seconds, no API key, no vendor
-voyd verify                          # then point it at your own deployment
+uv run --extra drift python drift/exhibit.py   # then the counter-argument
 ```

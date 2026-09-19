@@ -90,9 +90,6 @@ Issues = "https://github.com/ranfysvalle02/VOYD/issues"
 [project.scripts]
 voyd = "voyd.__main__:main"
 voyd-mcp = "voyd.mcp:main"
-# The falsifier, as its own entry point: `voyd verify` works too, but CI is
-# easier to read when the command names what it does.
-voyd-verify = "voyd.verify:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -44,9 +44,9 @@ jobs:
       - name: crypt_shared, for the automatic-encryption path
         # pip cannot supply this: automatic encryption needs MongoDB's
         # query-analysis library, which is an Enterprise download. Without it
-        # `tests/test_a_destroyed_key_is_the_stronger_erasure.py` skips and
-        # `voyd verify`'s shredding check reports SKIPPED -- both loudly, but
-        # a skip that is always a skip is a test nobody has ever run.
+        # `tests/test_a_destroyed_key_is_the_stronger_erasure.py` and the
+        # queryable-encryption tests skip -- loudly, but a skip that is
+        # always a skip is a test nobody has ever run.
         #
         # Version-pinned rather than `latest`: this is a download, and a
         # silently-moving binary under a correctness test is how a CI run
@@ -149,19 +149,6 @@ jobs:
           # and the suite polls up to ~60s per ensure() rather than sleeping.
           VOYD_TEST_MONGO_URI: mongodb://localhost:27018/?directConnection=true
         run: uv run --no-sync pytest -q
-
-      - name: Verify the guarantee on the deployment CI actually got
-        # The suite proves the properties against the schema the tests
-        # declare. This attacks them against a live deployment through the
-        # same command a stranger is told to run -- so the tool that is
-        # advertised as the falsifier is itself known to work on every
-        # commit, and its exit code is load-bearing.
-        #
-        # It parks ttlMonitorSleepSecs, a server global, so it runs after the
-        # suite rather than beside it.
-        run: |
-          uv run --no-sync voyd-verify \
-            --uri "mongodb://localhost:27018/?directConnection=true"
 
       - name: Mongo logs on failure
         if: failure()

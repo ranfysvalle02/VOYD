@@ -113,9 +113,9 @@ API as five agent tools, none of which is a delete -- ``forget`` changes
 reachability and hands the agent no cleanup obligation, which is why it costs
 nothing to offer.
 
-``voyd verify`` is the falsifier: it attacks these guarantees on a live
-deployment and exits non-zero if any read path answers with something it
-should have refused.
+Every claim above is asserted by the test suite against a real MongoDB --
+no mock tier, on purpose, because these properties are only true if the
+*queries* are right.
 """
 
 from __future__ import annotations

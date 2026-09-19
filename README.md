@@ -597,7 +597,7 @@ had to change — carrying `refused`, `examined` and `starved`.
 `starved` is narrow on purpose: the page is short **and** the search gave up
 while candidates remained. A short answer over an exhausted candidate list is
 the whole truth, however many refusals it took to establish. The first
-definition here flagged those too, and `voyd verify` caught it doing so on a
+definition here flagged those too, and it was caught doing so on a
 healthy deployment — a warning that fires when nothing is wrong is a warning
 people learn to ignore.
 
@@ -711,62 +711,29 @@ seq 1  lifted       reviewed, benign       by alice@acme
 afterwards, and it is `None` where nothing knows — an unattributed entry
 says so rather than naming a service account nobody checked.
 
-## Verify it on your own deployment
+## How these claims are checked
 
-Every retrieval system's README makes claims; this one ships the experiment
-that would disprove them. That asymmetry matters because the failure is *silent
-by construction* — a forgotten document answering a query, scored and
-well-formed, with nothing logged — and a property whose violation is invisible
-cannot be checked by looking at it.
+Against a **real MongoDB**, on every commit. No mock tier, on purpose: the
+properties here -- documents inheriting a deadline, refusal on the search
+path, a cold index that cannot look empty -- are only true if the *queries*
+are right, so CI stands up Atlas Local and runs the suite against real
+`mongot`, the same path a laptop uses.
 
-```bash
-voyd verify --uri "$MONGO_URI"    # exit 0 = the guarantee held here
-```
+The tests are written as arguments rather than coverage. A few that carry
+more than their weight:
 
-It plants documents that must not be reachable, asks for them through every
-read path that carries the guarantee, and fails if any of them answers — against
-your indexes, your MongoDB version, and whatever tier your deployment actually
-degraded to.
+| | |
+|---|---|
+| `test_admission_is_structural.py` | writes the naive read a developer produces when they have never heard of `expire_at`, and asserts it is still safe — plus every read path on the handle, and the assertion that the *unwrapped primitive still leaks*, so those checks cannot quietly become tautologies |
+| `test_no_module_reaches_past_the_handle.py` | walks the AST of every module in the package and fails if one calls the search primitive on a collection that refuses |
+| `test_a_third_party_rule_is_a_first_class_reason.py` | installs two rules this package does not ship and asserts they survive the whole loop, with both enforcement points agreeing |
+| `test_the_public_surface_is_deliberate.py` | pins `__all__`, so a new public name is a line somebody justifies |
+| `test_nothing_reclaims_out_of_band.py` | no endpoint reclaims anything, because a delete hands the caller a cleanup obligation |
 
-```
-  mongodb 8.2.11  tier=hybrid  search=True
-
-  [ok  ] deadline: an expired document is unreachable while its row is on disk
-         the row is still on disk (TTL monitor parked), so every refusal below
-         is the read path and not the sweeper
-  [ok  ] revocation: a revoked fact is refused on the next read, and its row stays
-  [ok  ] starvation: a page of refusals is refilled, not truncated
-         filled 5 of 5 after examining 46 candidates, refusing 40
-  [ok  ] clearance: a document above the caller's clearance is absent, not ranked
-  [ok  ] reversal: a hold can be lifted, an erasure cannot, and both reach the chain
-         held, unreachable, and no deadline on the evidence
-         an erasure refused to be lifted, as it must
-  [ok  ] inheritance: forgetting a fact forgets what was written out of it
-         the source, its summary and the summary's summary all went, in one query
-         and a new derivation from an erased parent is refused
-  [ok  ] shredding: destroying a scope's key makes its ciphertext unreadable
-         everywhere, not just here
-         custody: a file at ./master.key (durable=True, audited=False)
-         ciphertext at rest: a client with no key sees subtype 6
-         a plaintext write is refused by the server, so bypassing the
-         encrypting client fails loudly
-         key destroyed; a cold client can no longer read it, and no restored
-         backup ever will either
-         and the master key rotated without rewriting a single document
-  [ok  ] chain: the refusal ledger recomputes intact
-```
-
-It parks `ttlMonitorSleepSecs` so "still on disk" is a fact rather than a race,
-and restores it on the way out including on failure — that is a server global,
-so do not run it beside anything else that cares. It works on a bare `pip
-install voyd`: no app extra, no running server, and it only ever touches a
-scratch database it creates and drops.
-
-CI runs it on every commit, and `tests/test_the_falsifier_can_fail.py` breaks
-the guarantee thirteen different ways to prove each check bites — one per
-check, and two checks that have more than one way to break. A checker that
-cannot fail is worse than no checker — it turns an unknown into a false
-assurance somebody then makes a promise on.
+And `drift/` runs the counter-argument rather than asserting it:
+`exhibit.py` stands up Postgres, Qdrant and MinIO and shows the deleted
+document answering; `refusal_on_postgres.py` ports the whole thesis to
+pgvector and states what is harder there.
 
 ## Three primitives
 
@@ -875,9 +842,8 @@ Two more that need something extra, and one that is not an example at all:
 |---|---|
 | `drift/exhibit.py` | The four-owners argument, run against real Postgres + Qdrant + MinIO. Needs `drift/docker-compose.drift.yml` and the `drift` extra. |
 | `bench/measure.py` | The numbers above: expiry lag, the cosine cliff, per-tier latency. Verifies which tier actually served each query before reporting it. |
-| `voyd verify` | Not an example — the falsifier, pointed at your deployment. Parks the TTL monitor, plants documents that must not be reachable, and exits non-zero if any read path answers. |
 
-Run them one at a time. `forget.py`, the exhibit and `voyd verify` all park
+Run them one at a time. `forget.py` and the exhibit both park
 `ttlMonitorSleepSecs`, which is a server-global, and the test suite has a
 reaper test that does the same — so two of them at once is one of them
 measuring the other's setting.
@@ -1541,7 +1507,7 @@ fails the starvation tests, and stopping the ledger from linking fails 8 proof
 tests. That is not automated — it is a thing to redo when the shape of the
 guarantee changes, and the numbers above are what it produced.
 
-Do not run `voyd verify` or `examples/forget.py` beside the suite. They park
+Do not run `examples/forget.py` or the drift exhibit beside the suite. They park
 `ttlMonitorSleepSecs` and build their own search indexes, and mongot is one
 process for the whole server — the symptom is an index-lag timeout in a test
 that has nothing to do with either of them.
@@ -1590,7 +1556,6 @@ that has nothing to do with either of them.
 | A chain cannot fork under concurrency | twelve concurrent revocations produce twelve linear links |
 | A hash survives its own round trip | the stored entry hashes to the receipt handed out, field by field |
 | An unrecordable refusal still refuses | a broken ledger cannot turn a completed revocation into an error |
-| The falsifier can fail | thirteen ways of breaking the guarantee, each caught by the check that claims it |
 | An erasure cannot be taken back | `lift()` raises on an irreversible reason, and `release()` is not a way around it |
 | A hold can be | imposed, lifted, and counted apart from erasure, because overruling a detector is its own number |
 | A hold does not destroy its own evidence | imposing a reversible reason stamps no erase deadline |
@@ -1797,9 +1762,8 @@ the one nobody was ever going to type.
 
 | | |
 |---|---|
-| [`marketing.md`](marketing.md) | the pitch. Short, loud, and every claim in it is backed by shipped code — it ends by telling you not to believe it and to run the falsifier instead |
+| [`marketing.md`](marketing.md) | the pitch. Short, loud, and every claim in it is backed by shipped code — it ends by pointing at the test suite and the drift exhibit instead |
 | [`pain.md`](pain.md) | the *why*, as eight incidents rather than features. Mostly real ones from this repository |
-| [`falsifier.md`](falsifier.md) | what `voyd verify` is, why a test suite was not enough, and who checks the checker |
 | [`blog.md`](blog.md) | the long argument, including what is not done |
 
 ## The pain, in eight stories
