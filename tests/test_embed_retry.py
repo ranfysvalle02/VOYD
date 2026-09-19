@@ -28,6 +28,9 @@ class BrokenIntelligence:
     class config:
         max_input_chars = 32_000
         dimensions = 1024
+        # Matches the real VoyageConfig: the model is recorded with every
+        # vector, so a fake missing it is a fake that cannot be written by.
+        model = "voyage-4"
 
     def __init__(self):
         self.calls = 0

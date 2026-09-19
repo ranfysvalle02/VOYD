@@ -47,7 +47,8 @@ from .errors import (
     ScopeRequired,
 )
 from .expiry import Expiry, ExpirySpec
-from .admission import (DEADLINE, QUARANTINED, REVOKED, UNREADABLE, Deadline,
+from .admission import (DEADLINE, QUARANTINED, REVOKED, UNREADABLE, WRONG_MODEL,
+                        Deadline, EmbeddedWith,
                          Admission, AdmissionSpec, Marked, Rule,
                          quarantined, revoked, why_refused)
 from .jobs import JobQueue, PermanentFailure, backoff
@@ -253,7 +254,8 @@ __all__ = [
     "Expiry", "ExpirySpec",
     "Admission", "AdmissionSpec", "why_refused",
     "Rule", "Deadline", "Marked", "revoked", "quarantined",
-    "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED",
+    "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
+    "EmbeddedWith",
     "Memory", "MemorySpec",
     "Model",
     "JobQueue", "PermanentFailure", "backoff",

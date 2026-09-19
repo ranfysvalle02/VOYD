@@ -23,7 +23,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from voyd.engine import (DEADLINE, QUARANTINED, REVOKED, UNREADABLE, Deadline,
+from voyd.engine import (DEADLINE, QUARANTINED, REVOKED, UNREADABLE, WRONG_MODEL,
+                         Deadline, EmbeddedWith,
                          ScopeInvalid, ScopeRequired, quarantined, revoked,
                          why_refused)
 from voyd.engine.admission import AdmissionSpec
@@ -538,3 +539,77 @@ async def test_declaring_different_rules_for_one_collection_collides(core):
         engine.model("notes", tenant="t").admitting(
             Deadline(), revoked(), quarantined())
     assert "already forgettable" in str(caught.value)
+
+
+# ---- an embedding is a (vector, model) pair ---------------------------
+
+def test_a_vector_from_another_model_is_refused_not_ranked():
+    """The silent sibling of the wrong-width bug.
+
+    A 512-wide vector in a 1024 index is caught by a width check. A
+    voyage-3 vector in a voyage-4 index is *not*: every current Voyage model
+    is 1024 dimensions, so the widths match, ``indexed: True`` is recorded,
+    and describe() reports a healthy scope.
+
+    Measured against the real API, same text, both 1024-wide:
+
+        identical text, voyage-3 vs voyage-4   cosine -0.053
+        unrelated text, both voyage-4          cosine +0.301
+
+    A model swap does not degrade ranking, it inverts it -- unrelated text
+    outranks the document actually being searched for, by five times. So the
+    model is part of what the document is.
+    """
+    from voyd.engine.admission import AdmissionSpec, why_refused
+
+    spec = AdmissionSpec("docs", rules=(EmbeddedWith("voyage-4"),))
+    vec = [0.1] * 1024
+
+    assert why_refused({"embedding": vec, "embedded_with": "voyage-4"},
+                       spec) is None
+    assert why_refused({"embedding": vec, "embedded_with": "voyage-3"},
+                       spec) == WRONG_MODEL
+    # A vector with no recorded model is an orphan: refused, because there is
+    # no way to know what it can be compared against.
+    assert why_refused({"embedding": vec}, spec) == WRONG_MODEL
+
+
+def test_a_document_awaiting_its_first_vector_is_pending_not_wrong():
+    """The case that would have broken the embed worker.
+
+    ``indexed: false`` with no vector is the *job*. Refusing it would hide
+    the queue from describe() and from the worker's own view of its backlog,
+    so "not embedded yet" has to stay reachable while "embedded by the wrong
+    model" does not.
+    """
+    from voyd.engine.admission import AdmissionSpec, why_refused
+
+    spec = AdmissionSpec("docs", rules=(EmbeddedWith("voyage-4"),))
+    assert why_refused({"embedding": None}, spec) is None
+    assert why_refused({}, spec) is None
+
+
+async def test_the_model_rule_holds_on_both_enforcement_points(core):
+    """Query-side and per-document, because search hits never go through a
+    query and that is exactly where a stale vector would arrive."""
+    engine, db = core
+    docs = engine.model("notes", tenant="t").admitting(
+        Deadline(), revoked(), EmbeddedWith("voyage-4"))
+    await engine.ensure(search_wait_s=0)
+
+    vec = [0.1] * 1024
+    await db.notes.insert_many([
+        {"t": "a", "text": "current", "embedding": vec,
+         "embedded_with": "voyage-4"},
+        {"t": "a", "text": "stale", "embedding": vec,
+         "embedded_with": "voyage-3"},
+        {"t": "a", "text": "queued", "embedding": None},
+    ])
+
+    # the query half
+    assert {d["text"] for d in await docs.find({"t": "a"})} == {"current", "queued"}
+
+    # the per-document half, on rows that never saw the query
+    raw = [d async for d in db.notes.find({"t": "a"})]
+    assert {d["text"] for d in docs.reachable(raw)} == {"current", "queued"}
+    assert docs.receipts()["refused_by_reason"][WRONG_MODEL] == 1

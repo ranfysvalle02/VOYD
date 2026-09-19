@@ -55,7 +55,8 @@ class Voyd:
         async def lifespan(app: FastAPI):
             await self.store.connect()
             await self.store.ensure_schema(
-                vector_dimensions=self.intelligence.config.dimensions)
+                vector_dimensions=self.intelligence.config.dimensions,
+                embedding_model=self.intelligence.config.model)
             self.ops = Ops(self.store, self.intelligence)
             self.ops.start()
             try:

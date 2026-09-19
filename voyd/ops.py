@@ -34,6 +34,13 @@ class Ops:
                  *, poll_interval: float = 2.0):
         self.store = store
         self.intelligence = intelligence
+        # Read once, here, rather than per document inside the try below.
+        # That block catches everything on purpose -- the embedding SDK
+        # raises undocumented types and every one of them means "retry" --
+        # which also means a plain AttributeError in there would be
+        # swallowed as a failed API call and retried forever. Config is read
+        # where a mistake in it still looks like a mistake.
+        self._model = getattr(intelligence.config, "model", None)
         self.poll_interval = poll_interval
         self._tasks: list[asyncio.Task] = []
         self._stop = asyncio.Event()
@@ -95,7 +102,7 @@ class Ops:
 
         try:
             vec = await self.intelligence.embed_document(text)
-            await self.store.set_embedding(doc["_id"], vec)
+            await self.store.set_embedding(doc["_id"], vec, model=self._model)
             self._embed_failures = 0
         except Exception as exc:
             # Deliberately broad: the Voyage SDK raises undocumented types over

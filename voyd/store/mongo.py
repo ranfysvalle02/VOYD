@@ -42,7 +42,8 @@ from pymongo import AsyncMongoClient
 from pymongo.errors import CollectionInvalid, OperationFailure
 
 from ..config import MongoConfig
-from ..engine import Engine, ExpirySpec, JobQueue, SearchSpec
+from ..engine import (Deadline, EmbeddedWith, Engine, ExpirySpec, JobQueue,
+                      SearchSpec, revoked)
 from ..engine.search import MAX_LIMIT as SEARCH_MAX_LIMIT
 # The redundant alias is the explicit re-export form: callers and tests import
 # ``cosine`` from here, so this is API surface, not an unused import.
@@ -111,7 +112,8 @@ class MongoStore:
 
     # ---- schema --------------------------------------------------------
 
-    async def ensure_schema(self, vector_dimensions: int = 1024) -> None:
+    async def ensure_schema(self, vector_dimensions: int = 1024,
+                            embedding_model: str | None = None) -> None:
         """Create collections, indexes, TTL, and the Atlas search indexes."""
         db = self.db
         assert db is not None
@@ -146,9 +148,10 @@ class MongoStore:
         await db.documents.create_index("expire_at", expireAfterSeconds=0)
 
         if self.search:
-            await self._ensure_search_indexes(vector_dimensions)
+            await self._ensure_search_indexes(vector_dimensions,
+                                              model=embedding_model)
 
-    def _declare(self, dims: int) -> None:
+    def _declare(self, dims: int, model: str | None = None) -> None:
         """Everything this app wants MongoDB to maintain, in one place.
 
         ``token`` is a filter field so a void-scoped search is narrowed inside
@@ -160,8 +163,15 @@ class MongoStore:
         # how six read paths came to disagree about the rule in the first
         # place. The local _unexpired() helper is gone on purpose: a rule
         # you have to remember to apply is not enforced, it is suggested.
+        # Documents refuse for three reasons; voids for the usual two. The
+        # third is the model: a vector produced by a different one is not a
+        # worse vector, it is an incomparable one, and ranking it returns a
+        # confident number that means nothing.
+        doc_rules = [Deadline(), revoked()]
+        if model:
+            doc_rules.append(EmbeddedWith(model))
         self.admission_documents = self.engine.admission(
-            "documents", tenant="voyd_id")
+            "documents", tenant="voyd_id", rules=tuple(doc_rules))
         self.admission_voids = self.engine.admission("voids", tenant="voyd_id")
 
         self.engine.searchable(SearchSpec(
@@ -179,9 +189,10 @@ class MongoStore:
         for coll in ("voids", "documents"):
             self.engine.expiring(ExpirySpec(collection=coll, at_field="expire_at"))
 
-    async def _ensure_search_indexes(self, dims: int, *, wait_s: float = 90.0) -> None:
+    async def _ensure_search_indexes(self, dims: int, *, model: str | None = None,
+                                     wait_s: float = 90.0) -> None:
         """Declare what should be searchable; the engine owns the lifecycle."""
-        self._declare(dims)
+        self._declare(dims, model)
         await self.engine.ensure(search_wait_s=wait_s)
 
     # ---- owners --------------------------------------------------------
@@ -321,6 +332,9 @@ class MongoStore:
             "metadata": {},
             "indexed": False,
             "embedding": None,
+            # Which model produced the vector above. Set with it, cleared
+            # with it: the pair is never written apart.
+            "embedded_with": None,
             # The document inherits the void's deadline: the text and its
             # vector expire together, because they are one row.
             "expire_at": expire_at,
@@ -409,7 +423,8 @@ class MongoStore:
     async def claim_next_document(self) -> dict | None:
         return await self._queue().claim()
 
-    async def set_embedding(self, _id, embedding: list[float] | None) -> None:
+    async def set_embedding(self, _id, embedding: list[float] | None, *,
+                            model: str | None = None) -> None:
         """Record an embedding, or park the document if it cannot be one.
 
         The dimension is checked against what the index declares, because a
@@ -436,9 +451,16 @@ class MongoStore:
                     _id, len(embedding), declared)
                 embedding = None
 
+        # The model is stored *with* the vector, in the same write, because
+        # they are one fact. Every current Voyage model is 1024-wide, so a
+        # width check cannot tell a voyage-3 vector from a voyage-4 one --
+        # and comparing them returns a plausible number rather than an
+        # error. A vector whose model is unrecorded is an orphan.
         await self.db.documents.update_one(
             {"_id": _id},
-            {"$set": {"embedding": embedding, "indexed": True if embedding else "error"}},
+            {"$set": {"embedding": embedding,
+                      "embedded_with": model if embedding else None,
+                      "indexed": True if embedding else "error"}},
         )
 
     def _declared_dimensions(self) -> int | None:

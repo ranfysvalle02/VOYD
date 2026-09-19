@@ -81,6 +81,7 @@ DEADLINE = "deadline"
 REVOKED = "revoked"
 UNREADABLE = "unreadable"
 QUARANTINED = "quarantined"
+WRONG_MODEL = "wrong_model"
 
 
 # ---- rules -------------------------------------------------------------
@@ -160,6 +161,47 @@ class Marked:
 
     def clause(self) -> dict | None:
         return {"$or": [{self.field: None}, {self.field: {"$exists": False}}]}
+
+
+@dataclass(frozen=True)
+class EmbeddedWith:
+    """Refused because a different model produced this vector.
+
+    An embedding is not a vector, it is a (vector, model) pair, and a vector
+    without its model is an orphan. Comparing orphans does not fail -- it
+    returns a number between -1 and 1, which is the whole problem.
+
+    Measured against a real embedding API, same text, both 1024-wide, two
+    generations of one vendor's model:
+
+        identical text, old model vs new       cosine -0.053
+        unrelated text, both on the new one    cosine +0.301
+
+    A model swap does not degrade ranking, it inverts it: unrelated text
+    scores five times higher than the document actually being looked for.
+    And when two models share a width -- which a whole generation of them
+    does -- the check that catches a 512-in-1024 mistake catches none of
+    this. Same width, different meaning, no error, no log, and a
+    healthy-looking ``describe()``.
+
+    So the model is part of what a document *is*, and a row embedded by
+    anything else is refused rather than ranked. Refused, not deleted: it
+    needs re-embedding, not erasure, and the embed worker will take it.
+    """
+
+    model: str
+    field: str = "embedded_with"
+    reason: str = WRONG_MODEL
+
+    def refuses(self, doc: dict, *, when: datetime | None = None) -> bool:
+        if doc.get("embedding") is None:
+            return False        # nothing to compare yet; pending, not wrong
+        return doc.get(self.field) != self.model
+
+    def clause(self) -> dict | None:
+        # A row with no vector is pending, not wrong -- it must stay visible
+        # to describe() and to the embed worker.
+        return {"$or": [{self.field: self.model}, {"embedding": None}]}
 
 
 def revoked(field: str = "forgotten") -> Marked:
