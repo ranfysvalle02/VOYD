@@ -15,7 +15,11 @@
 
 services:
   drift-postgres:
-    image: postgres:16-alpine
+    # pgvector's image, not plain postgres:16 -- a superset, so `exhibit.py`
+    # is unaffected, and `refusal_on_postgres.py` needs a real vector index
+    # to make its point. Arguing about retrieval against a stack with no
+    # vector search would be arguing against a straw man.
+    image: pgvector/pgvector:pg16
     container_name: drift-postgres
     environment:
       POSTGRES_PASSWORD: drift

@@ -70,8 +70,9 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Protocol
 
-from .errors import (BlastRadius, CallerRequired, Irreversible,
-                     UnboundedForgetting, UnknownReason, require_tenant)
+from .errors import (BlastRadius, CallerRequired, DerivationBroken,
+                     Irreversible, ScopeRequired, UnboundedForgetting,
+                     UnknownReason, require_tenant)
 from .time import aware, living, now
 
 log = logging.getLogger("engine.admission")
@@ -460,6 +461,11 @@ class AdmissionSpec:
     # deadline, so an erasure request does not have to wait for a sweeper and
     # does not depend on the TTL index existing at all.
     mark_field: str = "forgotten"
+    # Where a document records what it was made out of, and ``None`` when
+    # this collection does not track derivation at all. Opt-in, because a
+    # collection of source facts has no lineage and should not pay a field
+    # or an index for one.
+    lineage_field: str | None = None
     # Part of the spec, and therefore part of identity, because handles are
     # deduplicated per collection by spec equality. It was not, and the
     # consequence was that declaration order silently decided whether the
@@ -739,6 +745,14 @@ class Admission:
             if field_name:
                 await self.db[self.collection].create_index(field_name,
                                                             sparse=True)
+        if self.spec.lineage_field:
+            # Multikey, and the reason it is not optional: propagation is
+            # one ``$in`` over this field on every revocation. Unindexed,
+            # an erasure request becomes a collection scan, and the first
+            # thing anybody does with a slow erasure path is stop calling
+            # it.
+            await self.db[self.collection].create_index(
+                self.spec.lineage_field, sparse=True)
         return True
 
     # ---- who is asking -------------------------------------------------
@@ -1326,6 +1340,199 @@ class Admission:
                                expect=expect, everything=everything)
         return n
 
+    # ---- what a fact was made out of -----------------------------------
+    #
+    # Refusal stops a *document* reaching a prompt. It says nothing about
+    # the paragraph an agent wrote after reading it, and that paragraph is
+    # written back into the same collection and keeps scoring well forever.
+    # So the erasure request is honoured against the source and defeated by
+    # the summary, which is the failure the whole package exists to prevent,
+    # arriving through the one door it left open.
+    #
+    # The fix costs no new read-path rule, and that is the interesting part.
+    # ``revoked()`` already refuses any document carrying the mark. What was
+    # missing is that the mark did not *travel*. So:
+    #
+    #   derive()   writes a document with a transitively-closed ``lineage``,
+    #              and refuses to write it at all if a parent is already
+    #              refused -- you cannot legitimately derive a new fact from
+    #              one that may not reach a prompt.
+    #   impose()   marks the matched documents *and* everything carrying one
+    #              of their ids in ``lineage``, in one extra query.
+    #   lift()     un-marks the same set, so a released hold releases the
+    #              work that was held with it.
+    #
+    # Transitive closure at write time is what makes propagation O(1)
+    # queries instead of a recursive walk: a child's lineage is its parent's
+    # lineage plus the parent, so a grandchild already names the
+    # grandparent and one ``$in`` reaches the whole subtree at any depth.
+    # Derivation is a DAG that only ever grows forwards, so the closure
+    # cannot go stale -- a document's ancestry is fixed the moment it is
+    # written.
+
+    async def derive(self, documents, *, parents: Iterable,
+                     when: datetime | None = None) -> list:
+        """Write documents that were made out of other documents.
+
+        ``parents`` are ids in this collection. Each new document gets a
+        ``lineage`` naming every ancestor, transitively, and inherits the
+        *earliest* deadline among its parents -- a summary of a fact that
+        expires on Tuesday has no business outliving it, and picking the
+        earliest is the only choice that cannot extend anything.
+
+        **It refuses rather than writes when a parent is already refused.**
+        Not because the write is unsafe in itself, but because the only
+        ways to reach here are a race and a bug: something read a document
+        it should not have been given, or is deriving from a handle that
+        never checked. Writing the child and marking it in the same breath
+        would paper over both. ``CallerRequired`` is the family
+        resemblance -- every available answer is wrong, so this picks none.
+
+        Returns the inserted ids.
+        """
+        field = self._require_lineage("derive")
+        docs = [documents] if isinstance(documents, dict) else list(documents)
+        if not docs:
+            return []
+        parents = list(parents)
+        if not parents:
+            raise ValueError(
+                f"{self.collection}: derive() needs at least one parent. A "
+                f"document made out of nothing is an ordinary insert")
+
+        self._require_caller()
+        scope = self._scope_of(docs)
+        found = [d async for d in self.db[self.collection].find(
+            self._query_by_id(parents, scope))]
+        if len(found) != len(set(parents)):
+            missing = set(parents) - {d["_id"] for d in found}
+            raise DerivationBroken(self.collection, sorted(map(str, missing)),
+                                   "not in this scope")
+        audit = self.including_refused()
+        for parent in found:
+            reason = why_refused(parent, self.spec, when=when,
+                                 caller=self._caller)
+            if reason is not None:
+                raise DerivationBroken(
+                    self.collection, [str(parent["_id"])], reason)
+            if audit._admit(parent, when=when) is None:
+                # Refused by an *unbypassable* rule: the caller may not read
+                # this parent, so they may not launder it into a new
+                # document either.
+                raise DerivationBroken(
+                    self.collection, [str(parent["_id"])], NOT_CLEARED)
+
+        lineage = sorted({*parents, *(a for p in found
+                                      for a in (p.get(field) or []))},
+                         key=str)
+        deadlines = [p[self.spec.at_field] for p in found
+                     if isinstance(p.get(self.spec.at_field), datetime)]
+        prepared = []
+        for doc in docs:
+            row = dict(doc)
+            row[field] = lineage
+            if deadlines:
+                # Inherit the earliest, and never overwrite a shorter one
+                # the caller set deliberately.
+                own = row.get(self.spec.at_field)
+                soonest = min(deadlines)
+                row[self.spec.at_field] = (
+                    min(own, soonest) if isinstance(own, datetime) else soonest)
+            prepared.append(row)
+
+        result = await self.db[self.collection].insert_many(prepared)
+        log.info("derived %d document(s) in %s from %d parent(s), lineage %d "
+                 "deep", len(prepared), self.collection, len(parents),
+                 len(lineage))
+        return list(result.inserted_ids)
+
+    def _require_lineage(self, verb: str) -> str:
+        field = self.spec.lineage_field
+        if not field:
+            raise UnknownReason(
+                self.collection, verb,
+                ("declare lineage_field on the model to track derivation",))
+        return field
+
+    def _scope_of(self, docs: list) -> dict:
+        """Which tenant these new documents belong to, taken from them.
+
+        The handle knows the tenant *field*; only the documents know the
+        value. Reading it off them rather than adding a parameter also
+        enforces the thing that would otherwise be a convention: a derived
+        document that did not carry the tenant would be written
+        unreadable, since every read path requires it.
+
+        All of them must agree. A batch spanning two tenants has no single
+        correct parent lookup, and picking the first document's answer
+        would silently let one tenant's parents authorise another's child.
+        """
+        if not self.tenant:
+            return {}
+        values = {d.get(self.tenant) for d in docs}
+        if len(values) != 1 or None in values:
+            raise ScopeRequired(self.collection, self.tenant)
+        return {self.tenant: values.pop()}
+
+    def _query_by_id(self, ids: list, scope: dict) -> dict:
+        """Ids, but still inside the tenant and still refusing nothing.
+
+        Built through the audit query on purpose: ``derive`` has to *see* a
+        refused parent in order to reject it, and a query that hid one would
+        turn "this parent may not be used" into "this parent does not
+        exist" -- two very different things to report.
+        """
+        return self.including_refused()._query(
+            {**scope, "_id": {"$in": ids}})
+
+    async def _descendants(self, query: dict) -> tuple[list, int]:
+        """Everything downstream of whatever this query matched.
+
+        One extra ``find`` for the ids and one ``$in`` for the subtree, at
+        any depth, because ``lineage`` is transitively closed when it is
+        written. Returns the matched ids and how many descendants carry
+        them, so the chain can record the two counts separately -- "you
+        asked to erase 2 facts and 7 things made out of them went too" is
+        the sentence an auditor needs, and a single total cannot say it.
+        """
+        field = self.spec.lineage_field
+        if not field:
+            return [], 0
+        ids = [d["_id"] async for d in
+               self.db[self.collection].find(query, {"_id": 1})]
+        if not ids:
+            return [], 0
+        n = await self.db[self.collection].count_documents(
+            {field: {"$in": ids}})
+        return ids, n
+
+    def _with_descendants(self, query: dict, filters: dict | None,
+                          ids: list) -> dict:
+        """The matched documents, plus everything downstream of them.
+
+        The ``$or`` replaces the caller's *filter* -- a descendant does not
+        match it, which is the whole point -- but it must not replace the
+        **boundary**. The first version of this returned the bare ``$or``
+        and propagation walked straight out of the tenant: a row in another
+        namespace naming one of these ids would have been marked, by a
+        caller who cannot even read it.
+
+        So the guard clauses are rebuilt and kept: the tenant, and every
+        unbypassable rule, which is how clearance survives the trip down
+        the edge. Only the bypassable ones drop, because a descendant that
+        is already expired or already held is exactly what this is here to
+        reach.
+        """
+        field = self.spec.lineage_field
+        if not (field and ids):
+            return query
+        scope = {self.tenant: (filters or {}).get(self.tenant)} \
+            if self.tenant else {}
+        guard = self.including_refused()._query(scope)
+        reach = {"$or": [{"_id": {"$in": ids}}, {field: {"$in": ids}}]}
+        guard["$and"] = [*guard.pop("$and", []), reach]
+        return guard
+
     # ---- the general forms ---------------------------------------------
 
     async def impose(self, on: str, filters: dict | None = None, *,
@@ -1391,15 +1598,24 @@ class Admission:
                                {"$min": [f"${at}", due]}, due]},
             }}]
 
-        result = await self.db[self.collection].update_many(query, update)
+        # Everything made out of what this matched goes with it. Resolved
+        # before the write, because afterwards the matched documents carry
+        # the mark and the query that found them no longer does.
+        ids, inherited = await self._descendants(query)
+        result = await self.db[self.collection].update_many(
+            self._with_descendants(query, filters, ids), update)
         n = result.modified_count
         self.receipts_log.record_write(
             "held" if rule.reversible else "revoked", n, why)
         if n:
-            log.info("%s %d fact(s) in %s (%s); unreachable as of %s",
-                     rule.reason, n, self.collection, why, stamp.isoformat())
-        receipt = await self._witness(filters or {}, event=rule.reason,
-                                      reason=why, count=n, at=stamp)
+            log.info("%s %d fact(s) in %s (%s)%s; unreachable as of %s",
+                     rule.reason, n, self.collection, why,
+                     f", {inherited} inherited" if inherited else "",
+                     stamp.isoformat())
+        receipt = await self._witness(
+            filters or {}, event=rule.reason, reason=why, count=n, at=stamp,
+            detail={"direct": len(ids), "inherited": inherited}
+            if inherited else None)
         return n, receipt
 
     async def lift(self, off: str, filters: dict | None = None, *,
@@ -1451,6 +1667,10 @@ class Admission:
 
         stamp = now()
         audit = self.including_refused()
+        # Released with the thing they were held with. A review that clears
+        # a document and leaves its summaries withheld has not finished.
+        ids, inherited = await self._descendants(query)
+        query = self._with_descendants(query, filters, ids)
         n = 0
         batch: list = []
         cursor = self.db[self.collection].find(query, {"_id": 1, **{
@@ -1471,9 +1691,12 @@ class Admission:
         # The chain has to record this or it is a record of one direction of
         # a two-direction transition -- intact, verifiable, and wrong about
         # whether the fact is reachable. See ledger.py.
+        detail: dict = {"lifted": rule.reason}
+        if inherited:
+            detail |= {"direct": len(ids), "inherited": inherited}
         receipt = await self._witness(filters or {}, event=LIFTED,
                                       reason=reason, count=n, at=stamp,
-                                      detail={"lifted": rule.reason})
+                                      detail=detail)
         return n, receipt
 
     def _caller_aware_fields(self) -> tuple:

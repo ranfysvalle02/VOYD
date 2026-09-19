@@ -64,6 +64,7 @@ from .capabilities import Capabilities, detect
 from .errors import (
     BlastRadius,
     CallerRequired,
+    DerivationBroken,
     FilterInvalid,
     Irreversible,
     ScopeError,
@@ -222,6 +223,7 @@ class Engine:
     def admission(self, collection: str, *, at_field: str = "expire_at",
                    mark_field: str = "forgotten",
                    tenant: str | None = None,
+                   lineage_field: str | None = None,
                    rules: tuple = ()) -> Admission:
         """A read handle for ``collection`` that refuses forgotten facts.
 
@@ -239,6 +241,7 @@ class Engine:
         # every second declaration would look like a conflict.
         spec = AdmissionSpec(collection, at_field=at_field,
                               mark_field=mark_field, tenant=tenant,
+                              lineage_field=lineage_field,
                               rules=tuple(rules or ())).with_defaults()
         existing = self._installed.get("admission", {}).get(collection)
         if existing is not None:
@@ -330,6 +333,7 @@ __all__ = [
     "Ledger", "LedgerSpec", "canonical", "digest", "GENESIS",
     "ScopeRequired", "ScopeInvalid", "ScopeError", "FilterInvalid",
     "CallerRequired", "Irreversible", "UnknownReason", "BlastRadius",
+    "DerivationBroken",
     "UnboundedForgetting",
     "Trait", "kind_of", "collection_of",
     "now", "aware", "live", "living", "deadline", "bind", "UTC",

@@ -13,6 +13,11 @@ and the order.
 
 ### 1. Cryptographic erasure — the one honest gap
 
+*(Inherited refusal was ahead of this and shipped: see
+`voyd/engine/admission.py` under "what a fact was made out of". It mattered
+more because it was not a gap in the pitch, it was a gap in the guarantee —
+an erasure request honoured against a source and defeated by the summary.)*
+
 Per-scope data key, text encrypted at rest with it, the deadline destroys the
 key. The row stays on disk and the plaintext is gone the instant the key is.
 
@@ -101,17 +106,21 @@ out it has fourteen.
 
 ### Port the thesis to pgvector and Qdrant
 
-Keep MongoDB the best implementation and prove the *pattern* is portable.
-`drift/` already stands both services up for the counter-argument.
+**The demonstration shipped.** `drift/refusal_on_postgres.py` runs the whole
+argument on pgvector with no MongoDB in the file: the same silent bug,
+refusal in the read path, the structural version (revoke the table, grant
+only a view, so the naive read raises `permission denied`), and inherited
+refusal by recursive CTE. It states what is harder there too — no TTL, so
+the deadline reacquires a second owner the moment you need rows gone.
 
-**Why.** Right now the argument reads as MongoDB advocacy, which caps adoption
-and invites dismissal on those grounds rather than on the merits. An adapter
-reframes it as "refusal is missing from retrieval, everywhere" — and makes the
-one-owner deadline the punchline instead of the premise.
-
-**Why not yet.** It doubles the surface that has to hold, and the one-owner
-property is genuinely weaker elsewhere. Worth doing as a *demonstration* — a
-`drift/refusal_on_postgres.py` — before it is worth doing as a shipped adapter.
+What is still open is a **shipped adapter**, and the honest reason to hold
+off is unchanged: it doubles the surface that has to hold, and the one-owner
+property really is weaker elsewhere. The demonstration was the cheap 80% —
+it removes the "this is just MongoDB advocacy" dismissal without taking on a
+second engine to keep correct. Qdrant is the more interesting second target
+than Postgres, because it has no rows at all: refusal there has to live in
+the payload filter, and whether that is enforceable or merely conventional
+is a real question this file does not answer.
 
 ### A leak detector for stacks that are not this one
 

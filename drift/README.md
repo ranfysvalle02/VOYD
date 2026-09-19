@@ -1,4 +1,26 @@
-# The drift exhibit
+# The drift exhibit, and the portability argument
+
+Two files here, answering the two objections a reader is entitled to raise.
+
+`exhibit.py` runs the **four owners** claim against real services. Read on for
+that one.
+
+`refusal_on_postgres.py` answers the other: *is this just MongoDB advocacy?*
+It ports the thesis in full to pgvector, with no MongoDB anywhere in the file
+— the same silent bug, refusal in the read path, then the structural version
+(revoke the table, grant only a view, so the naive read raises `permission
+denied` instead of leaking), then inherited refusal via a recursive CTE. It
+also states what is genuinely **harder** on Postgres: no TTL, so the moment
+you need rows actually gone the deadline has two owners again. That part of
+VOYD's claim really is stronger on MongoDB, and saying so is the difference
+between an argument and a pitch.
+
+```bash
+docker compose -f drift/docker-compose.drift.yml up -d --wait drift-postgres
+uv run --extra drift python drift/refusal_on_postgres.py   # 0 = every claim held
+```
+
+---
 
 VOYD rests on two claims. The second — that a read path must *refuse* what it
 has forgotten — is proven by `examples/refuse.py` in five seconds. This

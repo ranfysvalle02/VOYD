@@ -571,6 +571,9 @@ actually degraded to.
   [ok  ] starvation: a page of refusals is refilled, not truncated
          filled 5 of 5 after examining 46 candidates, refusing 40
   [ok  ] clearance: a document above the caller's clearance is absent, not ranked
+  [ok  ] inheritance: forgetting a fact forgets what was written out of it
+         the source, its summary and the summary's summary all went, in one
+         query, at any depth
   [ok  ] reversal: a hold can be lifted, an erasure cannot, and both reach the chain
          held, unreachable, and no deadline on the evidence
          an erasure refused to be lifted, as it must
@@ -578,7 +581,7 @@ actually degraded to.
   [ok  ] chain: the refusal ledger recomputes intact
 ```
 
-Five of the six checks are worth reading closely for what they refuse to
+Six of the seven checks are worth reading closely for what they refuse to
 accept as a pass:
 
 - **revocation** asserts the row is *still there* afterwards. A version that
@@ -592,6 +595,15 @@ accept as a pass:
   un-forget a document" patch passes every other check in the suite. So does
   quarantine implemented as revoke-with-a-different-field-name — right reads,
   right mark, right chain, and the evidence gone in a minute.
+- **inheritance** is the one that found a hole rather than guarding one. An
+  agent summarises a document and writes the summary back; the erasure
+  request arrives; `revoke()` honours it against the source and the summary
+  keeps scoring well forever. The erasure is satisfied, the information is
+  not gone, and every receipt says the system worked. It checks both halves,
+  because either alone is decoration: the mark must travel down the
+  derivation edge to work already written, *and* a new derivation from an
+  erased parent must be refused — otherwise you revoke at 14:02, summarise
+  at 14:03, and the contamination is clean.
 - **chain** refuses to accept `intact` alone, because an empty chain verifies
   vacuously. A deployment recording nothing at all would have passed.
 - **deadline** reports that the unwrapped primitive *does* still leak. A
@@ -600,7 +612,7 @@ accept as a pass:
   after somebody removed the thing it tests.
 
 CI runs it on every commit. And `tests/test_the_falsifier_can_fail.py` breaks
-the guarantee eight different ways to prove each check bites — because a checker
+the guarantee ten different ways to prove each check bites — because a checker
 that cannot fail is worse than no checker. It converts an unknown into a false
 assurance, and then somebody makes a promise on it.
 
@@ -756,6 +768,35 @@ per-replica — the honest trade for not needing Redis, and the first thing to
 fix on more than one process. CORS is wildcard-open on `/v1`, which is the whole
 public surface.
 
+## Is this just a MongoDB argument?
+
+A fair question, and the answer has to be executable or it is a press
+release. `drift/refusal_on_postgres.py` runs the whole thesis on pgvector
+with no MongoDB in the file.
+
+The interesting act is the third one. Putting the deadline in the `WHERE`
+clause is the easy half and everybody already knows it — and it is a
+*convention*, which holds until somebody writes the second query. So the
+table's `SELECT` is revoked and only a view is granted. The naive read, the
+one written by someone who never heard of the deadline, does not leak; it
+raises `permission denied for table facts`. That is Postgres's version of
+"there is no unfiltered read on the handle": different mechanism, identical
+property, and the failure mode is inverted the same way.
+
+It also says what is **harder** there, because an argument that lists only
+its wins is marketing. Postgres has no TTL. There is no handing the deadline
+to the storage engine, so the moment you need rows actually gone it has two
+owners again and keeping them agreeing is your problem. That half of the
+claim really is stronger on MongoDB — and that is a property of the engine,
+not of the argument. Conflating the two is exactly what makes this sound
+like advocacy.
+
+What carries over is all of it: deletion is a storage event and refusal is a
+retrieval guarantee; a rule you have to remember is not enforced; a refusal
+that does not travel to what was made out of the fact is defeated by a
+summary. Refusal is missing from retrieval everywhere. This is one
+implementation, on the engine where the deadline can have a single owner.
+
 ## The claim, restated without the gloss
 
 Not "MongoDB is faster." Not "vector databases are bad." Not "we solved
@@ -775,7 +816,7 @@ hold documents of different sensitivity without becoming four boundaries. And
 a reason declares whether it can be taken back, so a hold is an investigation
 rather than a graveyard, and an erasure stays an erasure.
 
-397 tests, six skipped. A falsifier that has failed on purpose eight ways and
+413 tests, six skipped. A falsifier that has failed on purpose ten ways and
 caught one real bug on its first run. Three bugs found in the proof, one found
 by writing an example, and three silent no-ops found by asking whether a
 refusal should be undoable. Every number in this essay is in `bench/` or

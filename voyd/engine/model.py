@@ -85,7 +85,8 @@ class Model:
             self.collection, at_field=at_field, mark_field=mark_field,
             tenant=self.tenant)
 
-    def admitting(self, *rules, at_field: str = "expire_at") -> Admission:
+    def admitting(self, *rules, at_field: str = "expire_at",
+                  lineage_field: str | None = None) -> Admission:
         """A read handle with an explicit list of reasons to refuse.
 
         ``forgettable()`` is this with the two defaults. Naming the rules is
@@ -98,11 +99,17 @@ class Model:
         quarantined rather than merely expired, because the responses
         differ. The TTL is still declared, because a deadline refused on
         read and never collected is a storage leak.
+
+        ``lineage_field`` opts the collection into derivation tracking, so
+        ``derive()`` can record what a document was made out of and a
+        refusal travels to everything downstream of it. Off by default: a
+        collection of source facts has no lineage and should not pay a
+        field and an index for one.
         """
         self.expiring(at_field=at_field)
         return self.engine.admission(
             self.collection, at_field=at_field, tenant=self.tenant,
-            rules=tuple(rules))
+            lineage_field=lineage_field, rules=tuple(rules))
 
     def memory(self, **kw) -> Memory:
         """Recall with decay: search plus TTL, one collection."""

@@ -287,3 +287,43 @@ class UnboundedForgetting(ValueError):
             f"document in the scope. If that is the intent, say so: "
             f"{verb}(..., everything=True)"
         )
+
+
+class DerivationBroken(ValueError):
+    """A document was about to be made out of one that may not be used.
+
+    Refusal stops a *document* reaching a prompt. It says nothing about the
+    paragraph an agent wrote after reading it -- and that paragraph goes
+    back into the same collection and keeps scoring well forever. So the
+    erasure request is honoured against the source and defeated by the
+    summary, which is this package's own failure arriving through the one
+    door it left open.
+
+    ``derive()`` closes that door from the write side, and it refuses rather
+    than writing-and-marking because the two available explanations for
+    getting here are both bugs worth surfacing:
+
+    - something read a document it should not have been handed, and is now
+      laundering it into a new one. Writing the child and immediately
+      marking it would hide the read that should not have happened.
+    - the caller derived from a handle that never checked -- a raw
+      collection read, or an ``including_refused()`` audit handle used as
+      an ordinary one. That is a mistake in the calling code, and it should
+      fail at the line that made it.
+
+    The parent may also simply be outside the caller's scope or clearance,
+    which reports the same way on purpose: "you may not build on this" is
+    one answer, and splitting it into "gone" and "forbidden" would tell an
+    unprivileged caller which ids exist.
+    """
+
+    def __init__(self, collection: str, parents: list, reason: str):
+        self.collection = collection
+        self.parents = parents
+        self.reason = reason
+        super().__init__(
+            f"{collection}: cannot derive from {', '.join(parents)} "
+            f"({reason}). A fact made out of a refused fact is how an "
+            f"erasure gets defeated by a summary -- if the source may not "
+            f"reach a prompt, neither may anything built on it"
+        )

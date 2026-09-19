@@ -13,7 +13,11 @@ read path stops refusing, or the ledger stops recording.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
+
+from voyd.engine import DerivationBroken
 
 from voyd import verify as V
 
@@ -61,7 +65,7 @@ async def test_the_whole_run_passes_against_a_healthy_deployment(core):
         (c.name, c.notes) for c in v.checks if not c.ok]
     assert [c.name for c in v.checks] == ["deadline", "revocation",
                                           "starvation", "clearance",
-                                          "reversal", "chain"]
+                                          "reversal", "inheritance", "chain"]
 
 
 async def test_the_deadline_check_fails_when_the_read_path_stops_refusing(core):
@@ -167,6 +171,66 @@ async def test_the_reversal_check_fails_when_a_hold_erases_its_evidence(core):
     assert not check.ok
     assert any("evidence" in n or "deadline" in n for n in check.notes), (
         f"a hold scheduled its own evidence for deletion: {check.notes}")
+
+
+async def test_the_inheritance_check_fails_when_the_mark_does_not_travel(core):
+    """The state of the world before this work, and it passed everything.
+
+    Revoke the source only, exactly as ``revoke()`` used to. Every other
+    check in this file still holds: the source is unreachable, its row
+    survives, the chain verifies. Only this one notices that the summary
+    quoting it is still being served.
+    """
+    engine, db = core
+    v = V.Verifier(db.client, db, quiet=True)
+    await v.declare()
+
+    original = v.held.impose
+
+    async def source_only(on, filters=None, **kw):     # no propagation
+        v.held.spec = replace(v.held.spec, lineage_field=None)
+        try:
+            return await original(on, filters, **kw)
+        finally:
+            v.held.spec = replace(v.held.spec, lineage_field="lineage")
+
+    v.held.impose = source_only
+    check = await v.check_inheritance()
+
+    assert not check.ok
+    assert any("expected 3" in n or "returned" in n for n in check.notes), (
+        f"a summary of an erased fact stayed reachable: {check.notes}")
+
+
+async def test_the_inheritance_check_fails_when_a_new_summary_can_be_written(core):
+    """The other half, and the trivial race without it.
+
+    Propagation alone covers only work that already existed. Revoke at
+    14:02, summarise at 14:03, and the contamination is clean -- so the
+    write side has to refuse too, and this proves the check notices when
+    it does not.
+    """
+    engine, db = core
+    v = V.Verifier(db.client, db, quiet=True)
+    await v.declare()
+
+    original = v.held.derive
+
+    async def derive_anyway(documents, *, parents, **kw):
+        try:
+            return await original(documents, parents=parents, **kw)
+        except DerivationBroken:
+            docs = [documents] if isinstance(documents, dict) else list(documents)
+            result = await db.verify_held.insert_many(
+                [{**d, "lineage": []} for d in docs])   # the plausible mistake
+            return list(result.inserted_ids)
+
+    v.held.derive = derive_anyway
+    check = await v.check_inheritance()
+
+    assert not check.ok
+    assert any("derived from an erased parent" in n for n in check.notes), (
+        f"a fact was written out of an erased one: {check.notes}")
 
 
 async def test_the_starvation_check_fails_when_the_page_is_truncated(core):

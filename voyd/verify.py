@@ -14,7 +14,7 @@ The tests in ``tests/`` prove it on the author's machine against the author's
 schema; this proves it on yours, against your indexes, your MongoDB version,
 your tier, and whatever your deployment actually degraded to.
 
-Six checks, each mapped to a way this has really gone wrong:
+Seven checks, each mapped to a way this has really gone wrong:
 
 ``deadline``    An expired document, with the TTL monitor deliberately parked
                 so the row is *provably* still on disk, must be unreachable
@@ -47,6 +47,13 @@ Six checks, each mapped to a way this has really gone wrong:
                 until the evidence is gone, and an undoable erasure leaves
                 a chain that is intact and false.
 
+``inheritance`` A fact summarised by an agent, then erased. The summary must
+                go with it, at any depth, and a *new* derivation from the
+                erased source must be refused outright -- otherwise the race
+                is trivial. This is the failure that defeats the guarantee
+                using the guarantee's own storage, and leaves every receipt
+                in the system saying it worked.
+
 ``chain``       The refusal ledger, recomputed from entry zero. Needs no key.
 
 Exit status is the point, so this belongs in CI:
@@ -71,8 +78,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-from .engine import (REVOKED, Clearance, Deadline, Engine,
-                     Irreversible, now, quarantined, revoked)
+from .engine import (REVOKED, Clearance, Deadline, DerivationBroken,
+                     Engine, Irreversible, now, quarantined, revoked)
 
 DIMS = 8
 PARKED = 86_400          # seconds: the TTL monitor, effectively stopped
@@ -100,7 +107,7 @@ class Check:
 
 
 class Verifier:
-    """The six checks, and the parked-sweeper scaffolding they need."""
+    """The seven checks, and the parked-sweeper scaffolding they need."""
 
     def __init__(self, client, db, *, quiet: bool = False):
         self.client = client
@@ -169,7 +176,8 @@ class Verifier:
         # exist, and declaring it on ``verify_docs`` would change what the
         # deadline and starvation checks are measuring.
         holdable = self.engine.model("verify_held", tenant="scope")
-        self.held = holdable.admitting(Deadline(), revoked(), quarantined())
+        self.held = holdable.admitting(Deadline(), revoked(), quarantined(),
+                                       lineage_field="lineage")
         self.held.witnessed_by(self.chain)
 
         await self.engine.ensure(search_wait_s=90)
@@ -516,6 +524,77 @@ class Verifier:
             c.note("a hold can escalate to an erasure; reasons stack")
         return c
 
+    async def check_inheritance(self) -> Check:
+        """Does forgetting survive being summarised?
+
+        The failure this attacks defeats the guarantee using the
+        guarantee's own storage, and leaves every receipt in the system
+        saying the system worked. An agent retrieves a document,
+        summarises it, writes the summary back. The erasure request
+        arrives, ``revoke()`` honours it against the source, and the
+        summary keeps scoring well forever.
+
+        Two halves, and both have to hold or the other is decoration:
+        a refusal must travel *down* the derivation edge to work already
+        written, and a new derivation from an already-refused parent must
+        be refused outright -- otherwise the race is trivial. Revoke at
+        14:02, summarise at 14:03, and the contamination is clean.
+        """
+        c = Check("inheritance",
+                  "forgetting a fact forgets what was written out of it")
+        src = (await self.db.verify_held.insert_one(
+            {"scope": "s4", "text": "verify-origin", "expire_at": None}
+        )).inserted_id
+        try:
+            kid, = await self.held.derive(
+                {"scope": "s4", "text": "verify-summary"}, parents=[src])
+            grandkid, = await self.held.derive(
+                {"scope": "s4", "text": "verify-briefing"}, parents=[kid])
+        except Exception as exc:  # noqa: BLE001 - report, never crash the run
+            c.fail(f"derive() could not record provenance: {exc!r}")
+            return c
+
+        n = await self.held.revoke({"scope": "s4", "_id": src},
+                                   reason="voyd verify: erasure request")
+        if n != 3:
+            c.fail(f"revoking the source marked {n} document(s), expected 3 "
+                   f"-- the source and both generations made out of it. A "
+                   f"summary of a summary is still the fact somebody asked "
+                   f"to erase")
+
+        # ``verify_held`` carries no vector index -- the search paths are
+        # attacked on ``verify_docs`` by the checks above, and the property
+        # here is about the mark travelling, which is collection-agnostic.
+        one = await self.held.find_one({"scope": "s4"})
+        paths = {"handle.find": await self.held.find({"scope": "s4"}),
+                 "handle.find_one": [one] if one else []}
+        for path, result in paths.items():
+            leaked = [d.get("text") for d in result]
+            if leaked:
+                c.fail(f"{path} returned {leaked} after the source was erased")
+        if await self.held.count({"scope": "s4"}):
+            c.fail("handle.count still counts the erased subtree")
+        if c.ok:
+            c.note("the source, its summary and the summary's summary all "
+                   "went, in one query, at any depth")
+
+        row = await self.db.verify_held.find_one({"_id": grandkid})
+        if row is None:
+            c.fail("a descendant row was deleted; unreachable-first applies "
+                   "to the whole subtree")
+
+        try:
+            await self.held.derive({"scope": "s4", "text": "verify-late"},
+                                   parents=[src])
+        except DerivationBroken:
+            c.note("and a new derivation from an erased parent is refused, "
+                   "so the race is closed from the write side too")
+        else:
+            c.fail("a new document was derived from an erased parent. "
+                   "Revoke at 14:02, summarise at 14:03, and the erasure is "
+                   "defeated by a fact written after it")
+        return c
+
     # ---- driver --------------------------------------------------------
 
     async def run(self) -> bool:
@@ -541,6 +620,7 @@ class Verifier:
                          self.check_starvation(),
                          self.check_clearance(),
                          self.check_reversal(),
+                         self.check_inheritance(),
                          self.check_chain()):
                 check = await coro
                 self.checks.append(check)

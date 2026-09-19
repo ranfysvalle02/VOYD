@@ -369,6 +369,54 @@ answer exists would put "re-admit a document a detector flagged" behind the
 same credential as "read the scope". The reviewer queue is the next piece;
 `engine.queue(when=…)` already exists and the document is already the job.
 
+### Forgetting has to survive being summarised
+
+This is the hole that defeats the guarantee using the guarantee's own storage,
+and it is the one worth fixing before cryptographic erasure.
+
+An agent retrieves a document, summarises it, and writes the summary back into
+the same collection. Later somebody asks for the source to be erased.
+`revoke()` honours that request perfectly — against the source. The summary,
+which quotes it, keeps scoring well forever. The erasure is satisfied, the
+information is not gone, and every receipt in the system says it worked.
+
+```python
+notes = engine.model("notes").admitting(
+    Deadline(), revoked(), lineage_field="lineage")
+
+summary,  = await notes.derive({"text": "patient summary"}, parents=[diagnosis])
+briefing, = await notes.derive({"text": "ward briefing"},   parents=[summary])
+
+await notes.revoke({"_id": diagnosis}, reason="subject erasure request")
+# 3 marked. A summary of a summary is still the fact somebody asked to erase.
+```
+
+**It cost no new read-path rule**, which is the part worth noticing. `revoked()`
+already refuses any document carrying the mark — what was missing is that the
+mark did not *travel*. Three properties make that cheap and hard to get wrong:
+
+- **Transitive closure at write time.** A child's lineage is its parent's
+  lineage plus the parent, so a grandchild already names the grandparent and
+  one indexed `$in` reaches the whole subtree at any depth. Derivation only
+  grows forwards, so the closure cannot go stale.
+- **Either parent is enough.** A synthesis of two facts is refused when either
+  source is erased — the alternative is a document surviving by having been
+  made out of two things.
+- **You cannot build on a refused fact.** `derive()` raises `DerivationBroken`
+  if a parent is already revoked, held, out of scope, or above your clearance.
+  Without that the race is trivial: revoke at 14:02, summarise at 14:03, and
+  the contamination is clean. It refuses rather than writing-and-marking,
+  because both ways of reaching there are bugs worth surfacing.
+
+A derived fact also inherits the **earliest** deadline among its parents — a
+summary of a fact that expires on Tuesday has no business outliving it — and
+the whole subtree is scheduled for the reaper, not just the source. Holds
+travel too, and so does releasing them: a review that clears a document and
+leaves its summaries withheld has not finished. The chain records `direct` and
+`inherited` counts separately, because *"you asked to erase 1 fact and 2
+things made out of it went too"* is the sentence an auditor needs and one
+total cannot say it.
+
 ### An embedding is a (vector, model) pair
 
 `EmbeddedWith` is the rule that justifies the whole shape, because the bug it
@@ -639,6 +687,9 @@ degraded to.
   [ok  ] reversal: a hold can be lifted, an erasure cannot, and both reach the chain
          held, unreachable, and no deadline on the evidence
          an erasure refused to be lifted, as it must
+  [ok  ] inheritance: forgetting a fact forgets what was written out of it
+         the source, its summary and the summary's summary all went, in one query
+         and a new derivation from an erased parent is refused
   [ok  ] chain: the refusal ledger recomputes intact
 ```
 
@@ -649,7 +700,7 @@ install voyd`: no app extra, no running server, and it only ever touches a
 scratch database it creates and drops.
 
 CI runs it on every commit, and `tests/test_the_falsifier_can_fail.py` breaks
-the guarantee eight different ways to prove each check bites. A checker that
+the guarantee ten different ways to prove each check bites. A checker that
 cannot fail is worse than no checker — it turns an unknown into a false
 assurance somebody then makes a promise on.
 
@@ -749,6 +800,7 @@ purpose: the point being demonstrated is the database, not the model.
 | `examples/worker.py` | A queue with no queue. The document *is* the job; `fail()` decides whether the failure was the world (retry) or the document (park). |
 | `examples/agent.py` | Memory that forgets: hybrid recall + TTL, pinning as the absence of a deadline. What an agent backend actually needs. |
 | `examples/hold.py` | The asymmetry, end to end: a detector flags a document, it is held without a deadline, reviewed and released — then a second one is held, escalated to an erasure, and refuses to be taken back. Both directions on the chain, three counters that mean different things, and a reason this package has never seen behaving identically. |
+| `examples/lineage.py` | Forgetting that survives summarisation. An agent reads a fact, writes a summary, then a briefing off the summary — one erasure request takes all three, at depth, in one query. And the write side: deriving from an already-erased source raises rather than laundering it. |
 | `examples/clearance.py` | The same query, three callers, one scope. What a document is classified plus what a caller is cleared for, compared per hit — and the audit handle that can waive a revocation but not a clearance. |
 | `examples/scope.py` | The HTTP product end to end, through the same client the MCP server wraps. Needs a running server and an API key. |
 
@@ -928,6 +980,10 @@ checked rather than claimed:
 | `bypassable = False` *(optional)* | refuse to let `including_refused()` waive it |
 | `reversible = True/False` *(optional)* | declaring it **at all** says an operator imposes this reason with a verb; the value says whether `lift()` can take it back, and whether imposing it stamps the erase deadline |
 
+Derivation is orthogonal to rules — `lineage_field="lineage"` on `admitting()`
+opts a collection into it, and every imposable reason then travels down the
+edge without knowing derivation exists.
+
 ```python
 class Unreviewed:
     reason = "unreviewed"
@@ -953,6 +1009,41 @@ survive `ensure()`, are enforced on both halves with the two halves *agreeing*,
 are counted under their own name, can decline to be waived by the audit
 handle, and cannot open the gate by throwing. If that interface were not
 enough to write `Clearance`, those tests could not exist.
+
+## This is not a MongoDB argument
+
+"You should use MongoDB" and "retrieval is missing a guarantee" are different
+claims, and only the second is interesting. If a reader thinks this is the
+first, they are right to dismiss it — so the thesis is ported, in full, to a
+stack with no MongoDB in it:
+
+```bash
+docker compose -f drift/docker-compose.drift.yml up -d --wait drift-postgres
+uv run --extra drift python drift/refusal_on_postgres.py
+```
+
+pgvector, one table, four acts: the same silent bug (an expired row answering
+a vector query while the cleanup job has not run — Postgres has no TTL, so
+"not yet" can mean any length of time); refusal in the read path; then the
+structural part, because a filtered query is a *convention* that holds until
+somebody writes the second query. So the table is revoked and only a view is
+granted — the database itself refuses to serve the unfiltered rows to that
+role, and the naive read raises `permission denied` instead of leaking. That
+is Postgres's version of "there is no unfiltered read on the handle". Act IV
+does inherited refusal with a recursive CTE.
+
+It also states **what is harder there**, because an argument that lists only
+its wins is marketing. Postgres has no TTL, so the moment you need rows
+actually *gone* the deadline has two owners again — VOYD's one-owner claim
+really is stronger on MongoDB, and that is a property of the engine, not of
+the argument. The view costs a role and a grant, and holds exactly as long as
+nobody runs the app as the owning role.
+
+What carries over completely is the whole thesis: deletion is a storage event
+and refusal is a retrieval guarantee; a rule you have to remember to apply is
+not enforced, so the unfiltered read must be unavailable rather than
+discouraged; and a refusal that does not travel to what was made out of the
+fact is defeated by a summary. None of those is a MongoDB feature.
 
 ## What MongoDB is doing
 
@@ -1097,7 +1188,7 @@ that has nothing to do with either of them.
 | A chain cannot fork under concurrency | twelve concurrent revocations produce twelve linear links |
 | A hash survives its own round trip | the stored entry hashes to the receipt handed out, field by field |
 | An unrecordable refusal still refuses | a broken ledger cannot turn a completed revocation into an error |
-| The falsifier can fail | eight ways of breaking the guarantee, each caught by the check that claims it |
+| The falsifier can fail | ten ways of breaking the guarantee, each caught by the check that claims it |
 | An erasure cannot be taken back | `lift()` raises on an irreversible reason, and `release()` is not a way around it |
 | A hold can be | imposed, lifted, and counted apart from erasure, because overruling a detector is its own number |
 | A hold does not destroy its own evidence | imposing a reversible reason stamps no erase deadline |
@@ -1109,6 +1200,13 @@ that has nothing to do with either of them.
 | Forgetting the whole scope has to be said out loud | a filter that narrows nothing beyond the tenant raises unless `everything=True` |
 | A write with no undo checks its blast radius first | `expect=n` counts before it writes, and writes nothing on a mismatch |
 | A caller-supplied reason cannot be an expression | `$`-prefixed reasons are stored verbatim, not read as a field path |
+| Forgetting survives being summarised | erasing a source erases its summary, and the summary's summary, in one query |
+| Lineage is closed at write time | a grandchild names the grandparent, so propagation is `$in` rather than a recursive walk |
+| Either parent is enough | a synthesis of two facts is refused when *either* source is erased |
+| You cannot build on a refused fact | `derive()` raises on a parent that is revoked, held, foreign, or above your clearance |
+| A derived fact cannot outlive its source | the earliest parent deadline is inherited, and a shorter one set deliberately stands |
+| Propagation does not cross the tenant | the boundary and every unbypassable rule are rebuilt on the way down the edge |
+| The thesis is not MongoDB-shaped | the whole argument re-executed on pgvector, with what is harder there stated |
 | No module reaches past the handle | the AST of every module in the package, not a review comment |
 | A caller with no clearance claim gets nothing | absence is the lowest level, asserted for four shapes of missing |
 | An unrecognised classification is refused, not ranked low | a renamed level cannot become world-readable |
