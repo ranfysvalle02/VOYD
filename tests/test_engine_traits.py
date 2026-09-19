@@ -12,7 +12,8 @@ import uuid
 import pytest
 
 from tests.conftest import TEST_MONGO_URI, _mongo_available
-from voyd.engine import Engine, collection_of, kind_of
+from voyd.engine import Engine
+from voyd.engine.trait import collection_of, kind_of
 from voyd.engine.trait import Trait
 
 

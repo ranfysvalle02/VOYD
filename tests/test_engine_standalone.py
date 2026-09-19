@@ -17,7 +17,8 @@ import random
 import pytest
 from bson import ObjectId
 
-from voyd.engine import JobQueue, PermanentFailure, SearchSpec, backoff
+from voyd.engine import JobQueue, PermanentFailure, SearchSpec
+from voyd.engine.jobs import backoff
 
 DIMS = 8
 

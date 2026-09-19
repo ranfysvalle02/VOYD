@@ -60,10 +60,7 @@ collections, fields and filters, never about namespaces or voids.
 
 from __future__ import annotations
 
-from .authority import (DERIVE, GRANTS_REACHABILITY, POLICY, QUARANTINE,
-                        RELEASE, REVOKE, SHRED, WITHHOLDS, Anyone,
-                        Authority, AuthorityRequired, Grants, NotAuthorised,
-                        Recorded)
+from .authority import AuthorityRequired, Anyone, Grants, NotAuthorised
 from .capabilities import Capabilities, detect
 from .errors import (
     BlastRadius,
@@ -83,21 +80,20 @@ from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED,
                         REACHABLE, REFUSED, REVOKED, UNKNOWN, UNREADABLE,
                         UNRECOVERABLE, WRONG_MODEL,
                         Clearance, Deadline, EmbeddedWith, Page, Restricted,
-                         Admission, AdmissionSpec, Marked, Rule, Unrecoverable,
+                         Admission, AdmissionSpec, Marked, Unrecoverable,
                          quarantined, revoked, why_refused)
-from .jobs import JobQueue, PermanentFailure, backoff
-from .custody import (Aws, Azure, Custody, Ephemeral, Gcp, Kmip,
-                      LocalFile)
+from .jobs import JobQueue, PermanentFailure
+from .custody import Aws, Azure, Ephemeral, Gcp, Kmip, LocalFile
 from .keyring import Keyring, KeyringSpec, Queryable, Sealed
 from .ledger import GENESIS, Ledger, LedgerSpec, canonical, digest
 from .memory import Memory, MemorySpec
-from .policy import Denies, PolicyInvalid, compile_policy
-from .perimeter import (DERIVED, OWNED, SEALED, Acknowledgement,
-                        Perimeter, PerimeterLog, Sink, sink)
+from .policy import PolicyInvalid, compile_policy
+from .perimeter import (DERIVED, OWNED, SEALED, Perimeter, PerimeterLog,
+                        sink)
 from .model import Model
 from .search import SearchEngine, SearchSpec, cosine
 from .time import UTC, aware, bind, deadline, live, living, now
-from .trait import Trait, collection_of, kind_of
+from .trait import collection_of, kind_of
 
 
 class Engine:
@@ -367,33 +363,54 @@ class Engine:
         }
 
 
+# What this package promises, grouped by what a reader is trying to do.
+#
+# It is a promise rather than an inventory, and the difference is the point:
+# a name here has to keep working, so putting one here is a decision and
+# not a consequence of having written a class. Everything else in this
+# package is still importable from the module that owns it -- the
+# extension-point vocabulary lives in ``.authority`` and ``.trait``,
+# internals in ``.capabilities``, ``.search`` and ``.jobs`` -- and is
+# reachable without being guaranteed.
+#
+# ``tests/test_the_public_surface_is_deliberate.py`` pins this list, so
+# growing it is a line in a diff somebody has to justify rather than a
+# thing that happens.
 __all__ = [
-    "Engine", "Capabilities", "detect",
-    "SearchEngine", "SearchSpec", "cosine",
-    "Expiry", "ExpirySpec",
-    "Admission", "AdmissionSpec", "why_refused",
-    "Rule", "Deadline", "Marked", "revoked", "quarantined",
+    # ---- the engine, and the clock it pins ----
+    "Engine", "PermanentFailure",
+    "now", "deadline", "live", "living", "aware", "UTC", "cosine",
+
+    # ---- declaring a collection ----
+    "Admission", "AdmissionSpec", "Page", "why_refused",
+    "Memory", "MemorySpec", "JobQueue", "SearchSpec", "ExpirySpec",
+
+    # ---- reasons a fact may not reach a prompt: the rules you construct ----
+    "Deadline", "Marked", "revoked", "quarantined",
+    "Clearance", "Restricted", "EmbeddedWith", "Unrecoverable",
+    "compile_policy",
+
+    # ---- and the reasons you read back out of receipts() ----
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
-    "LIFTED", "UNRECOVERABLE", "Unrecoverable",
-    "REACHABLE", "REFUSED", "UNKNOWN", "KEY_UNAVAILABLE",
+    "NOT_CLEARED", "UNRECOVERABLE", "KEY_UNAVAILABLE", "LIFTED",
+    "REACHABLE", "REFUSED", "UNKNOWN",
+
+    # ---- proof ----
+    "Ledger", "LedgerSpec", "GENESIS", "canonical", "digest",
+
+    # ---- encryption, and who holds the key that wraps the keys ----
     "Keyring", "KeyringSpec", "Sealed", "Queryable",
-    "Custody", "Ephemeral", "LocalFile", "Aws", "Azure", "Gcp", "Kmip",
-    "NOT_CLEARED", "EmbeddedWith", "Clearance", "Restricted", "Page",
-    "Memory", "MemorySpec",
-    "Perimeter", "PerimeterLog", "Sink", "sink", "Acknowledgement",
-    "compile_policy", "Denies", "PolicyInvalid",
-    "Authority", "Grants", "Anyone", "Recorded",
-    "NotAuthorised", "AuthorityRequired",
-    "REVOKE", "QUARANTINE", "RELEASE", "SHRED", "DERIVE", "POLICY",
-    "GRANTS_REACHABILITY", "WITHHOLDS",
-    "SEALED", "OWNED", "DERIVED",
-    "Model",
-    "JobQueue", "PermanentFailure", "backoff",
-    "Ledger", "LedgerSpec", "canonical", "digest", "GENESIS",
-    "ScopeRequired", "ScopeInvalid", "ScopeError", "FilterInvalid",
+    "Ephemeral", "LocalFile", "Aws", "Azure", "Gcp", "Kmip",
+
+    # ---- who may do this ----
+    "Grants", "Anyone",
+
+    # ---- who else holds a copy ----
+    "Perimeter", "PerimeterLog", "sink", "SEALED", "OWNED", "DERIVED",
+
+    # ---- what you catch ----
+    "ScopeError", "ScopeRequired", "ScopeInvalid", "FilterInvalid",
     "CallerRequired", "Irreversible", "UnknownReason", "BlastRadius",
-    "DerivationBroken",
-    "UnboundedForgetting",
-    "Trait", "kind_of", "collection_of",
-    "now", "aware", "live", "living", "deadline", "bind", "UTC",
+    "UnboundedForgetting", "DerivationBroken", "PolicyInvalid",
+    "NotAuthorised", "AuthorityRequired",
 ]

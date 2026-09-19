@@ -182,6 +182,25 @@ one. Staleness bounds the lie; it does not remove it.
 
 ---
 
+## 8. The public surface grew for a year with nothing watching it
+
+**Severity: closed, and recorded because the mechanism is the point.**
+
+`voyd.engine.__all__` reached 100 names, 48 of which appeared in no README,
+blog or example. Not wrong individually — nothing had ever asked them to
+earn the name.
+
+Cut to 75 and pinned by
+`tests/test_the_public_surface_is_deliberate.py`. Nothing was deleted
+except `POLICY` (a constant referenced nowhere); the rest went from
+*promised* to *present*, still importable from the module that owns it.
+
+**What this does not fix.** The engine is 17 modules and ~10,600 lines, and
+a curated export list does not make it smaller — it makes the promise
+honest. Whether the *concepts* have outgrown the project's own aesthetic is
+a separate question, and the honest answer is that nobody has yet sat down
+and asked which of the last five features would be missed.
+
 ## Operational caveats
 
 Not defects — known trades, written down so they are not rediscovered as

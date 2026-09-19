@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import pytest
 
-from voyd.engine import (GRANTS_REACHABILITY, RELEASE, REVOKE, WITHHOLDS,
-                         Anyone, AuthorityRequired, Deadline, Grants,
-                         NotAuthorised, Recorded, quarantined, revoked)
+from voyd.engine import (Anyone, AuthorityRequired, Deadline, Grants,
+                         NotAuthorised, quarantined, revoked)
+# Vocabulary for the Authority extension point: present, not promised.
+from voyd.engine.authority import (GRANTS_REACHABILITY, RELEASE, REVOKE,
+                                   WITHHOLDS, Recorded)
 
 
 async def guarded(core, authority, *, tenant="t"):

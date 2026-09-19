@@ -1710,6 +1710,35 @@ that has nothing to do with either of them.
   to leak, no bucket policy to get wrong, and nothing to reclaim out of band
   when a scope expires.
 
+## The public surface is a promise
+
+`import voyd` is seven names. `voyd.engine` is the advanced namespace, and
+it reached a hundred exports the way these things always do: one justified
+addition at a time, each obviously fine, nobody ever reading the list from
+the top. Forty-eight of them appeared in neither this README, nor the blog,
+nor any example.
+
+It is seventy-five now, grouped by what a reader is trying to do, and
+`tests/test_the_public_surface_is_deliberate.py` pins the list — so adding
+a public name is a line in a diff somebody has to justify rather than a
+consequence of having written a class. The same mechanism as
+`including_refused()`: the safe thing is the default, the other thing is
+said out loud.
+
+**Nothing was deleted.** What was cut went from *promised* to *present* —
+still importable from the module that owns it, no longer guaranteed:
+
+| cut | why | where it lives |
+|---|---|---|
+| `Rule`, `Trait`, `Sink`, `Authority`, `Custody` | `runtime_checkable` protocols that nothing ever `isinstance`-checks, whose own docstrings say **inherit nothing** — so `__all__` was advertising a base class that does not exist | their own modules |
+| `REVOKE`, `RELEASE`, `SHRED`, … | vocabulary you only touch when writing an `Authority` | `voyd.engine.authority` |
+| `Model`, `Capabilities`, `Acknowledgement`, `Denies` | return types — you receive them, you do not construct them | their own modules |
+| `SearchEngine`, `Expiry`, `detect`, `bind`, `backoff`, `kind_of` | internals reachable as `engine.search_engine`, `engine.expiry`, … | their own modules |
+
+One name was genuinely deleted: `POLICY`, a constant referenced nowhere but
+its own definition. The only kind of export that costs nothing to remove is
+the one nobody was ever going to type.
+
 ## Known issues
 
 Defects, unproven claims and imprecisions in what already ships are in

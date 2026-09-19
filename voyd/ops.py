@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from .engine import backoff
+from .engine.jobs import backoff
 from .store.mongo import MAX_EMBED_ATTEMPTS, MongoStore
 from .intelligence.voyage import VoyageIntelligence
 

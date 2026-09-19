@@ -64,7 +64,6 @@ QUARANTINE = "quarantine"
 RELEASE = "release"
 SHRED = "shred"
 DERIVE = "derive"
-POLICY = "policy"
 
 # Operations that make a fact *more* reachable. A mistake here is the
 # breach the detector fired about, which is why they are named as a set
