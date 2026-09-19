@@ -1793,6 +1793,15 @@ One name was genuinely deleted: `POLICY`, a constant referenced nowhere but
 its own definition. The only kind of export that costs nothing to remove is
 the one nobody was ever going to type.
 
+## The pain, in eight stories
+
+[`pain.md`](pain.md) is the *why*, told as incidents rather than features —
+mostly real ones from this repository, each ending with the file that closes
+it. What the eight have in common is the whole category: **failures whose
+signature is a plausible answer.** None of them raise, none of them page,
+and at the moment each happens its output is indistinguishable from the
+system working.
+
 ## Known issues
 
 Defects, unproven claims and imprecisions in what already ships are in
