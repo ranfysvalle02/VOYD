@@ -39,7 +39,8 @@ import uuid
 from pymongo import AsyncMongoClient
 
 from voyd.engine import Deadline, Engine, revoked
-from voyd.engine.keyring import Keyring, KeyringSpec, available
+from voyd.engine.custody import from_env
+from voyd.engine.keyring import Keyring, KeyringSpec, Sealed, available
 
 URI = "mongodb://localhost:27018/?directConnection=true"
 SECRET = "alice was treated for a stress fracture in March"
@@ -59,12 +60,25 @@ async def main() -> None:
     name = f"core_shred_{uuid.uuid4().hex[:8]}"
     engine = Engine(client, client[name])
     await engine.connect()
-    ring = Keyring(engine.db, KeyringSpec(sealed={"notes": ("text",)}))
+    # The ladder, from the environment. Unset is Ephemeral -- demo-grade,
+    # and it says so rather than letting the run imply otherwise:
+    #   VOYD_KMS_PROVIDER=local VOYD_KMS_KEY_PATH=./master.key
+    #   VOYD_KMS_PROVIDER=aws   VOYD_KMS_KEY=arn:aws:kms:...
+    custody = from_env("VOYD_KMS")
+    held = custody.describe()
+    print(f"\n  custody: {held['detail']}")
+    print(f"           durable={held['durable']}  audited={held['audited']}")
+    if not held["audited"]:
+        print("           (shredding below is real; who may destroy the")
+        print("            master key is this process's own word for it)")
+    ring = Keyring(engine.db,
+                   KeyringSpec(protect={"notes": Sealed(("text",))}),
+                   custody=custody)
     await ring.ensure()
     await ring.key_for("alice")
     await ring.key_for("bob")
 
-    writer = AsyncMongoClient(URI, auto_encryption_opts=ring.client_options())
+    writer = AsyncMongoClient(URI, auto_encryption_opts=await ring.client_options())
     try:
         notes = engine.model("notes").admitting(Deadline(), revoked())
         await engine.ensure(search_wait_s=0)
@@ -93,7 +107,7 @@ async def main() -> None:
         print("     any copy of the data, anywhere:")
         await ring.shred("alice")
         cold = AsyncMongoClient(URI,
-                                auto_encryption_opts=ring.client_options())
+                                auto_encryption_opts=await ring.client_options())
         try:
             try:
                 await cold[name].notes.find_one({"key_scope": "alice"})

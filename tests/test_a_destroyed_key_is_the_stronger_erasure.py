@@ -33,7 +33,8 @@ import uuid
 import pytest
 
 from tests.conftest import TEST_MONGO_URI
-from voyd.engine import UNRECOVERABLE, Keyring, KeyringSpec, Unrecoverable
+from voyd.engine import (UNRECOVERABLE, Keyring, KeyringSpec, Sealed,
+                         Unrecoverable)
 from voyd.engine.keyring import ENCRYPTED, available
 
 _ok, _why = available()
@@ -48,12 +49,12 @@ async def sealed(core, *, collection="notes"):
     from pymongo import AsyncMongoClient
 
     engine, db = core
-    ring = Keyring(db, KeyringSpec(sealed={collection: ("text",)}))
+    ring = Keyring(db, KeyringSpec(protect={collection: Sealed(("text",))}))
     await ring.ensure()
     await ring.key_for("scope-a")
     await ring.key_for("scope-b")
     writer = AsyncMongoClient(TEST_MONGO_URI,
-                              auto_encryption_opts=ring.client_options())
+                              auto_encryption_opts=await ring.client_options())
     return ring, writer[db.name][collection]
 
 
@@ -98,7 +99,7 @@ async def test_destroying_a_key_erases_one_scope_and_only_one(core):
         # A cold client: the shredding process may still hold a cached key,
         # which is the measured caveat, not the guarantee.
         cold = AsyncMongoClient(TEST_MONGO_URI,
-                                auto_encryption_opts=ring.client_options())
+                                auto_encryption_opts=await ring.client_options())
         try:
             with pytest.raises(Exception):
                 await cold[db.name].notes.find_one({"key_scope": "scope-a"})
@@ -207,3 +208,75 @@ def test_the_capability_probe_says_why_when_it_says_no():
     assert isinstance(ok, bool) and why
     if not ok:
         assert "pymongocrypt" in why or "crypt_shared" in why
+
+
+# ---- rotation: the half that makes destruction credible ---------------
+
+async def test_rotating_the_master_key_leaves_every_document_readable(core):
+    """A key that cannot be re-wrapped is a key that gets copied instead.
+
+    And a copied key cannot be destroyed, so "we shredded it" quietly stops
+    being true without anybody doing anything wrong. Rotation re-encrypts
+    the *data keys* under a new master -- the DEK itself does not change,
+    so not one document is rewritten and everything stays readable. That
+    asymmetry is why rotating a CMK is cheap and re-encrypting a collection
+    is not.
+    """
+    from pymongo import AsyncMongoClient
+
+    from voyd.engine import Ephemeral
+
+    engine, db = core
+    ring, writer = await sealed(core)
+    try:
+        await writer.insert_one({"key_scope": "scope-a", "text": SECRET})
+        wrapped_before = (await db[ring.collection].find_one(
+            {"keyAltNames": "scope-a"}))["keyMaterial"]
+
+        assert await ring.rotate() >= 1
+
+        after = await db[ring.collection].find_one({"keyAltNames": "scope-a"})
+        assert after["keyMaterial"] != wrapped_before, \
+            "the data key must be wrapped by something new"
+
+        cold = AsyncMongoClient(
+            TEST_MONGO_URI, auto_encryption_opts=await ring.client_options())
+        try:
+            back = await cold[db.name].notes.find_one({"key_scope": "scope-a"})
+            assert back["text"] == SECRET, \
+                "rotation must not cost a single document its readability"
+        finally:
+            await cold.close()
+
+        # And a rotation cannot quietly downgrade custody: rewrapping under
+        # a *different* master is an explicit argument, not a default.
+        assert await ring.rotate(scope="scope-a", custody=Ephemeral()) == 1
+    finally:
+        await writer.database.client.close()
+
+
+async def test_a_keyring_refuses_two_answers_about_who_holds_the_key(core):
+    """``custody=`` and ``kms_providers=`` together is the one question
+    that must have exactly one answer, so it raises rather than picking."""
+    from voyd.engine import Ephemeral
+
+    engine, db = core
+    with pytest.raises(ValueError, match="not both"):
+        Keyring(db, custody=Ephemeral(), kms_providers={"local": {"key": b""}})
+
+
+async def test_a_raw_provider_dict_reports_unknown_custody_not_safe_custody(
+        core, caplog):
+    """Supported, because the driver's vocabulary is the real interface --
+    and reported as unknown rather than assumed, because a dict cannot say
+    whether the key behind it is in an HSM or in a variable two frames up.
+    """
+    import logging
+    import os
+
+    engine, db = core
+    ring = Keyring(db, kms_providers={"local": {"key": os.urandom(96)}})
+    assert ring.describe()["custody"]["audited"] is False
+    with caplog.at_level(logging.WARNING):
+        ring.custody.warn_if_weak("keyring x")
+    assert "cannot report where the master key lives" in caplog.text

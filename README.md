@@ -1089,12 +1089,83 @@ key is gone from all of them, including the backup nobody has restored yet.
 Neither is the answer. Both is. (`examples/shred.py` shows all three firing in
 one run: the reaper takes the row while step 4 is still waiting on the cache.)
 
-**Key custody, stated plainly**, because a crypto claim that is vague here is
-marketing. With the `local` provider the master key is in this process, so it
-shares a fate with the ciphertext: demonstration-grade, and `ensure()` logs a
-warning saying so. A real deployment points `kms_providers` at AWS/Azure/GCP
-KMS, where destroying the CMK is somebody else's audited operation. The code
-path is identical; only the provider dict changes.
+### Two modes, and the tradeoff is measured
+
+`Sealed` and `Queryable` are not preferences. The constraint that separates
+them was checked against MongoDB 8.2, not recalled from a doc page:
+
+| | the encrypted field is | shred granularity |
+|---|---|---|
+| **`Sealed`** (CSFLE, pointer `keyId`) | not queryable | **per scope** |
+| **`Queryable`** (QE, equality 7.0+ / range 8.0+) | **queryable** | the whole collection |
+
+QE **rejects a JSON-pointer `keyId`** — `BSON field
+'create.encryptedFields.fields.keyId' is the wrong type 'string'` — so a QE
+key is bound per field per collection at creation. Shredding it erases that
+field for *everybody*. `Sealed` uses the pointer, which is exactly what makes
+per-subject erasure possible.
+
+So: **if erasure must be per-subject, use `Sealed`; if the ciphertext must be
+searchable, use `Queryable` and accept that your shred granularity is the
+collection.** Wanting both means one collection per subject, which is a
+sharding decision wearing an encryption costume. A keyring can hold both
+modes at once, and `describe()` prints the granularity, because this is the
+kind of tradeoff that gets made once and misremembered forever.
+
+```python
+KeyringSpec(protect={
+    "notes":  Sealed(("text",)),                      # per-subject erasure
+    "people": Queryable(("ssn",), query_type="equality"),  # searchable
+})
+```
+
+QE collections cannot be created by inserting into them — they need
+`enxcol_.*` metadata collections that only `create_encrypted_collection`
+makes, and writing to a namespace that skipped it does not fail loudly, it
+writes **plaintext**. `ring.create_queryable(client, "people")` is the door.
+
+### Key custody is a declared thing, not a dict
+
+The whole claim rests on who holds the key that wraps the data keys, and a
+crypto claim that is vague there is marketing. So it is typed, and it is a
+ladder — a proof of concept must not need an AWS account, and production must
+not accidentally inherit a proof of concept's custody:
+
+```python
+Ephemeral()                      # demo. Nothing survives a restart, and it says so
+LocalFile(path="master.key")     # durable. Custody is a file permission
+Aws(key="arn:aws:kms:...")       # audited. Destroying the CMK is somebody else's op
+Azure(...) / Gcp(...) / Kmip(...)
+```
+
+Same code path throughout — a provider name and a master-key document. Three
+things this fixes that a raw `kms_providers` dict does not:
+
+- **`create_data_key` needs the provider *name* and a provider-shaped
+  `master_key`.** Hardcoding `"local"` means an AWS-configured deployment
+  wraps its data keys with a process-local secret and never finds out —
+  there is no error, only a belief. (That bug was live in the first version
+  of this; `test_custody_is_a_declared_thing.py` exists because of it.)
+- **`durable` and `audited` are attributes**, so `describe()` and `voyd
+  verify` can *print* the custody story instead of a reader inferring it
+  from an absence. The weak rungs warn at `ensure()` — losing an ephemeral
+  master key is indistinguishable from having shredded every key in the
+  vault.
+- **Omitting AWS credentials selects the credential chain**, which is the
+  correct production shape: baking an access key into a config file in
+  order to encrypt something is a net loss.
+
+`from_env("VOYD_KMS")` reads the ladder from the environment and falls back
+to `Ephemeral` *loudly*. A raw `kms_providers=` dict is still accepted — the
+driver's vocabulary is the real interface — and is reported as **unknown**
+custody rather than assumed safe.
+
+**Rotation**, because a key that cannot be re-wrapped is a key that gets
+copied instead, and a copied key cannot be destroyed — so "we shredded it"
+stops being true without anybody doing anything wrong. `ring.rotate()`
+re-wraps the data keys under a new CMK and **rewrites no documents**: the DEK
+does not change, so nothing loses readability. That asymmetry is why rotating
+a CMK is cheap and re-encrypting a collection is not.
 
 **Automatic encryption also needs `crypt_shared` or `mongocryptd`**, which is
 a MongoDB Enterprise download and not on PyPI. `voyd.engine.keyring.available()`
@@ -1305,6 +1376,11 @@ that has nothing to do with either of them.
 | The key expires with the documents | a TTL index on the key vault, and a key's deadline moves earlier or not at all |
 | A destroyed key is a refusal, not a 500 | one crypto-erased document must not fail a page of fifty |
 | Ciphertext cannot be served as text | `Unrecoverable` refuses a `Binary` that reached a read path unsealed |
+| A KMS custody carries its provider and master key | hardcoding `"local"` wraps an AWS deployment's keys with a process secret, silently |
+| Custody declares durability and audit | and the weak rungs warn; a lost ephemeral key is indistinguishable from a full shred |
+| A local key file is created once and reused | including base64, because secrets arrive text-shaped; a wrong length refuses rather than guesses |
+| QE buys queryability and costs per-subject erasure | asserted against a live server, not recalled from a doc page |
+| Rotation costs no document its readability | `rewrap_many_data_key` changes the wrapping, not the data key |
 | A missing crypto stack is loud | the probe says which half is absent, and CI asserts it is present |
 | No module reaches past the handle | the AST of every module in the package, not a review comment |
 | A caller with no clearance claim gets nothing | absence is the lowest level, asserted for four shapes of missing |

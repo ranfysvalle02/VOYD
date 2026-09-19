@@ -21,18 +21,32 @@ ciphertext at rest, the key carrying the scope's own `expire_at` on a TTL
 index, and `shred()` for now. `unrecoverable` is a refusal reason beside
 `deadline` and `revoked`.
 
+Custody is a typed ladder (`custody.py`): `Ephemeral` -> `LocalFile` ->
+`Aws`/`Azure`/`Gcp`/`Kmip`, with `durable` and `audited` as attributes so
+`describe()` and `voyd verify` print the custody story rather than implying
+it. Rotation is `rewrap_many_data_key`. Both modes ship: `Sealed` (CSFLE,
+pointer `keyId`, per-scope shred) and `Queryable` (QE, searchable
+ciphertext, collection-wide shred), with the constraint that forces the
+choice measured against 8.2 rather than recalled.
+
 **What is left on this**, and it is the part that matters for adoption:
 
-- **KMS custody.** The local provider is demonstration-grade and says so.
-  Nothing has been run against AWS/Azure/GCP KMS, and the interesting work
-  is not the provider dict — it is what `voyd verify` can honestly assert
-  when the CMK is somebody else's to destroy.
+- **Nothing has actually run against a cloud KMS.** The provider dicts and
+  master-key shapes are unit-tested and the code path is shared with the
+  local rung, but "constructs the right `master_key` document" and "works
+  against AWS" are different claims and only the first is proven. The
+  interesting work is not the dict — it is what `voyd verify` can honestly
+  assert when the CMK is somebody else's to destroy, and whether a *failed*
+  KMS call is distinguishable from a shredded key on the read path. It
+  should be: one is an outage and one is the feature.
 - **The key cache is not a contract.** Measured at ~60s and at >120s in two
-  shapes. Worth pinning down per driver version, or at least documenting
-  the variance in `bench/`.
-- **Rotation and `rewrap_many_data_key`.** Untouched. A key that cannot be
-  rotated is a key that eventually cannot be destroyed either, because
-  somebody will have copied the data under it.
+  shapes. Worth pinning per driver version in `bench/`.
+- **QE range queries** (8.0+) are declared in the type and untested; only
+  equality is exercised.
+- **Nothing is sealed on the HTTP path.** The keyring is an engine
+  primitive. Wiring it into the product needs an answer to which fields a
+  scope declares sensitive, and that is a schema decision the vault API
+  does not currently let anybody express.
 
 Per-scope data key, text encrypted at rest with it, the deadline destroys the
 key. The row stays on disk and the plaintext is gone the instant the key is.

@@ -80,7 +80,9 @@ from .admission import (DEADLINE, LIFTED, NOT_CLEARED, QUARANTINED, REVOKED,
                          Admission, AdmissionSpec, Marked, Rule, Unrecoverable,
                          quarantined, revoked, why_refused)
 from .jobs import JobQueue, PermanentFailure, backoff
-from .keyring import Keyring, KeyringSpec
+from .custody import (Aws, Azure, Custody, Ephemeral, Gcp, Kmip,
+                      LocalFile)
+from .keyring import Keyring, KeyringSpec, Queryable, Sealed
 from .ledger import GENESIS, Ledger, LedgerSpec, canonical, digest
 from .memory import Memory, MemorySpec
 from .model import Model
@@ -327,7 +329,8 @@ __all__ = [
     "Rule", "Deadline", "Marked", "revoked", "quarantined",
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
     "LIFTED", "UNRECOVERABLE", "Unrecoverable",
-    "Keyring", "KeyringSpec",
+    "Keyring", "KeyringSpec", "Sealed", "Queryable",
+    "Custody", "Ephemeral", "LocalFile", "Aws", "Azure", "Gcp", "Kmip",
     "NOT_CLEARED", "EmbeddedWith", "Clearance", "Restricted", "Page",
     "Memory", "MemorySpec",
     "Model",

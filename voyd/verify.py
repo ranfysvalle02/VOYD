@@ -87,8 +87,9 @@ from datetime import timedelta
 
 from .engine import (REVOKED, Clearance, Deadline, DerivationBroken,
                      Engine, Irreversible, Keyring, KeyringSpec,
-                     now, quarantined, revoked)
+                     Sealed, now, quarantined, revoked)
 from .engine.keyring import ENCRYPTED
+from .engine.custody import from_env as custody_from_env
 from .engine.keyring import available as keyring_available
 
 DIMS = 8
@@ -632,12 +633,26 @@ class Verifier:
 
         from pymongo import AsyncMongoClient
 
-        ring = Keyring(self.db, KeyringSpec(sealed={"verify_sealed": ("text",)}))
+        # Custody from the environment, so a run against a deployment with
+        # a real KMS exercises the real path rather than the demo rung --
+        # and says which one it got, because "we verified the encryption"
+        # means different things on each.
+        ring = Keyring(
+            self.db,
+            KeyringSpec(protect={"verify_sealed": Sealed(("text",))}),
+            custody=custody_from_env("VOYD_KMS"))
         await ring.ensure()
+        held = ring.custody.describe()
+        c.note(f"custody: {held['detail']} "
+               f"(durable={held['durable']}, audited={held['audited']})")
+        if not held["audited"]:
+            c.note("unaudited custody -- the mechanism below is real, and "
+                   "'the key was destroyed' is still this deployment's own "
+                   "word. Set VOYD_KMS_PROVIDER to change that.")
         await ring.key_for("s5")
         await ring.key_for("s6")
         writer = AsyncMongoClient(self.uri,
-                                  auto_encryption_opts=ring.client_options())
+                                  auto_encryption_opts=await ring.client_options())
         cold = None
         try:
             await writer[self.db.name].verify_sealed.insert_many([
@@ -655,7 +670,7 @@ class Verifier:
 
             await ring.shred("s5")
             cold = AsyncMongoClient(
-                self.uri, auto_encryption_opts=ring.client_options())
+                self.uri, auto_encryption_opts=await ring.client_options())
             try:
                 await cold[self.db.name].verify_sealed.find_one(
                     {"key_scope": "s5"})
@@ -676,6 +691,22 @@ class Verifier:
                        "and is noise")
             c.note("and the row is still on disk -- which is now a fact "
                    "about ciphertext, not about plaintext")
+
+            # Rotation, because a key that cannot be re-wrapped gets copied
+            # instead, and a copied key cannot be destroyed -- so "we
+            # shredded it" stops being true with nobody doing anything wrong.
+            if await ring.rotate(scope="s6") < 1:
+                c.fail("rewrap_many_data_key re-wrapped nothing; without "
+                       "rotation, destruction is not credible over time")
+            else:
+                still = await cold[self.db.name].verify_sealed.find_one(
+                    {"key_scope": "s6"})
+                if not still or still.get("text") != "verify-sealed-kept":
+                    c.fail("rotation cost a document its readability; the "
+                           "data key does not change, so nothing should")
+                else:
+                    c.note("and the master key rotated without rewriting a "
+                           "single document")
         finally:
             await writer.close()
             if cold is not None:

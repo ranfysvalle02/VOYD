@@ -59,15 +59,42 @@ everywhere else. ``unseal()`` therefore decrypts per document and **refuses**
 what it cannot, under the reason ``unrecoverable``, which is the same thing
 the rest of the engine does with a fact it may not serve.
 
-**Key custody, stated plainly, because a crypto claim that is vague about
-this is marketing.** The customer master key lives wherever ``kms_providers``
-says. With the ``local`` provider that is this process's memory, which means
-the master key and the ciphertext share a fate and the guarantee is
-demonstration-grade: good enough to prove the mechanism, not good enough to
-tell an auditor. A real deployment points this at AWS/Azure/GCP KMS, where
-destroying the CMK is somebody else's audited operation and the ciphertext
-becomes unreadable without anything in this database being touched at all.
-The code path is identical; only the provider dict changes.
+**Key custody is a declared thing, not a dict.** See ``custody.py``: the
+whole claim rests on who holds the key that wraps the data keys, and a
+crypto claim that is vague there is marketing. The rungs go ``Ephemeral``
+(demo; nothing survives a restart) -> ``LocalFile`` (durable, custody is a
+file permission) -> ``Aws``/``Azure``/``Gcp``/``Kmip`` (destroying the CMK
+is somebody else's audited operation). Same code path throughout -- a
+provider name and a master-key document -- and ``describe()`` prints which
+rung is in force, so "what is your custody story" has an answer a deployment
+can produce rather than one a person recalls.
+
+**Two protection modes, and the choice between them is a real tradeoff
+rather than a preference.** Measured against MongoDB 8.2:
+
+    CSFLE      ``keyId`` may be a JSON *pointer* (``/key_scope``), so the
+    (Sealed)   driver resolves a different key per document. That is what
+               makes per-scope shredding possible: erase one subject and
+               nobody else's key is touched. The cost is that a Random
+               field cannot be queried -- which is free here, because what
+               gets searched is the embedding, and the embedding is not
+               the sensitive field.
+
+    Queryable  ``encryptedFields`` with equality (7.0+) or range (8.0+)
+    (Queryable) indexes, so the *ciphertext itself* is searchable. The cost
+               is measured and structural: QE **rejects a pointer keyId** --
+               ``BSON field 'create.encryptedFields.fields.keyId' is the
+               wrong type 'string'`` -- so a key is bound per field per
+               collection at creation time. Shredding it erases that field
+               for every document in the collection, not for one subject.
+
+So the rule, stated once so nobody has to rediscover it: **if erasure must
+be per-subject, use ``Sealed``; if the encrypted field must be queryable,
+use ``Queryable`` and accept that your shred granularity is the collection.**
+Wanting both at once means one collection per subject, and that is a
+sharding decision, not an encryption one. ``Keyring.describe()`` reports
+which mode is in force and what it implies, because this is the kind of
+tradeoff that gets made once and misremembered forever.
 
 **One owner, still.** The key vault is a MongoDB collection, so the key
 carries the same ``expire_at`` the documents do and is collected by the same
@@ -82,6 +109,8 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+
+from .custody import Custody, Ephemeral
 from datetime import datetime
 from typing import Any
 
@@ -140,21 +169,62 @@ def _which(name: str) -> str | None:
 
 
 @dataclass(frozen=True)
-class KeyringSpec:
-    """Where the keys live and which field points at one.
+class Sealed:
+    """CSFLE: a key per scope, resolved through a JSON pointer.
 
-    ``pointer_field`` is the document field naming the key, and the schema
-    below turns it into a JSON pointer (``/key_scope``) so the driver resolves
-    a *different* key per document. A static ``keyId`` in the schema would
-    give one key per collection, which makes crypto-shredding all-or-nothing
-    -- erase one subject and every other tenant goes with them.
+    The mode that makes per-subject erasure possible. ``fields`` are
+    encrypted with a Random algorithm and cannot be queried -- which costs
+    nothing here, because retrieval matches on the embedding and the
+    embedding is not the sensitive field.
+    """
+
+    fields: tuple[str, ...] = ("text",)
+    bson_type: str = "string"
+    queryable: bool = False
+    shred_granularity: str = "scope"
+
+
+@dataclass(frozen=True)
+class Queryable:
+    """Queryable Encryption: the ciphertext itself is searchable.
+
+    ``equality`` is MongoDB 7.0+; ``range`` is 8.0+. The price is measured
+    and structural -- QE rejects a pointer ``keyId``, so one key covers one
+    field across the whole collection and shredding it erases that field
+    for everybody. Chosen deliberately or not at all.
+    """
+
+    fields: tuple[str, ...] = ()
+    bson_type: str = "string"
+    query_type: str = "equality"
+    queryable: bool = True
+    shred_granularity: str = "collection"
+
+
+@dataclass(frozen=True)
+class KeyringSpec:
+    """Where the keys live, which field points at one, and what is protected.
+
+    ``pointer_field`` is the document field naming the key, and the CSFLE
+    schema turns it into a JSON pointer (``/key_scope``) so the driver
+    resolves a *different* key per document. A static ``keyId`` would give
+    one key per collection, which makes shredding all-or-nothing -- erase
+    one subject and every other tenant goes with them.
     """
 
     collection: str = "__keys"
     pointer_field: str = "key_scope"
     at_field: str = "expire_at"
-    # Collection -> the fields in it that are ciphertext at rest.
-    sealed: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Collection -> how that collection is protected.
+    protect: dict[str, Any] = field(default_factory=dict)
+
+    def sealed_collections(self) -> dict:
+        return {c: p for c, p in self.protect.items()
+                if isinstance(p, Sealed)}
+
+    def queryable_collections(self) -> dict:
+        return {c: p for c, p in self.protect.items()
+                if isinstance(p, Queryable)}
 
 
 class Keyring:
@@ -163,16 +233,24 @@ class Keyring:
     kind = "keyring"
 
     def __init__(self, db, spec: KeyringSpec | None = None, *,
+                 custody: Custody | None = None,
                  kms_providers: dict | None = None):
         self.db = db
         self.spec = spec or KeyringSpec()
         self.collection = self.spec.collection
-        # Demonstration-grade by default, and loudly so. See the module
-        # docstring on custody: a local master key shares its fate with the
-        # ciphertext it protects.
-        self.kms_providers = kms_providers or {"local": {"key": os.urandom(96)}}
-        self.local_master = "local" in self.kms_providers and not (
-            set(self.kms_providers) - {"local"})
+        if kms_providers is not None and custody is not None:
+            raise ValueError(
+                "pass custody= or kms_providers=, not both: two answers to "
+                "'who holds the master key' is the one question that must "
+                "have exactly one")
+        # A raw dict stays supported because the driver's vocabulary is the
+        # real interface and wrapping it completely would just be a second
+        # thing to keep current. It arrives as unknown custody, and
+        # ``describe()`` says so rather than guessing.
+        self._raw = kms_providers
+        self.custody = custody or (_Declared(kms_providers) if kms_providers
+                                   else Ephemeral())
+        self.kms_providers = self.custody.providers()
 
     @property
     def namespace(self) -> str:
@@ -191,22 +269,16 @@ class Keyring:
         vault is an ordinary collection, so a key can carry the same
         ``expire_at`` its documents carry and be collected by the same
         reaper. The scope's deadline therefore destroys the scope's key with
-        no second scheduler and no cron to keep two clocks agreeing -- which
-        is the first claim in this repository, applied to the mechanism that
-        enforces the second one.
+        no second scheduler and no cron keeping two clocks in agreement --
+        which is the first claim in this repository, applied to the
+        mechanism that enforces the second one.
         """
         await self.db[self.collection].create_index(
             "keyAltNames", unique=True,
             partialFilterExpression={"keyAltNames": {"$exists": True}})
         await self.db[self.collection].create_index(
             self.spec.at_field, expireAfterSeconds=0, sparse=True)
-        if self.local_master:
-            log.warning(
-                "keyring %s uses a local master key held in this process. The "
-                "mechanism is real and the custody is not: a restart loses "
-                "every key, and anything that can read this process can read "
-                "the ciphertext. Point kms_providers at a KMS before this "
-                "protects anything.", self.namespace)
+        self.custody.warn_if_weak(f"keyring {self.namespace}")
         return True
 
     # ---- keys ----------------------------------------------------------
@@ -215,10 +287,16 @@ class Keyring:
                       encryption=None):
         """The data key for one scope, created on first use.
 
+        The provider name and master key come from ``custody`` rather than
+        being hardcoded, which is not a refactor for its own sake: with
+        ``local`` the master key is an argument-free default, and with every
+        other provider it is *required* and provider-shaped. A keyring that
+        always said ``"local"`` would accept an AWS configuration and
+        quietly wrap the data key with a process-local secret instead.
+
         ``expire_at`` is written onto the key document itself, so the TTL
-        index above destroys it on the scope's own deadline. Passing ``None``
-        pins the key exactly the way a null deadline pins a document --
-        the same rule, in the same shape, one collection over.
+        index above destroys it on the scope's own deadline. ``None`` pins
+        the key exactly the way a null deadline pins a document.
         """
         existing = await self.db[self.collection].find_one(
             {"keyAltNames": scope})
@@ -227,13 +305,19 @@ class Keyring:
                 await self._never_later(existing["_id"], expire_at)
             return existing["_id"]
 
-        ce = encryption or await self.encryption()
-        key_id = await ce.create_data_key("local", key_alt_names=[scope])
+        ce, owned = await self._encryption(encryption)
+        try:
+            key_id = await ce.create_data_key(
+                self.custody.provider, master_key=self.custody.master_key(),
+                key_alt_names=[scope])
+        finally:
+            if owned:
+                await ce.close()
         if expire_at is not None:
             await self.db[self.collection].update_one(
                 {"_id": key_id}, {"$set": {self.spec.at_field: expire_at}})
-        log.info("keyring %s minted a key for scope %r (expires %s)",
-                 self.namespace, scope,
+        log.info("keyring %s minted a key for scope %r under %s (expires %s)",
+                 self.namespace, scope, self.custody.detail(),
                  expire_at.isoformat() if expire_at else "never")
         return key_id
 
@@ -241,7 +325,7 @@ class Keyring:
         """A key's deadline moves earlier or not at all.
 
         The same invariant ``revoke()`` holds for a document, for the same
-        reason: extending the life of a key extends the readability of
+        reason: extending a key's life extends the readability of
         everything it protects, and "we renewed the key so the erasure took
         a week longer" is not a sentence anybody wants to write down.
         """
@@ -255,33 +339,80 @@ class Keyring:
     async def shred(self, scope: str, *, encryption=None) -> int:
         """Destroy a scope's key now. Everything it protected is noise.
 
-        The one operation in this package where deleting *is* the right
-        verb, and it is worth being precise about why, since the rest of the
-        repository argues the opposite. Deleting a document is a storage
-        event: eventually consistent, local to this deployment, and
-        unprovable. Deleting a key is a storage event whose *effect* is
-        total -- every copy of the ciphertext, in every backup and replica
-        and snapshot, becomes unreadable at once, without any of them being
-        visited.
+        The one operation in this package where deleting is the right verb,
+        and worth being precise about, since the rest of the repository
+        argues the opposite. Deleting a document is a storage event:
+        eventually consistent, local to this deployment, unprovable.
+        Deleting a key is a storage event whose *effect* is total -- every
+        copy of the ciphertext, in every backup and replica and snapshot,
+        becomes unreadable at once, without any of them being visited.
 
         Not instantly, though. See the module docstring: a client holding a
-        cached copy of the key keeps decrypting for about a minute. Refusal
-        is what covers that window, which is the argument for having both.
+        cached copy keeps decrypting for a while, and the turnover is not a
+        contract. Refusal is what covers that window, which is the argument
+        for having both.
         """
-        ce = encryption or await self.encryption()
+        ce, owned = await self._encryption(encryption)
         try:
-            key = await ce.get_key_by_alt_name(scope)
-        except Exception:  # noqa: BLE001 - absent is a normal answer
-            key = None
-        if key is None:
-            return 0
-        await ce.delete_key(key["_id"])
+            try:
+                key = await ce.get_key_by_alt_name(scope)
+            except Exception:  # noqa: BLE001 - absent is a normal answer
+                key = None
+            if key is None:
+                return 0
+            await ce.delete_key(key["_id"])
+        finally:
+            if owned:
+                await ce.close()
         log.info("keyring %s destroyed the key for scope %r; its ciphertext "
-                 "is unreadable everywhere, subject to a ~60s key cache",
-                 self.namespace, scope)
+                 "is unreadable everywhere, subject to a key cache whose "
+                 "turnover is not a contract", self.namespace, scope)
         return 1
 
+    async def rotate(self, *, scope: str | None = None,
+                     custody: Custody | None = None, encryption=None) -> int:
+        """Re-wrap data keys under a new master key. The data is untouched.
+
+        Rotation is the half of key management that makes destruction
+        credible. A key that cannot be re-wrapped is a key that will
+        eventually be copied rather than rotated, and a copied key cannot be
+        destroyed -- so "we shredded it" stops being true without anybody
+        doing anything wrong.
+
+        This re-encrypts the *data keys* under a new CMK. It does not touch
+        a single document: the DEK is unchanged, so every ciphertext it
+        protects stays readable, and the thing that moved is who can unwrap
+        it. That is why rotating a CMK is cheap here and re-encrypting a
+        collection is not.
+        """
+        target = custody or self.custody
+        ce, owned = await self._encryption(encryption)
+        try:
+            flt = {"keyAltNames": scope} if scope else {}
+            result = await ce.rewrap_many_data_key(
+                flt, provider=target.provider, master_key=target.master_key())
+        finally:
+            if owned:
+                await ce.close()
+        n = getattr(getattr(result, "bulk_write_result", None),
+                    "modified_count", 0) or 0
+        log.info("keyring %s re-wrapped %d data key(s) under %s",
+                 self.namespace, n, target.detail())
+        return n
+
     # ---- the driver plumbing -------------------------------------------
+
+    async def _encryption(self, given=None):
+        """``(client_encryption, we_own_it)``.
+
+        Callers that make many calls pass one in and close it themselves;
+        callers that make one get a short-lived one closed on the way out.
+        Returning ownership rather than assuming it is what keeps
+        ``shred()`` from leaking a handle per erasure request.
+        """
+        if given is not None:
+            return given, False
+        return await self.encryption(), True
 
     async def encryption(self):
         """A ``ClientEncryption`` bound to this vault."""
@@ -291,54 +422,168 @@ class Keyring:
 
         return AsyncClientEncryption(
             self.kms_providers, self.namespace, self.db.client,
-            CodecOptions(uuid_representation=STANDARD))
+            CodecOptions(uuid_representation=STANDARD),
+            kms_tls_options=self.custody.tls_options())
 
     def schema_map(self) -> dict:
-        """The automatic-encryption schema: which fields, under which key.
+        """The automatic-encryption schema for the ``Sealed`` collections.
 
         ``keyId`` is a **JSON pointer** rather than a key id, which is the
-        whole reason per-scope crypto-shredding is possible under automatic
-        encryption. A literal id in the schema binds one key to the whole
-        collection, so destroying it erases every tenant at once -- an
-        erasure request from one subject taking out everybody else's data
-        is not a feature.
+        whole reason per-scope crypto-shredding is possible. A literal id
+        binds one key to the collection, so destroying it erases every
+        tenant at once -- one subject's erasure request taking out
+        everybody else's data is not a feature.
         """
         return {
             f"{self.db.name}.{coll}": {
                 "bsonType": "object",
                 "properties": {
-                    name: {"encrypt": {"keyId": f"/{self.spec.pointer_field}",
-                                       "bsonType": "string",
-                                       "algorithm": RANDOM}}
-                    for name in fields
+                    name: {"encrypt": {
+                        "keyId": f"/{self.spec.pointer_field}",
+                        "bsonType": mode.bson_type,
+                        "algorithm": RANDOM}}
+                    for name in mode.fields
                 },
             }
-            for coll, fields in self.spec.sealed.items()
+            for coll, mode in self.spec.sealed_collections().items()
         }
 
-    def client_options(self) -> Any:
+    async def encrypted_fields_map(self, *, encryption=None) -> dict:
+        """``encryptedFields`` for the ``Queryable`` collections.
+
+        Each field needs a real key id -- QE rejects a pointer, which is
+        the measured constraint behind the whole mode -- so the keys are
+        minted here, named after the field they protect. Named rather than
+        anonymous because the name is what ``shred()`` is given later, and
+        an operator asked to destroy ``people.ssn`` should not have to
+        first work out which UUID that is.
+        """
+        wanted = self.spec.queryable_collections()
+        if not wanted:
+            return {}
+        ce, owned = await self._encryption(encryption)
+        try:
+            out = {}
+            for coll, mode in wanted.items():
+                fields = []
+                for name in mode.fields:
+                    key_id = await self.key_for(f"{coll}.{name}",
+                                                encryption=ce)
+                    fields.append({
+                        "path": name, "bsonType": mode.bson_type,
+                        "keyId": key_id,
+                        "queries": {"queryType": mode.query_type}})
+                out[f"{self.db.name}.{coll}"] = {"fields": fields}
+            return out
+        finally:
+            if owned:
+                await ce.close()
+
+    async def client_options(self, *, encryption=None) -> Any:
         """``AutoEncryptionOpts`` for the client that does the writing.
 
-        Automatic encryption needs its own ``MongoClient``, which cannot be
-        retrofitted onto one that already exists -- so this is handed to the
-        application to construct with, rather than being something the
-        engine can quietly switch on. Explicit is correct here: turning an
-        existing client into an encrypting one behind the caller's back
-        would change what every write in the process does.
+        Automatic encryption needs its own ``MongoClient`` and cannot be
+        retrofitted onto one that exists, so this is handed to the
+        application to construct with rather than switched on behind its
+        back -- doing that quietly would change what every write in the
+        process does.
         """
         from pymongo.encryption_options import AutoEncryptionOpts
 
-        extra = {}
+        extra: dict[str, Any] = {}
         path = crypt_shared_path()
         if path:
             extra["crypt_shared_lib_path"] = path
-        return AutoEncryptionOpts(
-            self.kms_providers, self.namespace,
-            schema_map=self.schema_map(), **extra)
+        if self.custody.tls_options():
+            extra["kms_tls_options"] = self.custody.tls_options()
+        schema = self.schema_map()
+        if schema:
+            extra["schema_map"] = schema
+        qe = await self.encrypted_fields_map(encryption=encryption)
+        if qe:
+            extra["encrypted_fields_map"] = qe
+        return AutoEncryptionOpts(self.kms_providers, self.namespace, **extra)
+
+    async def create_queryable(self, client, collection: str, *,
+                               encryption=None):
+        """Create a QE collection, which cannot be created by inserting.
+
+        Queryable Encryption needs server-side metadata collections
+        (``enxcol_.<name>.esc`` and ``.ecoc``) that only
+        ``create_encrypted_collection`` makes. Writing to a QE namespace
+        that was never created this way does not fail loudly -- it writes
+        plaintext -- which is exactly the silent, permanent, already-in-a-
+        backup mistake the automatic path exists to prevent.
+        """
+        mode = self.spec.protect.get(collection)
+        if not isinstance(mode, Queryable):
+            raise ValueError(
+                f"{collection} is not declared Queryable in this keyring; "
+                f"declared: {sorted(self.spec.protect)}")
+        ce, owned = await self._encryption(encryption)
+        try:
+            fields = (await self.encrypted_fields_map(encryption=ce))[
+                f"{self.db.name}.{collection}"]
+            coll, _ = await ce.create_encrypted_collection(
+                client[self.db.name], collection, fields,
+                self.custody.provider, self.custody.master_key())
+            log.info("created queryable collection %s.%s (%s)",
+                     self.db.name, collection,
+                     ", ".join(f["path"] for f in fields["fields"]))
+            return coll
+        finally:
+            if owned:
+                await ce.close()
 
     def describe(self) -> dict:
         ok, why = available()
-        return {"vault": self.namespace, "automatic": ok, "detail": why,
-                "sealed": {c: list(f) for c, f in self.spec.sealed.items()},
-                "custody": "local master key, in this process (demonstration)"
-                           if self.local_master else "external KMS"}
+        sealed = self.spec.sealed_collections()
+        qe = self.spec.queryable_collections()
+        return {
+            "vault": self.namespace,
+            "automatic": ok,
+            "detail": why,
+            "custody": self.custody.describe(),
+            "sealed": {c: list(m.fields) for c, m in sealed.items()},
+            "queryable": {c: list(m.fields) for c, m in qe.items()},
+            # Said out loud rather than left to be inferred, because it is
+            # the tradeoff people misremember: QE buys a searchable
+            # ciphertext and costs per-subject erasure.
+            "shred_granularity": ({"sealed": "scope"} if sealed else {}) |
+                                 ({"queryable": "collection"} if qe else {}),
+        }
+
+
+@dataclass(frozen=True)
+class _Declared(Custody):
+    """Custody supplied as a raw ``kms_providers`` dict.
+
+    Supported because the driver's vocabulary is the real interface, and
+    reported as *unknown* rather than assumed safe: this object cannot tell
+    whether the key behind a dict is in an HSM or in a variable two frames
+    up, so it declines to claim either.
+    """
+
+    raw: dict = field(default_factory=dict)
+    durable: bool = False
+    audited: bool = False
+
+    @property
+    def provider(self) -> str:  # type: ignore[override]
+        return next(iter(self.raw), "local")
+
+    def credentials(self) -> dict:
+        return self.raw.get(self.provider, {})
+
+    def providers(self) -> dict:
+        return dict(self.raw)
+
+    def detail(self) -> str:
+        return f"a caller-supplied {self.provider!r} provider dict"
+
+    def warn_if_weak(self, where: str) -> None:
+        log.warning(
+            "%s: custody was supplied as a raw kms_providers dict, so this "
+            "process cannot report where the master key lives or who may "
+            "destroy it. Use custody=Aws(...)/LocalFile(...) to make that "
+            "answerable.", where)

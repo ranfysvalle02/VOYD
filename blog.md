@@ -824,11 +824,49 @@ gone from all of them. `examples/shred.py` runs all three in one go, and the
 reaper takes the row while the program is still waiting on the key cache,
 which was not staged.
 
-On custody, plainly, because a crypto claim that is vague here is marketing:
-with a local master key it lives in the process and shares a fate with the
-ciphertext. Demonstration-grade, and the code logs a warning saying so. Point
-`kms_providers` at a real KMS and destroying the CMK becomes somebody else's
-audited operation; the code path does not change.
+### The tradeoff nobody tells you about
+
+MongoDB has two ways to do this and they are not interchangeable. Queryable
+Encryption indexes the ciphertext, so you can run an equality match against
+a field you cannot read. CSFLE cannot — but CSFLE lets `keyId` be a **JSON
+pointer** into the document, so the driver resolves a different key per row.
+
+That one difference decides everything, and I checked it rather than
+recalling it: QE *rejects* a pointer `keyId` — `BSON field
+'create.encryptedFields.fields.keyId' is the wrong type 'string'`. A QE key
+is bound per field per collection at creation time. Destroy it and you erase
+that field for every subject in the collection.
+
+So it is a straight trade. Per-subject erasure, or a searchable ciphertext.
+Pick the one your regulator is asking about, and if the answer is "both",
+what you actually need is a collection per subject — a sharding decision
+wearing an encryption costume. The library ships both modes and prints which
+granularity is in force, because this is the kind of thing a team decides
+once and misremembers for two years.
+
+### And on custody, which is where the whole claim lives
+
+A crypto claim that is vague about who holds the master key is marketing. My
+first version of this hardcoded `"local"` in the call that creates a data
+key — which means an AWS-configured deployment would have wrapped its data
+keys with a secret generated in the process that just started, and nothing
+would have raised. Not a crash. A belief.
+
+So custody is typed and it is a ladder: `Ephemeral` (demo; nothing survives
+a restart, and it warns) → `LocalFile` (durable; custody is a file
+permission) → `Aws`/`Azure`/`Gcp`/`Kmip` (destroying the CMK is somebody
+else's audited operation). `durable` and `audited` are attributes rather
+than prose, so `voyd verify` *prints* the custody story instead of leaving a
+reader to infer it — and on the weak rungs it says, in the same output as
+the passing check, that "the key was destroyed" is still this deployment's
+own word.
+
+The last piece is rotation, which is the half that makes destruction
+credible over time: a key that cannot be re-wrapped is a key that gets
+copied instead, and a copied key cannot be destroyed. `rewrap_many_data_key`
+changes the wrapping without touching the data key, so a CMK rotation costs
+zero documents their readability — which is why rotating a master key is
+cheap and re-encrypting a collection is not.
 
 ## Is this just a MongoDB argument?
 
