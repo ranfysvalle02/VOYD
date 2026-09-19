@@ -1650,6 +1650,16 @@ that has nothing to do with either of them.
   to leak, no bucket policy to get wrong, and nothing to reclaim out of band
   when a scope expires.
 
+## Known issues
+
+Defects, unproven claims and imprecisions in what already ships are in
+[`ISSUES.md`](ISSUES.md), with what would close each one. A project that
+argues you should ship the experiment which would falsify you cannot keep
+its own defects in a commit message.
+
+[`ideas.md`](ideas.md) is the other half: what is worth *building* next,
+as opposed to what is wrong with what exists.
+
 ## License
 
 MIT © 2026 Fabian Valle

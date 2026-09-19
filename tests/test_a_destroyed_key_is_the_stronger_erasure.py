@@ -282,3 +282,122 @@ async def test_a_raw_provider_dict_reports_unknown_custody_not_safe_custody(
     with caplog.at_level(logging.WARNING):
         ring.custody.warn_if_weak("keyring x")
     assert "cannot report where the master key lives" in caplog.text
+
+
+# ---- an outage is not an erasure --------------------------------------
+
+async def test_a_shredded_key_and_an_unreachable_kms_are_told_apart(core):
+    """They fail identically at the driver and mean opposite things.
+
+    One is the feature working -- somebody asked to be forgotten and the
+    key is gone. The other is an outage, during which a dashboard
+    reporting "erasures: 41" is reporting a lie, and documents are being
+    withheld from callers entitled to them.
+
+    Discriminated by asking our own key vault rather than by reading the
+    driver's error text: whether the key document still exists is a fact
+    we own, and *"not all keys requested were satisfied"* is a string in
+    somebody else's library.
+    """
+    from voyd.engine import KEY_UNAVAILABLE
+
+    engine, db = core
+    ring, writer = await sealed(core)
+    try:
+        await writer.insert_many([
+            {"key_scope": "scope-a", "text": SECRET},
+            {"key_scope": "scope-b", "text": OTHER},
+        ])
+        rows = [d async for d in db.notes.find({})]
+
+        # scope-a is genuinely shredded; scope-b's key is intact but the
+        # KMS cannot be reached -- simulated by an encryption handle whose
+        # decrypt always fails, which is what an outage looks like here.
+        await ring.shred("scope-a")
+
+        class Unreachable:
+            async def decrypt(self, _value):
+                raise RuntimeError("kms: connection timed out")
+
+        notes = engine.model("notes").forgettable()
+        notes.sealing = type("S", (), {"scope_field": "key_scope"})()
+        page = await notes.unseal(rows, fields=("text",), keyring=ring,
+                                  encryption=Unreachable())
+
+        assert page.refused == {UNRECOVERABLE: 1, KEY_UNAVAILABLE: 1}, \
+            "one erased, one withheld -- and they must not share a counter"
+        assert list(page) == [], "both fail closed; only the reason differs"
+    finally:
+        await ring.aclose()
+
+
+async def test_an_unreadable_key_vault_does_not_read_as_an_erasure(core):
+    """If the vault itself cannot be queried, "the key is gone" is a
+    conclusion the evidence does not support -- so the answer is the
+    outage, not the erasure."""
+    from voyd.engine import KEY_UNAVAILABLE
+
+    engine, db = core
+    ring, writer = await sealed(core)
+    try:
+        await writer.insert_one({"key_scope": "scope-a", "text": SECRET})
+        rows = [d async for d in db.notes.find({})]
+
+        class Broken:
+            async def decrypt(self, _value):
+                raise RuntimeError("kms down")
+
+        class Unqueryable:
+            def __getitem__(self, _name):
+                raise RuntimeError("key vault unreachable")
+
+        class NoVault:
+            collection = ring.collection
+            db = Unqueryable()
+
+        notes = engine.model("notes").forgettable()
+        notes.sealing = type("S", (), {"scope_field": "key_scope"})()
+        page = await notes.unseal(rows, fields=("text",), keyring=NoVault(),
+                                  encryption=Broken())
+
+        assert page.refused == {KEY_UNAVAILABLE: 1}
+    finally:
+        await ring.aclose()
+
+
+async def test_one_erased_scope_costs_one_key_vault_lookup(core):
+    """A page of fifty documents from one erased scope must not become
+    fifty lookups -- the discriminator runs on the failure path, which is
+    the path every row of a shredded scope takes."""
+    engine, db = core
+    looked_up = []
+
+    class Coll:
+        @staticmethod
+        async def find_one(*_a, **_kw):
+            looked_up.append(1)
+            return None                      # the key is gone: shredded
+
+    class Vault:
+        def __getitem__(self, _name):
+            return Coll()
+
+    class CountingVault:
+        collection = "__keys"
+        db = Vault()
+
+    class Dead:
+        async def decrypt(self, _v):
+            raise RuntimeError("no key")
+
+    from bson.binary import Binary
+    rows = [{"key_scope": "scope-a",
+             "text": Binary(b"ciphertext", ENCRYPTED)} for _ in range(8)]
+
+    notes = engine.model("notes").forgettable()
+    notes.sealing = type("S", (), {"scope_field": "key_scope"})()
+    page = await notes.unseal(rows, fields=("text",),
+                              keyring=CountingVault(), encryption=Dead())
+
+    assert page.refused == {UNRECOVERABLE: 8}
+    assert len(looked_up) == 1, f"one scope, one lookup; got {len(looked_up)}"

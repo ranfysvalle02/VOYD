@@ -42,6 +42,20 @@ inherit a proof of concept's custody. So:
                   audited operation, which is the only version of this an
                   auditor accepts.
 
+**Two different destructions, and conflating them misstates the timing.**
+Per-scope erasure here deletes a **data key** -- a document in your own key
+vault -- and that is immediate. Destroying the **master key** is the
+nuclear option that takes every data key it ever wrapped with it, and on a
+real KMS it is *not* an immediate operation: AWS enforces a pending window
+on ``ScheduleKeyDeletion`` of **7 days minimum, 30 by default**, and Azure
+and GCP have their own soft-delete and destroy-scheduled periods.
+
+That does not weaken the claim, because the claim rests on the data key.
+But a project whose entire argument is about erasure *timing* has no
+business being vague here: "shred the scope" is seconds, "destroy the
+master key" is a week, and a compliance answer that cites the second while
+meaning the first is wrong in the direction that gets noticed.
+
 Every rung has the same code path -- the difference is a provider name and a
 master key document -- and the point of typing them is that *choosing* is
 deliberate rather than defaulted into.
@@ -220,6 +234,13 @@ class Aws(Custody):
     *automatic* credential lookup, which is how this should run in EKS or on
     an instance profile. Baking an access key into a config file to encrypt
     something is a net loss.
+
+    **Unverified against a live KMS.** The provider name and master-key
+    shape are unit-tested and match the driver's documented contract, and
+    the code path is shared with the local rung -- but "constructs the
+    right document" and "works against AWS" are different claims and only
+    the first is proven here. The on-demand credential path in particular
+    may need a package this project does not declare. See ``ISSUES.md``.
     """
 
     key: str = ""

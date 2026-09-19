@@ -74,7 +74,8 @@ from .errors import (
     UnknownReason,
 )
 from .expiry import Expiry, ExpirySpec
-from .admission import (DEADLINE, LIFTED, NOT_CLEARED, QUARANTINED,
+from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED,
+                        QUARANTINED,
                         REACHABLE, REFUSED, REVOKED, UNKNOWN, UNREADABLE,
                         UNRECOVERABLE, WRONG_MODEL,
                         Clearance, Deadline, EmbeddedWith, Page, Restricted,
@@ -370,7 +371,7 @@ __all__ = [
     "Rule", "Deadline", "Marked", "revoked", "quarantined",
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
     "LIFTED", "UNRECOVERABLE", "Unrecoverable",
-    "REACHABLE", "REFUSED", "UNKNOWN",
+    "REACHABLE", "REFUSED", "UNKNOWN", "KEY_UNAVAILABLE",
     "Keyring", "KeyringSpec", "Sealed", "Queryable",
     "Custody", "Ephemeral", "LocalFile", "Aws", "Azure", "Gcp", "Kmip",
     "NOT_CLEARED", "EmbeddedWith", "Clearance", "Restricted", "Page",

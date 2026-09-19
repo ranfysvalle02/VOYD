@@ -101,6 +101,12 @@ UNRECOVERABLE = "unrecoverable"
 # worth having: a row the reaper took leaves nothing to answer from, and
 # reporting that as "not reachable" would let a deployment clear itself
 # by pointing at the absence of the evidence.
+# The key still exists and could not be fetched. Counted apart from
+# ``unrecoverable`` because they are opposite events that fail identically:
+# one is somebody's erasure request being honoured, the other is an outage
+# during which a dashboard reporting erasures is reporting a lie.
+KEY_UNAVAILABLE = "key_unavailable"
+
 REACHABLE = "reachable"
 REFUSED = "refused"
 UNKNOWN = "unknown"
@@ -1897,7 +1903,8 @@ class Admission:
         # stream. A cost figure that reads 0 under load is worse than no
         # cost figure.
         documents = list(documents)
-        kept, tally = [], {}
+        scope_field = getattr(self.sealing, "scope_field", None)
+        kept, tally, verdicts = [], {}, {}
         for doc in documents:
             out = dict(doc)
             for name in fields:
@@ -1906,25 +1913,71 @@ class Admission:
                     continue
                 try:
                     out[name] = await ce.decrypt(value)
-                except Exception:  # noqa: BLE001 - the whole point: a key
-                    # that is gone is an answer, not an incident.
+                except Exception:  # noqa: BLE001 - a key that is gone is an
+                    # answer, not an incident. Which of the two answers it
+                    # is takes a lookup; see ``_why_undecryptable``.
+                    reason = await self._why_undecryptable(
+                        keyring, doc.get(scope_field) if scope_field else None,
+                        verdicts)
+                    tally[reason] = tally.get(reason, 0) + 1
                     out = None
                     break
-            if out is None:
-                tally[UNRECOVERABLE] = tally.get(UNRECOVERABLE, 0) + 1
-                continue
-            kept.append(out)
+            if out is not None:
+                kept.append(out)
         if count:
             # A caller that folds this into a page commits the tally once,
             # with the rest of that page's refusals -- counting here as
             # well would double it, in the one direction that makes a lower
             # bound a lie.
             self.receipts_log.record_many(tally)
-        if tally:
+        if tally.get(UNRECOVERABLE):
             log.info("%s: %d document(s) are unrecoverable -- their key was "
                      "destroyed, so no read path anywhere can produce the "
                      "plaintext", self.collection, tally[UNRECOVERABLE])
+        if tally.get(KEY_UNAVAILABLE):
+            # ERROR, not info. The key still exists and could not be
+            # fetched, so this is an outage wearing the costume of a
+            # feature -- and the documents are being withheld from callers
+            # who are entitled to them.
+            log.error("%s: %d document(s) could not be decrypted although "
+                      "their key still exists. This is a KMS or key-vault "
+                      "failure, not an erasure: the data is being withheld, "
+                      "not destroyed", self.collection,
+                      tally[KEY_UNAVAILABLE])
         return Page(kept, refused=tally, examined=len(documents))
+
+    async def _why_undecryptable(self, keyring, scope, cache: dict) -> str:
+        """Was the key destroyed, or merely unreachable? ``(the difference)``
+
+        These produce an identical failure at the driver and mean opposite
+        things: one is the feature working -- somebody asked to be
+        forgotten and the key is gone -- and the other is an outage, during
+        which a dashboard reporting "erasures: 41" is reporting a lie.
+
+        **Discriminated by asking our own key vault, not by reading the
+        driver's error text.** A message like *"not all keys requested were
+        satisfied"* is a string in somebody else's library and will change
+        without telling us; whether the key document still exists is a fact
+        we own. Present and undecryptable means the KMS could not unwrap
+        it. Absent means it was shredded.
+
+        Cached per call, because a page of fifty documents from one erased
+        scope should cost one lookup, not fifty. And when the lookup itself
+        fails, the answer is ``key_unavailable`` -- if the key vault cannot
+        be read, "the key is gone" is a conclusion the evidence does not
+        support.
+        """
+        if scope is None or keyring is None:
+            return UNRECOVERABLE
+        if scope in cache:
+            return cache[scope]
+        try:
+            alive = await keyring.db[keyring.collection].find_one(
+                {"keyAltNames": scope}, {"_id": 1}) is not None
+        except Exception:  # noqa: BLE001 - see docstring
+            alive = True
+        cache[scope] = KEY_UNAVAILABLE if alive else UNRECOVERABLE
+        return cache[scope]
 
     # ---- the general forms ---------------------------------------------
 

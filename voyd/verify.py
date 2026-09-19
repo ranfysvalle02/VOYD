@@ -720,6 +720,19 @@ class Verifier:
                 c.fail("shredding one scope took another with it. A key per "
                        "collection makes one subject's erasure everybody's")
 
+            # A sink claiming it holds ciphertext is trusted about it, and
+            # that claim is the only way the perimeter can lie. Audited
+            # here because this check is the one place that has a genuinely
+            # shredded id to hand it.
+            perimeter = getattr(self, "perimeter", None)
+            if perimeter is not None:
+                shredded = await self.db.verify_sealed.find_one(
+                    {"key_scope": "s5"})
+                for ack in await perimeter.audit(
+                        shredded_id=shredded and shredded["_id"]):
+                    if not ack.acked:
+                        c.fail(f"sealed sink {ack.sink!r}: {ack.detail}")
+
             if await self.db.verify_sealed.count_documents(
                     {"key_scope": "s5"}) != 1:
                 c.fail("the row was deleted; the claim is that it survives "
