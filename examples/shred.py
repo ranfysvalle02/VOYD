@@ -33,14 +33,13 @@ That is the argument for having both rather than choosing:
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 
 from pymongo import AsyncMongoClient
 
-from voyd.engine import Deadline, Engine, revoked
+from voyd.engine import Engine
 from voyd.engine.custody import from_env
-from voyd.engine.keyring import Keyring, KeyringSpec, Sealed, available
+from voyd.engine.keyring import available
 
 URI = "mongodb://localhost:27018/?directConnection=true"
 SECRET = "alice was treated for a stress fracture in March"
@@ -60,6 +59,7 @@ async def main() -> None:
     name = f"core_shred_{uuid.uuid4().hex[:8]}"
     engine = Engine(client, client[name])
     await engine.connect()
+
     # The ladder, from the environment. Unset is Ephemeral -- demo-grade,
     # and it says so rather than letting the run imply otherwise:
     #   VOYD_KMS_PROVIDER=local VOYD_KMS_KEY_PATH=./master.key
@@ -71,106 +71,78 @@ async def main() -> None:
     if not held["audited"]:
         print("           (shredding below is real; who may destroy the")
         print("            master key is this process's own word for it)")
-    ring = Keyring(engine.db,
-                   KeyringSpec(protect={"notes": Sealed(("text",))}),
-                   custody=custody)
-    await ring.ensure()
-    await ring.key_for("alice")
-    await ring.key_for("bob")
 
-    writer = AsyncMongoClient(URI, auto_encryption_opts=await ring.client_options())
     try:
-        notes = engine.model("notes").admitting(Deadline(), revoked())
+        # --- the entire declaration ---------------------------------
+        notes = engine.model("notes", tenant="patient").sealed(
+            "text", custody=custody)
         await engine.ensure(search_wait_s=0)
-        await writer[name].notes.insert_many([
-            {"key_scope": "alice", "text": SECRET},
-            {"key_scope": "bob", "text": KEPT},
-        ])
-        print(f"\n  Two facts, two scopes, two keys. ({why})")
 
-        raw = await engine.db.notes.find_one({"key_scope": "alice"})
-        print("\n  1. What is actually on disk, read by a client with no key")
-        print("     -- which is what a DBA, a replica and a backup all are:")
+        print("\n  One line declared it:")
+        print('       engine.model("notes", tenant="patient").sealed("text")')
+        print("     The scope IS the tenant, so there is no second field to")
+        print("     maintain and per-patient erasure is already the shape.")
+
+        await notes.seal([{"patient": "alice", "text": SECRET},
+                          {"patient": "bob", "text": KEPT}])
+
+        raw = await engine.db.notes.find_one({"patient": "alice"})
+        print("\n  1. What is on disk, read without the engine -- which is")
+        print("     what a DBA, a replica and a backup all are:")
         print(f"       text -> Binary(subtype={raw['text'].subtype}), "
               f"{len(raw['text'])} bytes")
         print(f"       contains the plaintext? "
               f"{SECRET.encode() in bytes(raw['text'])}")
+        print("     ...and through the handle it is just a string:")
+        print(f"       {[d['text'] for d in await notes.find({'patient': 'alice'})]}")
 
-        print("\n  2. Refusal, for contrast. Immediate, and local to us:")
-        await notes.revoke({"key_scope": "alice"}, reason="erasure request")
-        print(f"       reachable here -> "
-              f"{[d['key_scope'] for d in await notes.find({})]}")
-        print("       ...and the ciphertext is still in every backup taken")
-        print("       before now. Refusal has nothing to say about those.")
-
-        print("\n  3. So destroy the key. One operation, no sweeper visits")
-        print("     any copy of the data, anywhere:")
-        await ring.shred("alice")
-        cold = AsyncMongoClient(URI,
-                                auto_encryption_opts=await ring.client_options())
+        print("\n  2. The mistake that used to be silent and permanent:")
+        print("     a writer that skips the encrypting client entirely.")
         try:
-            try:
-                await cold[name].notes.find_one({"key_scope": "alice"})
-                print("       a cold client STILL read it -- shred failed")
-            except Exception as e:
-                print(f"       a cold client now fails: {type(e).__name__}")
-            other = await cold[name].notes.find_one({"key_scope": "bob"})
-            print(f"       and bob is untouched: {other['text']!r}")
-            print("       (per-scope keys: one erasure is not everybody's)")
-        finally:
-            await cold.close()
+            await engine.db.notes.insert_one(
+                {"patient": "alice", "text": "written by a migration script"})
+            print("       ACCEPTED as plaintext  <- this is the hole")
+        except Exception as e:
+            print(f"       {type(e).__name__} from the server. A binData")
+            print("       validator on the collection means forgetting to")
+            print("       encrypt is not discouraged, it is impossible.")
 
-        print("\n  4. The part people overstate. This client read alice")
-        print("     before the shred, so it holds a cached key. Waiting")
-        print("     to see how long it keeps working:")
-        t0 = time.monotonic()
-        held = None
-        while time.monotonic() - t0 < PATIENCE:
-            try:
-                await writer[name].notes.find_one({"key_scope": "alice"})
-                await asyncio.sleep(2)
-            except Exception:
-                held = time.monotonic() - t0
-                break
-        if held:
-            print(f"       the warm client stopped decrypting after "
-                  f"~{held:.0f}s")
-        else:
-            print(f"       STILL decrypting after {PATIENCE}s.")
-            print("       The cache turnover is not a contract and it is not")
-            print("       a constant -- measured at ~60s in one shape and")
-            print("       past two minutes in this one. Which is the point:")
-            print("       you cannot build a guarantee on it.")
+        print("\n  3. Alice asks to be forgotten. One call, one tenant:")
+        await notes.shred("alice")
+        print(f"       alice -> {await notes.find({'patient': 'alice'})}")
+        print(f"       bob   -> "
+              f"{[d['text'] for d in await notes.find({'patient': 'bob'})]}")
+        print(f"       refused: {notes.receipts()['refused_by_reason']}")
+        print("     Not an exception -- a refusal with a name, beside the")
+        print("     deadline and the revocation. One crypto-erased document")
+        print("     must not turn a page of fifty into a 500.")
 
-        print("\n  5. Meanwhile, look what happened to the row:")
-        row = await engine.db.notes.find_one({"key_scope": "alice"})
-        if row is None:
-            print("       gone. The reaper took it during the wait above --")
-            print("       because step 2's revoke gave it a deadline in the")
-            print("       past, and the TTL monitor got there on its own.")
-            print("       All three layers, in order, in one run.")
-        else:
-            print(f"       still on disk: {len(row['text'])} bytes of noise,")
-            print("       waiting for the reaper on its own schedule.")
+        print("\n  4. And it reaches further than refusal can. Refusal binds")
+        print("     this read path; the key is gone from every copy --")
+        print("     replicas, snapshots, the backup nobody has restored.")
+        row = await engine.db.notes.find_one({"patient": "alice"})
+        print(f"       alice's row: still there, "
+              f"{len(row['text'])} bytes of noise")
 
         print("""
-  So: three mechanisms, and each is honest about what it costs.
+  Three mechanisms, each honest about what it costs:
 
     refusal          immediate     this read path only     unreachable now
     crypto erasure   eventual      every copy, everywhere  unreadable soon
     the TTL reaper   ~60s          this deployment only    gone eventually
 
   The middle row is why the bottom one is not enough, and the top row is
-  why the middle one is not enough. The key cache is a window in which the
-  ciphertext is still readable -- and refusal had already refused the
-  document, on the first read after the request, with no window at all.
-  Refusal in turn binds only this application; the key is gone from all of
-  them, including the backup nobody has restored yet.
+  why the middle one is not enough: libmongocrypt caches data keys, so a
+  client that decrypted before the shred keeps decrypting for a while --
+  measured at ~60s in one shape and past 120s in another, and the turnover
+  is not a contract. Refusal had already refused the document, with no
+  window at all. Refusal in turn binds only this application; the key is
+  gone from all of them.
 
   Neither is the answer. Both is.
 """)
     finally:
-        await writer.close()
+        await engine.aclose()
         await client.drop_database(name)
         await client.close()
 

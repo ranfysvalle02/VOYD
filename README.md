@@ -1029,15 +1029,53 @@ key makes every copy unreadable at once — the row, the replica, the snapshot,
 the export somebody took in March — without any of them being visited.
 
 ```python
-ring = Keyring(engine.db, KeyringSpec(sealed={"notes": ("text",)}))
-await ring.ensure()
-await ring.key_for("alice", expire_at=deadline)   # the key expires WITH the scope
+notes = engine.model("notes", tenant="patient").sealed("text")
+await engine.ensure()
 
-writer = AsyncMongoClient(uri, auto_encryption_opts=ring.client_options())
-await writer[db].notes.insert_one({"key_scope": "alice", "text": secret})
-
-await ring.shred("alice")    # every copy of that ciphertext is now noise
+await notes.seal({"patient": "alice", "text": diagnosis})
+await notes.find({"patient": "alice"})    # decrypted, and refuses what it can't
+await notes.shred("alice")                # every copy of that ciphertext is noise
 ```
+
+**The scope is the tenant, and that is the whole design.** A per-scope key
+needs a field naming the key; a multi-tenant collection already has one.
+Tying them together means no second field, no second lookup, nothing to keep
+in step — and per-tenant crypto erasure falls out of a declaration the model
+already made. `seal()` mints the key for a new tenant on the way past, so
+"wrote a document, forgot the key" is not a reachable state.
+
+Everything it returns is the ordinary refusing handle, so `revoke()`,
+`quarantine()`, `derive()` and the rest keep composing. The ordering is the
+efficient one: a revoked document is refused by its **mark** before anything
+is decrypted, so only survivors reach the KMS.
+
+### The plaintext write is rejected by the database
+
+This is the half that makes it a guarantee rather than a convention, and it
+closes the worst failure available here.
+
+Automatic encryption protects every writer that goes through the encrypting
+client. It does nothing about one that doesn't — a migration script, a shell,
+a second service, this application holding the plain handle by accident. That
+write **succeeds**, stores plaintext, and raises nothing. Silent, permanent,
+and in a backup before anyone notices.
+
+Measured, because it is the whole argument:
+
+```
+plain client, plaintext string  ->  WriteError (rejected)
+encrypting client, same call    ->  stored, subtype 6
+```
+
+So `ensure()` puts a `$jsonSchema` validator on the collection requiring the
+sealed fields to be `binData`. The driver encrypts client-side, so what
+reaches the server is already binary and passes. Forgetting to encrypt is not
+discouraged — it is **impossible**. Same move as `Admission` having no
+unfiltered `find`, one layer down.
+
+The engine also owns exactly one encrypting client and hands out collections
+from it (`engine.aclose()` puts it down), so the caller never holds two
+clients and never picks the wrong one.
 
 Four decisions carry this, and each one had an easier wrong answer:
 
@@ -1376,6 +1414,11 @@ that has nothing to do with either of them.
 | The key expires with the documents | a TTL index on the key vault, and a key's deadline moves earlier or not at all |
 | A destroyed key is a refusal, not a 500 | one crypto-erased document must not fail a page of fifty |
 | Ciphertext cannot be served as text | `Unrecoverable` refuses a `Binary` that reached a read path unsealed |
+| A plaintext write is refused by MongoDB | a `binData` validator, so bypassing the encrypting client fails loudly instead of silently |
+| Sealing adds no bookkeeping to the document | the scope is the tenant; the stored row gains no field |
+| Sealing composes with refusal | a revoked document is refused by its mark before any key is fetched |
+| Sealing without a scope refuses to default | one key for everybody means one erasure request erases everybody |
+| Durable custody survives a restart | a second engine, a new keyring, the same key file, yesterday's ciphertext |
 | A KMS custody carries its provider and master key | hardcoding `"local"` wraps an AWS deployment's keys with a process secret, silently |
 | Custody declares durability and audit | and the weak rungs warn; a lost ephemeral key is indistinguishable from a full shred |
 | A local key file is created once and reused | including base64, because secrets arrive text-shaped; a wrong length refuses rather than guesses |

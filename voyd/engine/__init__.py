@@ -184,6 +184,9 @@ class Engine:
                 coll for coll, trait in items.items() if await trait.ensure()
             ]
         report["ttl"] = await self.expiry.ensure()
+        # After the traits: a sealing validator is applied to a collection
+        # the keyring's own ensure() may have just created, and before
+        # search, which is the step that waits.
         report["search_ready"] = await self.search_engine.ensure_indexes(
             wait_s=search_wait_s)
         return report
@@ -219,6 +222,29 @@ class Engine:
         return self.search_engine.tier
 
     # ---- work ----------------------------------------------------------
+
+    def keyring(self, spec=None, *, custody=None, **kw):
+        """The key vault for this engine. Idempotent, like every trait.
+
+        One keyring per engine by default, because the key vault is a
+        namespace and two of them would mean a scope's key depending on
+        which handle asked. A second is possible by passing a spec with a
+        different collection -- an explicit choice, which is the right
+        weight for "this data is protected by different keys".
+
+        Declaring more sealed collections merges into the existing spec
+        rather than replacing it: ``model(...).sealed(...)`` twice on one
+        engine is two collections under one vault, not the second quietly
+        winning.
+        """
+        from .keyring import Keyring, KeyringSpec
+
+        spec = spec or KeyringSpec()
+        existing = self._installed.get("keyring", {}).get(spec.collection)
+        if existing is not None:
+            existing.spec.protect.update(spec.protect)
+            return existing
+        return self.use(Keyring(self.db, spec, custody=custody, **kw))
 
     def queue(self, collection: str, *, when: dict, **kw) -> JobQueue:
         return self.use(JobQueue(db=self.db, collection=collection, when=when, **kw))
@@ -280,6 +306,17 @@ class Engine:
                                key=key))
 
     # ---- introspection -------------------------------------------------
+
+    async def aclose(self) -> None:
+        """Release anything this engine opened on the caller's behalf.
+
+        Only the keyring's encrypting client, today. It exists because the
+        convenience of "the keyring owns the writer" has to come with a way
+        to put it down -- a library that opens a connection you cannot
+        close has traded one chore for a worse one.
+        """
+        for trait in self._installed.get("keyring", {}).values():
+            await trait.aclose()
 
     def health(self) -> dict:
         """What a health endpoint should say, so a degraded deployment is

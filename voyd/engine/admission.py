@@ -748,6 +748,10 @@ class Admission:
         self._include = False
         self.ledger = None
         self._caller: dict | None = None
+        # Set by ``sealed_by()`` when the model declares encrypted fields.
+        # ``None`` is the ordinary case and costs nothing: every read below
+        # checks it once and skips the whole path.
+        self.sealing = None
         # Bound and holding no claims is not the same as never bound: the
         # first is a caller entitled to nothing, the second is a code path
         # that forgot to say who is asking. Conflating them is how a read
@@ -835,6 +839,7 @@ class Admission:
         clone._include = self._include
         clone._caller = self._caller
         clone._bound = self._bound
+        clone.sealing = self.sealing
         return clone
 
     # ---- the escape hatch, deliberately named --------------------------
@@ -1082,8 +1087,17 @@ class Admission:
                 asked = self._next_ask(asked, want, kept=len(kept),
                                        examined=examined)
 
+        hits = kept[:want]
+        if self.seals:
+            # Decrypted after the page is chosen, so a document whose key is
+            # gone costs one refusal rather than a wasted round of refill --
+            # and it is counted in the same tally, under `unrecoverable`,
+            # beside the deadline and the revocation.
+            hits, sealed_tally = await self._unsealed(hits)
+            for reason, n in sealed_tally.items():
+                tally[reason] = tally.get(reason, 0) + n
         self.receipts_log.record_many(tally)
-        page = Page(kept[:want], refused=tally, examined=examined,
+        page = Page(hits, refused=tally, examined=examined,
                     starved=len(kept) < want and not exhausted)
         if page.starved:
             # Worth a line at WARNING: it means a caller was told less than
@@ -1118,7 +1132,12 @@ class Admission:
     async def find_one(self, filters: dict | None = None, *args, **kw):
         doc = await self.db[self.collection].find_one(self._query(filters),
                                                       *args, **kw)
-        return self._admit(doc)
+        admitted = self._admit(doc)
+        if admitted is None or not self.seals:
+            return admitted
+        kept, tally = await self._unsealed([admitted])
+        self.receipts_log.record_many(tally)
+        return kept[0] if kept else None
 
     async def find(self, filters: dict | None = None, *args,
                    limit: int = 0, sort: Any = None, **kw) -> list[dict]:
@@ -1127,7 +1146,16 @@ class Admission:
             cur = cur.sort(*sort) if isinstance(sort, tuple) else cur.sort(sort)
         if limit:
             cur = cur.limit(limit)
-        return [d async for d in cur if self._admit(d) is not None]
+        admitted = [d async for d in cur if self._admit(d) is not None]
+        if not self.seals:
+            return admitted
+        # Admitted first, then decrypted. A revoked or expired document is
+        # refused by its mark without anybody paying for a key lookup, and
+        # only the survivors reach the KMS -- which matters because the
+        # refusal rate on a live scope is most of the page.
+        kept, tally = await self._unsealed(admitted)
+        self.receipts_log.record_many(tally)
+        return kept
 
     def match(self, filters: dict | None = None) -> dict:
         """The refusing filter, for a pipeline that cannot use ``find``.
@@ -1575,10 +1603,108 @@ class Admission:
         guard["$and"] = [*guard.pop("$and", []), reach]
         return guard
 
-    # ---- ciphertext on the way out -------------------------------------
+    # ---- ciphertext, both ways -----------------------------------------
+    #
+    # Sealing is something a collection *has*, like a tenant or a rule, so
+    # it lives on this handle rather than in a parallel object the caller
+    # has to carry alongside it. Three things follow from that, and each
+    # one removes something a caller would otherwise have to remember:
+    #
+    #   seal()      mints the scope's key if it is new, then writes through
+    #               the encrypting client. There is no step where you have
+    #               a key but no document, or a document but no key.
+    #   find()/search()
+    #               decrypt on the way out and refuse what they cannot,
+    #               so no read site passes a keyring and a field list.
+    #   shred()     the scope's key, by the same name the documents use.
+    #
+    # And the writer that skips all of this -- a migration script, a shell,
+    # a second service holding the plain client -- is refused by the
+    # *server*, because ``Keyring.enforce()`` puts a binData validator on
+    # the collection. See its docstring: that is the difference between
+    # encryption as a convention and encryption as a guarantee.
+
+    def sealed_by(self, sealing) -> Admission:
+        """Attach a resolved ``Sealing``. Returns ``self``."""
+        self.sealing = sealing
+        return self
+
+    @property
+    def seals(self) -> bool:
+        return self.sealing is not None
+
+    def _require_sealing(self, verb: str):
+        if self.sealing is None:
+            raise UnknownReason(
+                self.collection, verb,
+                ("declare .sealed(...) on the model to encrypt fields",))
+        return self.sealing
+
+    async def seal(self, documents, *, scope: str | None = None) -> list:
+        """Write documents with their sealed fields encrypted.
+
+        The scope defaults to the document's own tenant value, which is the
+        point of tying the two together: a per-tenant key needs no second
+        field, no second lookup and no second thing to keep in step. One
+        declaration -- ``model(tenant="t").sealed("text")`` -- and erasure
+        is per tenant because the key already was.
+
+        The key is minted here if the scope is new. Requiring a separate
+        ``key_for()`` first would make "wrote a document, forgot the key" a
+        reachable state, and the driver's answer to that state is an
+        exception on the *write* -- which is safe, and is still a step the
+        caller can only get wrong.
+        """
+        sealing = self._require_sealing("seal")
+        docs = [documents] if isinstance(documents, dict) else list(documents)
+        if not docs:
+            return []
+        self._require_caller()
+
+        prepared, scopes = [], set()
+        for doc in docs:
+            row = dict(doc)
+            at = scope or row.get(sealing.scope_field)
+            if at is None:
+                raise ScopeRequired(self.collection, sealing.scope_field)
+            row[sealing.scope_field] = at
+            scopes.add(at)
+            prepared.append(row)
+
+        ring = sealing.keyring
+        ce = await ring.encryption()
+        try:
+            for at in sorted(scopes):
+                await ring.key_for(at, encryption=ce)
+        finally:
+            await ce.close()
+
+        collection = await ring.writer(self.collection)
+        result = await collection.insert_many(prepared)
+        log.info("sealed %d document(s) into %s under %d scope key(s)",
+                 len(prepared), self.collection, len(scopes))
+        return list(result.inserted_ids)
+
+    async def shred(self, scope: str) -> int:
+        """Destroy one scope's key. Its ciphertext is noise, everywhere.
+
+        Named on the handle as well as on the keyring because this is where
+        the caller already is, and because the scope is the tenant they
+        already have. An erasure request should not require knowing that a
+        key vault exists.
+        """
+        return await self._require_sealing("shred").keyring.shred(scope)
+
+    async def _unsealed(self, documents: list[dict]) -> tuple[list, dict]:
+        """Decrypt, refusing per document. ``(kept, tally)``."""
+        if self.sealing is None or not documents:
+            return list(documents), {}
+        page = await self.unseal(documents, fields=self.sealing.fields,
+                                 keyring=self.sealing.keyring, count=False)
+        return list(page), dict(page.refused)
 
     async def unseal(self, documents, *, fields: Iterable[str],
-                     keyring, encryption=None) -> Page:
+                     keyring, encryption=None, count: bool = True) -> Page:
         """Decrypt sealed fields, and refuse the documents whose key is gone.
 
         The read half of ``keyring.py``, and it is explicit for a reason
@@ -1612,7 +1738,12 @@ class Admission:
                 tally[UNRECOVERABLE] = tally.get(UNRECOVERABLE, 0) + 1
                 continue
             kept.append(out)
-        self.receipts_log.record_many(tally)
+        if count:
+            # A caller that folds this into a page commits the tally once,
+            # with the rest of that page's refusals -- counting here as
+            # well would double it, in the one direction that makes a lower
+            # bound a lie.
+            self.receipts_log.record_many(tally)
         if tally:
             log.info("%s: %d document(s) are unrecoverable -- their key was "
                      "destroyed, so no read path anywhere can produce the "

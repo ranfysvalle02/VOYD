@@ -110,6 +110,8 @@ import logging
 import os
 from dataclasses import dataclass, field
 
+from pymongo.errors import CollectionInvalid
+
 from .custody import Custody, Ephemeral
 from datetime import datetime
 from typing import Any
@@ -128,6 +130,28 @@ ENCRYPTED = 6
 UNRECOVERABLE = "unrecoverable"
 
 RANDOM = "AEAD_AES_256_CBC_HMAC_SHA_512-Random"
+
+
+def _uri_of(client) -> str:
+    """Reconstruct a connection string for a client we were handed.
+
+    The encrypting client has to dial the same deployment, and asking the
+    caller to pass the URI twice is a way to point them at two different
+    ones. ``client.address`` is a coroutine on the async driver, so the
+    seed list from the topology settings is what is available synchronously
+    -- and it is the right source anyway: it is what this client was
+    *configured* with, not whichever node it happens to be talking to.
+    """
+    try:
+        seeds = client.topology_description.known_servers
+        hosts = ",".join(f"{s.address[0]}:{s.address[1]}" for s in seeds)
+    except Exception:  # noqa: BLE001 - fall through to the settings below
+        hosts = ""
+    if not hosts:
+        nodes = getattr(client, "_topology_settings", None)
+        hosts = ",".join(f"{h}:{p}" for h, p in
+                         getattr(nodes, "seeds", [("localhost", 27017)]))
+    return f"mongodb://{hosts}/?directConnection=true"
 
 
 def available() -> tuple[bool, str]:
@@ -166,6 +190,24 @@ def crypt_shared_path() -> str | None:
 def _which(name: str) -> str | None:
     from shutil import which
     return which(name)
+
+
+@dataclass(frozen=True)
+class Sealing:
+    """One collection's sealing, resolved: which keyring, which fields.
+
+    Handed to an ``Admission`` so the read path can decrypt without the
+    caller passing a keyring and a field list to every call. That is not
+    sugar -- three arguments a caller must remember at every read site is
+    the exact shape of rule this package exists to make structural.
+    """
+
+    keyring: Any
+    fields: tuple[str, ...]
+    scope_field: str
+
+    async def close(self) -> None:
+        pass
 
 
 @dataclass(frozen=True)
@@ -234,7 +276,8 @@ class Keyring:
 
     def __init__(self, db, spec: KeyringSpec | None = None, *,
                  custody: Custody | None = None,
-                 kms_providers: dict | None = None):
+                 kms_providers: dict | None = None,
+                 uri: str | None = None):
         self.db = db
         self.spec = spec or KeyringSpec()
         self.collection = self.spec.collection
@@ -251,6 +294,13 @@ class Keyring:
         self.custody = custody or (_Declared(kms_providers) if kms_providers
                                    else Ephemeral())
         self.kms_providers = self.custody.providers()
+        # The URI this keyring will dial for its own encrypting client.
+        # Taken from the client it was handed, so a keyring cannot end up
+        # pointing at a different deployment than the engine it belongs to
+        # -- which is a failure that would look like "the keys are missing"
+        # rather than like a misconfiguration.
+        self._uri = uri or _uri_of(db.client)
+        self._writer = None
 
     @property
     def namespace(self) -> str:
@@ -278,6 +328,8 @@ class Keyring:
             partialFilterExpression={"keyAltNames": {"$exists": True}})
         await self.db[self.collection].create_index(
             self.spec.at_field, expireAfterSeconds=0, sparse=True)
+        for collection in self.spec.sealed_collections():
+            await self.enforce(collection)
         self.custody.warn_if_weak(f"keyring {self.namespace}")
         return True
 
@@ -504,6 +556,41 @@ class Keyring:
             extra["encrypted_fields_map"] = qe
         return AutoEncryptionOpts(self.kms_providers, self.namespace, **extra)
 
+    async def writer(self, collection: str):
+        """The encrypting collection handle. One, owned here, built once.
+
+        This is the piece that decides whether the whole thing is usable.
+        Automatic encryption needs its own ``MongoClient`` and cannot be
+        retrofitted onto one that exists -- so the naive shape is "the
+        caller builds a second client and remembers which is which", and
+        the failure mode of forgetting is a plaintext write that nobody
+        notices until it is in a backup.
+
+        So the keyring owns exactly one encrypting client and hands out
+        collections from it. The caller never holds two clients and never
+        chooses between them. (The writer that genuinely bypasses this --
+        a shell, a migration, another service -- is refused by the server;
+        see ``validator()``. Convenience closes the common case, the
+        validator closes the rest.)
+
+        Built lazily rather than at construction because it needs the QE
+        field keys, which need a round trip, which an ``__init__`` should
+        not be doing.
+        """
+        if self._writer is None:
+            from pymongo import AsyncMongoClient
+            self._writer = AsyncMongoClient(
+                self._uri, auto_encryption_opts=await self.client_options())
+            log.debug("keyring %s opened its encrypting client",
+                      self.namespace)
+        return self._writer[self.db.name][collection]
+
+    async def aclose(self) -> None:
+        """Release the encrypting client, if one was opened."""
+        if self._writer is not None:
+            await self._writer.close()
+            self._writer = None
+
     async def create_queryable(self, client, collection: str, *,
                                encryption=None):
         """Create a QE collection, which cannot be created by inserting.
@@ -534,6 +621,74 @@ class Keyring:
         finally:
             if owned:
                 await ce.close()
+
+    def validator(self, collection: str) -> dict | None:
+        """A ``$jsonSchema`` the *server* enforces: these fields are binary.
+
+        The one piece that turns encryption from a convention into a
+        guarantee, and it is worth being exact about which failure it
+        closes.
+
+        Automatic encryption protects every writer that goes through the
+        encrypting client. It does nothing about a writer that does not --
+        a migration script, a shell, a second service, the same application
+        holding the plain client by accident. That write **succeeds**, and
+        stores plaintext, and nothing raises. It is the worst failure
+        available here: silent, permanent, and already in a backup before
+        anybody could notice.
+
+        Measured, because it is the whole argument:
+
+            plain client, plaintext string  -> WriteError (rejected)
+            encrypting client, same call    -> stored, subtype 6
+
+        So the collection carries a validator requiring the sealed fields to
+        be ``binData``. The driver encrypts client-side, so what reaches the
+        server is already binary and passes; a plaintext write is refused by
+        MongoDB, not by a code review. That is the same move as
+        ``Admission`` having no unfiltered ``find``, one layer down: the
+        unsafe thing is not discouraged, it is unavailable.
+        """
+        mode = self.spec.protect.get(collection)
+        if not isinstance(mode, Sealed):
+            # Queryable Encryption already refuses a plaintext write to a QE
+            # namespace at the server, so a second validator would only be
+            # another thing to keep in step with the first.
+            return None
+        return {"$jsonSchema": {
+            "bsonType": "object",
+            "properties": {f: {
+                "bsonType": "binData",
+                "description": (f"{f} is sealed: it must arrive already "
+                                f"encrypted. A plaintext write here is a "
+                                f"writer that bypassed the encrypting "
+                                f"client.")}
+                for f in mode.fields},
+        }}
+
+    async def enforce(self, collection: str) -> bool:
+        """Apply the validator, creating the collection if it is new.
+
+        ``collMod`` on a collection that does not exist yet is an error, and
+        a first boot is exactly when it does not exist -- so the ordering is
+        create-then-modify rather than one or the other, and both paths
+        converge on the same validator.
+        """
+        rule = self.validator(collection)
+        if rule is None:
+            return False
+        try:
+            await self.db.create_collection(collection, validator=rule,
+                                            validationLevel="strict",
+                                            validationAction="error")
+        except CollectionInvalid:
+            await self.db.command({"collMod": collection, "validator": rule,
+                                   "validationLevel": "strict",
+                                   "validationAction": "error"})
+        log.info("sealed %s.%s: the server now rejects a plaintext write to "
+                 "%s", self.db.name, collection,
+                 ", ".join(self.spec.protect[collection].fields))
+        return True
 
     def describe(self) -> dict:
         ok, why = available()

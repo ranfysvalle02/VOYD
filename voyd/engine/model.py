@@ -111,6 +111,62 @@ class Model:
             self.collection, at_field=at_field, tenant=self.tenant,
             lineage_field=lineage_field, rules=tuple(rules))
 
+    def sealed(self, *fields: str, keyring=None, scope: str | None = None,
+               custody=None, **kw) -> Admission:
+        """Encrypt these fields at rest, with a key per scope. One line.
+
+            notes = engine.model("notes", tenant="tenant_id").sealed("text")
+
+            await notes.seal({"tenant_id": "alice", "text": secret})
+            await notes.find({"tenant_id": "alice"})     # decrypted
+            await notes.shred("alice")                   # unreadable, everywhere
+
+        **The scope is the tenant, and that is the whole design.** A
+        per-scope key needs a field naming the key; a multi-tenant
+        collection already has one. Tying them together means no second
+        field, no second lookup, and nothing to keep in step -- and it
+        means per-tenant crypto erasure falls out of a declaration the
+        model already made, rather than being a feature somebody wires up.
+
+        Everything this returns is the ordinary refusing handle, so
+        ``revoke()``, ``quarantine()``, ``derive()`` and the rest keep
+        working and keep composing: a revoked document is refused by its
+        mark before anything is decrypted, and a shredded one is refused
+        as ``unrecoverable`` beside it.
+
+        On a collection with no tenant, pass ``scope=`` to name the field.
+        There is no default beyond the tenant on purpose -- inventing one
+        would put every document in one scope, which is the configuration
+        where shredding erases everybody.
+        """
+        from .keyring import KeyringSpec, Sealed, Sealing
+
+        at = scope or self.tenant
+        if not at:
+            raise ValueError(
+                f"{self.collection}: sealing needs a scope field, and this "
+                f"model has no tenant. Either declare one -- "
+                f"model({self.collection!r}, tenant='...') -- or pass "
+                f"scope='field'. Defaulting would put every document under "
+                f"one key, and then one erasure request erases everybody")
+        if not fields:
+            raise ValueError(
+                f"{self.collection}: sealed() needs at least one field. A "
+                f"collection that seals nothing is an unencrypted "
+                f"collection with a key vault attached")
+
+        mode = Sealed(tuple(fields))
+        if keyring is None:
+            keyring = self.engine.keyring(
+                spec=KeyringSpec(pointer_field=at,
+                                 protect={self.collection: mode}),
+                custody=custody)
+        else:
+            keyring.spec.protect[self.collection] = mode
+        handle = self.admitting(*kw.pop("rules", ()), **kw) if kw.get("rules") \
+            else self.forgettable()
+        return handle.sealed_by(Sealing(keyring, tuple(fields), at))
+
     def memory(self, **kw) -> Memory:
         """Recall with decay: search plus TTL, one collection."""
         spec_kw = dict(kw)
