@@ -62,14 +62,18 @@ from __future__ import annotations
 
 from .capabilities import Capabilities, detect
 from .errors import (
+    BlastRadius,
     CallerRequired,
     FilterInvalid,
+    Irreversible,
     ScopeError,
     ScopeInvalid,
     ScopeRequired,
+    UnboundedForgetting,
+    UnknownReason,
 )
 from .expiry import Expiry, ExpirySpec
-from .admission import (DEADLINE, NOT_CLEARED, QUARANTINED, REVOKED,
+from .admission import (DEADLINE, LIFTED, NOT_CLEARED, QUARANTINED, REVOKED,
                         UNREADABLE, WRONG_MODEL,
                         Clearance, Deadline, EmbeddedWith, Page, Restricted,
                          Admission, AdmissionSpec, Marked, Rule,
@@ -318,13 +322,15 @@ __all__ = [
     "Admission", "AdmissionSpec", "why_refused",
     "Rule", "Deadline", "Marked", "revoked", "quarantined",
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
+    "LIFTED",
     "NOT_CLEARED", "EmbeddedWith", "Clearance", "Restricted", "Page",
     "Memory", "MemorySpec",
     "Model",
     "JobQueue", "PermanentFailure", "backoff",
     "Ledger", "LedgerSpec", "canonical", "digest", "GENESIS",
     "ScopeRequired", "ScopeInvalid", "ScopeError", "FilterInvalid",
-    "CallerRequired",
+    "CallerRequired", "Irreversible", "UnknownReason", "BlastRadius",
+    "UnboundedForgetting",
     "Trait", "kind_of", "collection_of",
     "now", "aware", "live", "living", "deadline", "bind", "UTC",
 ]

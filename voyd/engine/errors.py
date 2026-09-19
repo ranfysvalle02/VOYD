@@ -165,3 +165,125 @@ def require_scope(collection: str, field: str | None,
             raise FilterInvalid(collection, key, value)
 
     return flt
+
+
+class Irreversible(ValueError):
+    """A lift was asked for on a reason that has no inverse.
+
+    The family resemblance is to ``CallerRequired`` above: both are
+    operations where every available answer is wrong, so neither picks one.
+
+    Refusal reasons are not one kind of thing, and the difference is not
+    stylistic. A *quarantine* is a hypothesis -- this document looks
+    poisoned, hold it while somebody looks -- and a hypothesis that cannot be
+    withdrawn is not an investigation, it is a graveyard. A *revocation* is
+    an instruction about the world that got worse: an erasure request, a
+    leaked credential, a retracted document. None of those turn out to be
+    false, and the honest response to "the subject re-consented" is a new
+    document with a new id and a new consent record, not the resurrection of
+    a row that still carries the mark saying it was erased.
+
+    Two harder reasons, either of which would be sufficient on its own:
+
+    - **An undo would be a lie about its own availability.** Imposing an
+      irreversible reason also stamps the erase deadline, so the reaper takes
+      the row on its next sweep. A lift would therefore work, and work, and
+      then silently stop working, according to ``ttlMonitorSleepSecs`` -- an
+      API whose window is a storage event, in the one codebase written to
+      argue that retrieval guarantees must not depend on sweepers.
+    - **It would make the chain intact and false.** The ledger would attest
+      that a fact stopped being reachable at 14:02, the fact would be
+      reachable, and ``verify()`` would still pass. A tamper-evident record
+      of one direction of a two-direction transition is not evidence; it is
+      a document that is wrong in a way its own checksum cannot see.
+    """
+
+    def __init__(self, collection: str, reason: str, reversible: tuple):
+        self.collection = collection
+        self.reason = reason
+        self.reversible = reversible
+        offer = (f"reversible here: {', '.join(reversible)}" if reversible
+                 else "no reason on this collection is reversible")
+        super().__init__(
+            f"{collection}: {reason!r} cannot be lifted. An erasure is not a "
+            f"hypothesis, and the row is already scheduled for the reaper, so "
+            f"an undo would depend on the sweeper it was written to avoid. "
+            f"To re-admit the information, write it again as a new document "
+            f"with its own provenance ({offer})"
+        )
+
+
+class UnknownReason(ValueError):
+    """A verb named a reason this collection does not refuse on.
+
+    Silence would be worse than it looks. ``lift("quarantined")`` against a
+    collection that never installed the rule would find no mark, modify no
+    rows, and report success -- so an investigation would close on a document
+    that is still being held, or still being served, depending on which way
+    the mistake ran. A verb naming a reason that is not installed is a
+    declaration bug, and declaration bugs should be loud at the call site.
+    """
+
+    def __init__(self, collection: str, reason: str, known: tuple):
+        self.collection = collection
+        self.reason = reason
+        self.known = known
+        super().__init__(
+            f"{collection} has no imposable reason {reason!r}; it refuses on "
+            f"[{', '.join(known) or 'nothing imposable'}]. A reason is "
+            f"imposable when its rule declares `reversible`"
+        )
+
+
+class BlastRadius(ValueError):
+    """A write that forgets things matched a different number than expected.
+
+    ``revoke()`` has no undo and the reaper collects its rows within a
+    sweep, which makes it the one call in this package where the damage is
+    done before anybody reads the return value. Everywhere else, this
+    codebase's rule is that you have to *declare* you want the unsafe thing
+    -- ``including_refused()`` is a named method for exactly that reason --
+    and a filter that silently matched forty thousand documents instead of
+    one declared nothing.
+
+    So the interlock is opt-in and pre-flight: pass ``expect=`` and the count
+    is taken, compared, and the write is skipped on a mismatch. Best effort
+    by construction, and worth stating plainly rather than implying
+    otherwise: a document inserted between the count and the update is not
+    covered. It catches the mistake that actually happens -- a filter that
+    was wrong when it was typed -- not a concurrent writer.
+    """
+
+    def __init__(self, collection: str, expected: int, matched: int):
+        self.collection = collection
+        self.expected = expected
+        self.matched = matched
+        super().__init__(
+            f"{collection}: filter matched {matched} document(s), expected "
+            f"{expected}; nothing was written. This call has no undo, so the "
+            f"count is checked before the write, not reported after it"
+        )
+
+
+class UnboundedForgetting(ValueError):
+    """A forgetting write was handed a filter that matches the whole scope.
+
+    Reading everything is a normal thing to want. *Forgetting* everything is
+    not, and the two must not be one keystroke apart: ``revoke({})`` is a
+    plausible typo for ``revoke({"doc_id": x})`` with the argument dropped,
+    and it erases a tenant.
+
+    Naming it costs one keyword and follows the pattern already established
+    by ``including_refused()``: the safe thing is what you get by default,
+    and the dangerous thing exists but has to be said out loud, in a word a
+    reviewer can grep for.
+    """
+
+    def __init__(self, collection: str, verb: str):
+        self.collection = collection
+        self.verb = verb
+        super().__init__(
+            f"{collection}: {verb}() with no filter would apply to every "
+            f"document in the scope. If that is the intent, say so: "
+            f"{verb}(..., everything=True)"
+        )

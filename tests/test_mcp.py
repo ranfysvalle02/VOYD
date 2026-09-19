@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("mcp")
+# The 2.x module path, not the bare package: mcp 1.x is importable and has no
+# ``MCPServer``, so skipping on "mcp" alone turns an unsupported-version install
+# into thirteen collection errors instead of a skip.
+pytest.importorskip("mcp.server.mcpserver")
 
 from voyd.mcp import MAX_BATCH, VoydClient, build_server
 

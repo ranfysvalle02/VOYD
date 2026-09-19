@@ -25,8 +25,8 @@ import pytest
 
 from voyd.engine import (DEADLINE, QUARANTINED, REVOKED, UNREADABLE, WRONG_MODEL,
                          Deadline, EmbeddedWith,
-                         ScopeInvalid, ScopeRequired, quarantined, revoked,
-                         why_refused)
+                         ScopeInvalid, ScopeRequired, UnboundedForgetting,
+                         quarantined, revoked, why_refused)
 from voyd.engine.admission import AdmissionSpec
 
 SPEC = AdmissionSpec("facts")
@@ -210,25 +210,56 @@ async def test_revoke_makes_a_fact_unreachable_without_deleting_it(facts):
     assert row["expire_at"] is not None, "revoked rows must still be collected"
 
 
-async def test_revoking_something_already_forgotten_is_a_no_op(facts):
-    """``revoke`` goes through the same refusing query, so it cannot resurrect
-    a deadline on a fact that is already gone."""
-    _, _, docs = facts
-    assert await docs.revoke({"name": "expired"}) == 0
+async def test_revoking_something_already_expired_still_lands(facts):
+    """The inverse of the no-op this test used to assert, and the reason it
+    changed.
+
+    A row inside the sweeper's window is expired and *still on disk*, which
+    is the entire premise of this package -- so "it is already gone" is not
+    true yet and is not an answer. Returning 0 told a subject erasure
+    request there was no such document while it sat there unmarked,
+    unwitnessed and absent from the chain.
+
+    What the old assertion was really protecting is a different thing, and
+    it still holds below: a revocation must not resurrect the row by
+    pushing its deadline outward.
+    """
+    _, db, docs = facts
+    assert await docs.revoke({"name": "expired"}, reason="subject request") == 1
+
+    row = await db.facts.find_one({"name": "expired"})
+    assert row["forgotten"]["reason"] == "subject request"
+    assert row["expire_at"] < datetime.now(timezone.utc), \
+        "the row must stay due; a revocation cannot give it a new lease"
 
 
-async def test_a_revoked_fact_can_be_kept_briefly_for_proof(facts):
+async def test_erase_after_is_a_cap_and_never_an_extension(facts):
     """``erase_after`` keeps the tombstone readable through the escape hatch,
     for the case where you have to show *when* something stopped being
-    reachable."""
-    _, _, docs = facts
+    reachable -- but only up to the row's own deadline.
+
+    A fact due in an hour, revoked with ``erase_after=7d``, must not end up
+    on disk for a week. Retention that grows because somebody asked for
+    erasure is the opposite of the request, and the proof that needs to
+    outlive the row lives on the ledger, which has no TTL index on purpose.
+    """
+    _, db, docs = facts
+    before = (await db.facts.find_one({"name": "live"}))["expire_at"]
     await docs.revoke({"name": "live"}, reason="audit",
                       erase_after=timedelta(days=7))
 
     assert await docs.find_one({"name": "live"}) is None
     kept = await docs.including_refused().find_one({"name": "live"})
     assert kept is not None
-    assert kept["expire_at"] > datetime.now(timezone.utc) + timedelta(days=6)
+    assert kept["expire_at"] == before, \
+        "the existing deadline was sooner, so it wins"
+
+    # A pinned row has no deadline to be capped by, so the window applies
+    # in full -- pinning is the absence of a deadline, not an early one.
+    await docs.revoke({"name": "pinned"}, reason="audit",
+                      erase_after=timedelta(days=7))
+    pinned = await docs.including_refused().find_one({"name": "pinned"})
+    assert pinned["expire_at"] > datetime.now(timezone.utc) + timedelta(days=6)
 
 
 async def test_pinning_is_the_absence_of_a_deadline(facts):
@@ -345,12 +376,25 @@ async def test_the_tenant_shape_check_is_inherited_not_reimplemented(tenanted):
 
 
 async def test_revoking_cannot_reach_another_tenant(tenanted):
-    """The dangerous direction: forgetting is a write."""
+    """The dangerous direction: forgetting is a write.
+
+    Two separate refusals stacked on one call, and they are not the same
+    refusal wearing different names. ``ScopeRequired`` says *which* tenant
+    was never established, so the write would have crossed the boundary.
+    ``UnboundedForgetting`` says the tenant is established and the filter
+    narrows nothing inside it -- a legal, scoped, correct-looking call that
+    erases the whole tenant. Only the second one is new, and it is the one
+    that fires on the call somebody actually types.
+    """
     _, _, docs = tenanted
     with pytest.raises(ScopeRequired):
         await docs.revoke({}, reason="everything everywhere")
 
-    assert await docs.revoke({"tenant": "acme"}, reason="scoped") == 1
+    with pytest.raises(UnboundedForgetting):
+        await docs.revoke({"tenant": "acme"}, reason="the whole tenant")
+
+    assert await docs.revoke({"tenant": "acme"}, reason="scoped",
+                             everything=True) == 1
     survivors = [r["text"] for r in await docs.find({"tenant": "globex"})]
     assert survivors == ["globex merger terms"]
 
@@ -365,7 +409,7 @@ async def test_audit_sees_forgotten_rows_but_not_foreign_ones(tenanted):
     with pytest.raises(ScopeRequired):
         await docs.including_refused().find({})
 
-    await docs.revoke({"tenant": "acme"}, reason="audit")
+    await docs.revoke({"tenant": "acme"}, reason="audit", everything=True)
     seen = await docs.including_refused().find({"tenant": "acme"})
     assert [r["text"] for r in seen] == ["acme payroll"]
 

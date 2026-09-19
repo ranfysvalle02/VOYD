@@ -60,7 +60,8 @@ async def test_the_whole_run_passes_against_a_healthy_deployment(core):
     assert await v.run() is True, [
         (c.name, c.notes) for c in v.checks if not c.ok]
     assert [c.name for c in v.checks] == ["deadline", "revocation",
-                                          "starvation", "clearance", "chain"]
+                                          "starvation", "clearance",
+                                          "reversal", "chain"]
 
 
 async def test_the_deadline_check_fails_when_the_read_path_stops_refusing(core):
@@ -112,6 +113,60 @@ async def test_the_revocation_check_fails_when_the_row_is_deleted(core):
     assert not check.ok
     assert any("deleted" in n for n in check.notes), (
         f"the row was erased on request and the check passed: {check.notes}")
+
+
+async def test_the_reversal_check_fails_when_an_erasure_can_be_undone(core):
+    """The break somebody ships on purpose, under pressure, at 3am.
+
+    "Support needs to un-forget a document" is a reasonable-sounding ask,
+    and the patch that grants it is one line. It passes every other check
+    in this file: the document is refused when revoked, the row survives,
+    the chain verifies. What it breaks is the thing only this check looks
+    at -- the chain now attests to a refusal that was silently taken back,
+    which is a record that is intact and false.
+    """
+    engine, db = core
+    v = V.Verifier(db.client, db, quiet=True)
+    await v.declare()
+
+    async def helpful_undo(off, filters=None, **kw):     # the 3am patch
+        return (await db.verify_held.update_many(
+            filters, {"$unset": {"forgotten": ""}})).modified_count, None
+
+    v.held.lift = helpful_undo
+    check = await v.check_reversal()
+
+    assert not check.ok
+    assert any("undone" in n or "lifted" in n for n in check.notes), (
+        f"a revocation was reversed and the check passed: {check.notes}")
+
+
+async def test_the_reversal_check_fails_when_a_hold_erases_its_evidence(core):
+    """The break nobody ships on purpose, and nobody notices either.
+
+    The tempting implementation of ``quarantine`` is "``revoke`` with a
+    different field name", which inherits the erase deadline -- so the
+    document under investigation is scheduled for deletion by the act of
+    opening the investigation. Every read is correct, the mark is correct,
+    the chain is correct, and the evidence is gone in a minute.
+    """
+    engine, db = core
+    v = V.Verifier(db.client, db, quiet=True)
+    await v.declare()
+
+    original = v.held.quarantine
+
+    async def quarantine_and_schedule(filters=None, **kw):
+        n = await original(filters, **kw)
+        await db.verify_held.update_many(filters, {"$set": {"expire_at": V.now()}})
+        return n
+
+    v.held.quarantine = quarantine_and_schedule
+    check = await v.check_reversal()
+
+    assert not check.ok
+    assert any("evidence" in n or "deadline" in n for n in check.notes), (
+        f"a hold scheduled its own evidence for deletion: {check.notes}")
 
 
 async def test_the_starvation_check_fails_when_the_page_is_truncated(core):

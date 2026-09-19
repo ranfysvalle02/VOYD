@@ -25,6 +25,8 @@ from __future__ import annotations
 import os
 import uuid
 
+import asyncio
+
 import pytest
 
 # docker-compose publishes Atlas Local on 27018. directConnection is required
@@ -92,8 +94,19 @@ async def _mongo_available(uri: str) -> bool:
 
 
 @pytest.fixture(scope="session", autouse=True)
-async def _sweep_leaked_test_databases():
-    """Drop databases left behind by interrupted runs, before anything else."""
+def _sweep_leaked_test_databases():
+    """Drop databases left behind by interrupted runs, before anything else.
+
+    Deliberately a *sync* fixture driving its own loop: a session-scoped async
+    fixture binds to whatever event loop the asyncio plugin gives session
+    scope, and that contract has changed across pytest-asyncio releases. This
+    is housekeeping, not a test -- it should not be the thing that decides
+    which plugin version the suite collects under.
+    """
+    asyncio.run(_sweep())
+
+
+async def _sweep():
     if not await _mongo_available(TEST_MONGO_URI):
         return
 

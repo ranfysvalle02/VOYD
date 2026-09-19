@@ -68,14 +68,25 @@ question after every AI incident. And it pairs with the refusal chain: the
 chain says when a fact stopped being reachable, `as_of` shows what the scope
 looked like on either side of that.
 
-### 5. Quarantine as a workflow, not a flag
+### 5. Quarantine as a workflow — the queue is what is left
 
-`quarantined()` holds a row back from prompts and keeps it on disk for the
-investigation. There is no queue for the investigation. `engine.queue(when=…)`
-already exists and the document is already the job.
+**Half of this shipped.** The missing piece turned out to be worse than the
+missing queue: `quarantined()` was a reason *no verb could impose*. The rule
+could refuse a mark and nothing in the package could put one there, so every
+test set the field by raw insert. It now has both halves —
+`quarantine()` / `release()` — and reversibility is declared on the rule
+(`Marked(reversible=...)`), which is also what decides whether imposing it
+stamps the erase deadline. A hold that schedules its own evidence for
+deletion is an investigation with a countdown on it.
+
+What is still missing is the **reviewer**. `engine.queue(when=…)` already
+exists and the document is already the job, so it is one
+`queue(when={"quarantined": {"$ne": None}})` away.
 
 **Why.** Quarantine without a review loop becomes a graveyard, and a graveyard
-is indistinguishable from a leak that nobody looked at. One `queue(when={"quarantined": True})` and the feature grows a reviewer.
+is indistinguishable from a leak that nobody looked at. Now that `lifted_total`
+is counted separately from `revoked_total`, the queue also gets a number worth
+watching: a climbing `lifted` means the detector is mistuned.
 
 ### 6. A TypeScript client
 
@@ -131,7 +142,16 @@ different kind of responsibility than anything here currently carries.
   `voyd/engine/search.py`.
 - **Ledgering reads.** A write per refused hit, for a property the read path
   enforces anyway and the suite proves. The chain records *instructions* —
-  revocations — because those are facts about the world.
+  revocations, holds, and the lifting of holds — because those are facts about
+  the world.
+- **An undo for `revoke()`.** Not an omission; see `Irreversible` in
+  `voyd/engine/errors.py` for the argument. Two reasons either of which would
+  be sufficient: the row is already scheduled for the reaper, so the undo
+  would work until `ttlMonitorSleepSecs` decided otherwise — an API whose
+  window is a storage event, in the codebase written to argue that guarantees
+  must not depend on sweepers. And it would make the chain intact and false.
+  The re-admission of erased information is a new document with new
+  provenance, which is a different operation with a different audit story.
 
 ## Known and accepted
 

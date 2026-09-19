@@ -254,16 +254,16 @@ which calls it deliberately to assert the unwrapped version really does leak.
 Refusal is the guarantee; the reasons are rules, asked in order, reported by
 name. Forgetting is not the whole idea — it is the first two rules:
 
-| rule | refuses because | waivable by `including_refused()` |
-|---|---|---|
-| `Deadline()` | the deadline passed, or cannot be read (fails closed) | yes |
-| `revoked()` | somebody said forget this, now | yes |
-| `quarantined()` | held back from models, deliberately still on disk | yes |
-| `EmbeddedWith(m)` | a different model produced this vector | yes |
-| `Clearance(order=…)` | the caller is not cleared for this document | **no** |
-| `Restricted()` | the document names who may see it, and it is not this caller | **no** |
+| rule | refuses because | waivable by `including_refused()` | reversible |
+|---|---|---|---|
+| `Deadline()` | the deadline passed, or cannot be read (fails closed) | yes | — |
+| `revoked()` | somebody said forget this, now | yes | **no** |
+| `quarantined()` | held back from models, deliberately still on disk | yes | yes |
+| `EmbeddedWith(m)` | a different model produced this vector | yes | — |
+| `Clearance(order=…)` | the caller is not cleared for this document | **no** | — |
+| `Restricted()` | the document names who may see it, and it is not this caller | **no** | — |
 
-That last column is the load-bearing one. The first four say a fact is
+The third column is the load-bearing one. The first four say a fact is
 *forgotten*, and seeing what was forgotten is exactly the job the audit handle
 exists for. The last two say *this caller* may not have it, which is not a
 forgetting reason and not that handle's to waive — or "let me see the deleted
@@ -280,6 +280,82 @@ notes = engine.model("notes", tenant="t").admitting(
 A flagged document stops reaching prompts and **stays on disk** — you cannot
 investigate what you deleted. Adding that was one entry in a list, which is
 the argument for rules over branches.
+
+### A hold is not an erasure, and the reason knows which it is
+
+The fourth column is the other half, and it decides three things at once.
+
+Two of these reasons are operationally opposite. A **revocation** is an
+instruction about the world — erase this — and the things behind it (a subject
+erasure request, a leaked credential, a retracted document) are not hypotheses
+that get withdrawn. A **quarantine** is a hypothesis: hold this while somebody
+looks. A hold that cannot be lifted is not an investigation, it is a graveyard,
+and a graveyard is indistinguishable from a leak nobody looked at.
+
+```python
+await docs.quarantine({"doc_id": "d1"}, reason="injection detector")
+await docs.release({"doc_id": "d1"}, reason="reviewed, benign")
+
+await docs.revoke({"doc_id": "d2"}, reason="credential leaked")
+await docs.lift("revoked", {"doc_id": "d2"}, reason="...")
+# Irreversible: 'revoked' cannot be lifted. An erasure is not a hypothesis,
+# and the row is already scheduled for the reaper, so an undo would depend
+# on the sweeper it was written to avoid.
+```
+
+One word on the rule — `reversible` — decides all three of:
+
+- whether `lift()` removes the mark or raises;
+- whether imposing it **stamps the erase deadline**. An erasure schedules its
+  row for the reaper; a hold must not, because the row is the evidence;
+- what the chain records on the way back out.
+
+That coupling used to live in the caller of `revoke()`, which meant the next
+`Marked` reason anybody added got whichever half its author remembered. This
+is the same complaint the whole project makes about conventions, so the
+reason carries it and the verbs read it off — including a reason this package
+has never seen:
+
+```python
+review = Marked(field="under_review", reason="under_review", reversible=True)
+await docs.impose("under_review", {"doc_id": "d3"})
+await docs.lift("under_review", {"doc_id": "d3"}, reason="dispute closed")
+```
+
+**Reasons stack, and the write path knows it.** A document held for
+investigation can still be erased when the investigation concludes it was
+malicious; a subject erasure request still lands on a document whose deadline
+passed thirty seconds ago and whose row is therefore still on disk. Both used
+to match nothing and report success — the ordinary read query drops every
+already-refused document, which is right for a read and was quietly wrong for
+a write. Forgetting writes run against the audit query (still tenant-scoped,
+still clearance-bound) plus one clause: *this mark is not already there*, so a
+retry cannot re-stamp an erased row and buy it another lease.
+
+**Both directions reach the ledger.** A chain that records only the imposing
+half has a failure worse than having no chain: it attests that a fact stopped
+being reachable at 14:02, the fact is reachable, and `verify()` still passes.
+Nothing about a hash chain detects an event never written to it.
+
+**And because `revoke()` has no undo, the interlocks are in front of it.**
+This is the one family of calls here whose damage is done before you read the
+return value, so both checks are pre-flight and both refuse rather than
+proceed:
+
+```python
+await docs.revoke({"tenant": t}, reason="typo")
+# UnboundedForgetting: narrows nothing beyond the tenant. Say it out loud:
+#   revoke(..., everything=True)
+
+await docs.revoke({"batch": "b7"}, reason="recalled", expect=12)
+# BlastRadius if the filter matches anything other than 12 — counted first,
+# nothing written.
+```
+
+Neither costs anything when unused: no extra round trip is issued unless
+`expect` is given. `everything=True` follows `including_refused()` — the safe
+thing is the default, the dangerous thing exists and has a word a reviewer can
+grep for.
 
 ### An embedding is a (vector, model) pair
 
@@ -364,6 +440,9 @@ not in the vector index, for the reasons measured in `search.py`.
 ```bash
 curl -s localhost:8000/healthz | jq '.admission[0]'
 # { "revoked_total": 3,          # exact: counted when it happened
+#   "held_total": 2,             # also exact — and deliberately not added
+#   "lifted_total": 1,           #   to the line above: a climbing `lifted`
+#                                #   means a detector is being overruled
 #   "refused_at_boundary": 41,   # a LOWER BOUND, on purpose
 #   "refused_by_reason": {"deadline": 39, "unreadable": 2} }
 ```
@@ -542,6 +621,10 @@ degraded to.
   [ok  ] revocation: a revoked fact is refused on the next read, and its row stays
   [ok  ] starvation: a page of refusals is refilled, not truncated
          filled 5 of 5 after examining 46 candidates, refusing 40
+  [ok  ] clearance: a document above the caller's clearance is absent, not ranked
+  [ok  ] reversal: a hold can be lifted, an erasure cannot, and both reach the chain
+         held, unreachable, and no deadline on the evidence
+         an erasure refused to be lifted, as it must
   [ok  ] chain: the refusal ledger recomputes intact
 ```
 
@@ -828,6 +911,7 @@ checked rather than claimed:
 | `clause()` | push it into the query when it can be expressed, so the database does the work |
 | `needs_caller = True` *(optional)* | hand it the claims from `for_caller(...)`, plus `clause_for(caller)` for pushdown |
 | `bypassable = False` *(optional)* | refuse to let `including_refused()` waive it |
+| `reversible = True/False` *(optional)* | declaring it **at all** says an operator imposes this reason with a verb; the value says whether `lift()` can take it back, and whether imposing it stamps the erase deadline |
 
 ```python
 class Unreviewed:

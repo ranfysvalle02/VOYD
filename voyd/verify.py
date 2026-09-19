@@ -14,7 +14,7 @@ The tests in ``tests/`` prove it on the author's machine against the author's
 schema; this proves it on yours, against your indexes, your MongoDB version,
 your tier, and whatever your deployment actually degraded to.
 
-Five checks, each mapped to a way this has really gone wrong:
+Six checks, each mapped to a way this has really gone wrong:
 
 ``deadline``    An expired document, with the TTL monitor deliberately parked
                 so the row is *provably* still on disk, must be unreachable
@@ -38,6 +38,14 @@ Five checks, each mapped to a way this has really gone wrong:
                 that. Both enforcement points are compared against each
                 other, because the failure that matters is them disagreeing:
                 the ``$vectorSearch`` path only ever uses one of them.
+
+``reversal``    A hold can be lifted and keeps no erase deadline while held;
+                an erasure cannot be lifted by any route. The asymmetry is
+                easy to state and easy to get backwards, and a deployment
+                that has it backwards looks completely healthy -- a
+                quarantine that erases its own evidence surfaces nothing
+                until the evidence is gone, and an undoable erasure leaves
+                a chain that is intact and false.
 
 ``chain``       The refusal ledger, recomputed from entry zero. Needs no key.
 
@@ -63,7 +71,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-from .engine import Clearance, Deadline, Engine, now, revoked
+from .engine import (REVOKED, Clearance, Deadline, Engine,
+                     Irreversible, now, quarantined, revoked)
 
 DIMS = 8
 PARKED = 86_400          # seconds: the TTL monitor, effectively stopped
@@ -155,6 +164,13 @@ class Verifier:
         classified.searchable(text_paths=("text",), dimensions=DIMS)
         self.classified = classified.admitting(
             Deadline(), revoked(), Clearance(order=LEVELS))
+
+        # A third, for the reversal check. Quarantine has to be declared to
+        # exist, and declaring it on ``verify_docs`` would change what the
+        # deadline and starvation checks are measuring.
+        holdable = self.engine.model("verify_held", tenant="scope")
+        self.held = holdable.admitting(Deadline(), revoked(), quarantined())
+        self.held.witnessed_by(self.chain)
 
         await self.engine.ensure(search_wait_s=90)
         return self.docs
@@ -419,6 +435,87 @@ class Verifier:
                   "because verifying the chain needs no key)"))
         return c
 
+    async def check_reversal(self) -> Check:
+        """The asymmetry, attacked from both sides.
+
+        Two claims that are easy to state and easy to get backwards, and a
+        deployment where either one fails looks completely healthy:
+
+        - a **hold** can be lifted, and the row keeps no erase deadline
+          while it is held. A quarantine that quietly schedules its own
+          subject for deletion is an investigation with a countdown on it,
+          and nothing surfaces that until the evidence is gone.
+        - an **erasure** cannot be lifted, by any route -- including
+          ``release()``, which is the one somebody reaches for at 3am.
+
+        Checked here rather than left to the suite because the second claim
+        is the kind that a local patch, a fork, or a well-meaning
+        "unrevoke for support" endpoint would quietly remove, and the whole
+        premise of this command is that a property nobody can see being
+        violated has to be attacked rather than looked at.
+        """
+        c = Check("reversal",
+                  "a hold can be lifted, an erasure cannot, and both reach "
+                  "the chain")
+        await self.db.verify_held.insert_many([
+            {"scope": "s3", "text": "verify-flagged", "expire_at": None},
+            {"scope": "s3", "text": "verify-erased", "expire_at": None},
+        ])
+        flagged = {"scope": "s3", "text": "verify-flagged"}
+        erased = {"scope": "s3", "text": "verify-erased"}
+
+        if await self.held.quarantine(flagged, reason="voyd verify") != 1:
+            c.fail("quarantine() did not mark the document")
+            return c
+        if await self.held.find({"scope": "s3", "text": "verify-flagged"}):
+            c.fail("a quarantined document was returned by a read")
+        row = await self.db.verify_held.find_one(flagged)
+        if row is None:
+            c.fail("the held row was deleted; you cannot investigate what "
+                   "you erased")
+        elif row.get("expire_at") is not None:
+            c.fail("a hold stamped an erase deadline, so the evidence is "
+                   "scheduled for deletion while the investigation runs")
+        else:
+            c.note("held, unreachable, and no deadline on the evidence")
+
+        if await self.held.release(flagged, reason="voyd verify: cleared") != 1:
+            c.fail("release() did not lift the hold")
+        if not await self.held.find({"scope": "s3", "text": "verify-flagged"}):
+            c.fail("a released document is still unreachable, so quarantine "
+                   "is a graveyard rather than a workflow")
+
+        await self.held.revoke(erased, reason="voyd verify")
+        try:
+            await self.held.lift(REVOKED, erased, reason="voyd verify")
+        except Irreversible:
+            c.note("an erasure refused to be lifted, as it must")
+        else:
+            c.fail("a REVOKED mark was lifted. An erasure that can be undone "
+                   "is not an erasure, and the chain still says it happened")
+        if await self.held.release(erased, reason="voyd verify"):
+            c.fail("release() removed a revocation, so the front door is "
+                   "weaker than the general form it is built on")
+        if await self.held.find({"scope": "s3", "text": "verify-erased"}):
+            c.fail("a revoked document became reachable again")
+
+        # How an investigation ends when the answer is "yes, it was
+        # malicious". Reasons are not mutually exclusive, and a write path
+        # that skips already-refused documents makes this return 0 -- the
+        # row keeps only the reversible mark, and the next release() puts
+        # it back in front of a model.
+        await self.db.verify_held.insert_one(
+            {"scope": "s3", "text": "verify-escalated", "expire_at": None})
+        both = {"scope": "s3", "text": "verify-escalated"}
+        await self.held.quarantine(both, reason="voyd verify: suspected")
+        if await self.held.revoke(both, reason="voyd verify: confirmed") != 1:
+            c.fail("a quarantined document could not be erased, so an "
+                   "investigation that concludes 'malicious' has no way to "
+                   "act and the document stays one release() from a prompt")
+        else:
+            c.note("a hold can escalate to an erasure; reasons stack")
+        return c
+
     # ---- driver --------------------------------------------------------
 
     async def run(self) -> bool:
@@ -443,6 +540,7 @@ class Verifier:
                          self.check_revocation(),
                          self.check_starvation(),
                          self.check_clearance(),
+                         self.check_reversal(),
                          self.check_chain()):
                 check = await coro
                 self.checks.append(check)

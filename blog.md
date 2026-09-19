@@ -501,17 +501,47 @@ privilege escalation.
 So the reasons in the module are not one kind of thing, and a rule now declares
 which kind it is:
 
-| rule | refuses because | waivable by the audit handle |
-|---|---|---|
-| `Deadline()` | the deadline passed, or cannot be read | yes |
-| `revoked()` | somebody said forget this, now | yes |
-| `quarantined()` | held back from models, deliberately still on disk | yes |
-| `EmbeddedWith(m)` | a different model produced this vector | yes |
-| `Clearance(order=…)` | the caller is not cleared for this document | **no** |
-| `Restricted()` | the document names who may see it, and it is not this caller | **no** |
+| rule | refuses because | waivable by the audit handle | reversible |
+|---|---|---|---|
+| `Deadline()` | the deadline passed, or cannot be read | yes | — |
+| `revoked()` | somebody said forget this, now | yes | **no** |
+| `quarantined()` | held back from models, deliberately still on disk | yes | yes |
+| `EmbeddedWith(m)` | a different model produced this vector | yes | — |
+| `Clearance(order=…)` | the caller is not cleared for this document | **no** | — |
+| `Restricted()` | the document names who may see it, and it is not this caller | **no** | — |
 
-That last column is a one-word answer to a question the system did not know it
-had.
+Each of those columns is a one-word answer to a question the system did not
+know it had, and the second one took longer to find.
+
+Two of these reasons are operationally opposite and were one class. A
+**revocation** is an instruction about the world — erase this — and the things
+behind it do not get withdrawn. A **quarantine** is a hypothesis: hold this
+while somebody looks. A hold that cannot be lifted is not an investigation,
+it is a graveyard, and a graveyard is indistinguishable from a leak nobody
+looked at.
+
+Which means they want opposite treatment of the bytes, too. A revocation
+stamps the erase deadline so the reaper collects the row. A quarantine must
+not — the row is the evidence, and a hold that schedules its own subject for
+deletion surfaces nothing until the evidence is gone.
+
+That coupling lived in the caller of `revoke()`. So the next `Marked` reason
+anybody added would have got whichever half its author happened to remember,
+which is this project's own complaint about conventions, reappearing inside
+the module written to remove them. It is one word on the rule now, and it
+decides all three of: whether `lift()` works or raises, whether imposing it
+erases, and what the chain records on the way back out.
+
+And `revoke()` has no inverse, on purpose. Two reasons, either sufficient. The
+row is already scheduled for the reaper, so an undo would work, and work, and
+then silently stop working according to `ttlMonitorSleepSecs` — an API whose
+window is a storage event, in the codebase written to argue that retrieval
+guarantees must not depend on sweepers. And it would make the ledger *intact
+and false*: the chain attests a fact stopped being reachable at 14:02, the
+fact is reachable, and `verify()` still passes. Nothing about a hash chain
+detects an event that was never written to it. Re-admitting erased information
+is a new document with new provenance — a different operation, with a
+different audit story.
 
 ## Ship the experiment that would disprove you
 
@@ -698,9 +728,9 @@ Four things, in the order I would do them:
 
 **Rules as data.** A rule is still a Python object, so a per-tenant policy is a
 release. The protocol is ready for it — a rule already declares whether it
-needs the caller and whether it can be waived, and carries its own query
-fragment — but the policy itself should live on the scope document, versioned
-with it, editable by the people who get audited.
+needs the caller, whether it can be waived, and whether it can be taken back,
+and carries its own query fragment — but the policy itself should live on the
+scope document, versioned with it, editable by the people who get audited.
 
 **Cryptographic erasure.** This is the one honest gap in the pitch. "The row is
 still on disk" is proof to an engineer and a *finding* to a security reviewer.

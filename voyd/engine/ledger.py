@@ -40,6 +40,22 @@ than no proof:
   rewriting the chain from entry zero. A hash chain is only as strong as the
   most recent hash somebody *else* is holding.
 
+**Both directions, or the chain is intact and wrong.** A mark that can be
+imposed and lifted is a two-state transition, and a record of only the
+imposing half has a failure mode worse than having no record: the chain
+attests that a fact stopped being reachable at 14:02, the fact is reachable,
+and ``verify()`` passes. Nothing about a hash chain detects an event that was
+never written to it. So every lift appends a ``lifted`` entry naming the rule
+it removed, and the pair -- impose then lift -- is what an auditor
+reconstructs the document's reachability from.
+
+That is also the reason ``revoke`` has no inverse. If it did, this collection
+would need to record un-erasures, and an un-erasure is a claim the rest of
+the system cannot support: the row is already scheduled for the reaper, so
+the chain would be attesting to a state transition whose subject no longer
+exists. A reason is reversible on the chain only where it is reversible in
+the data. See ``Irreversible`` in ``errors.py``.
+
 That last limitation is the one with a fix, and it shapes the API. Every
 ``append`` returns its entry's hash, and the HTTP layer hands that back in the
 ``forget`` response. The caller who asked for the erasure walks away with a
