@@ -21,7 +21,7 @@ hands it no obligation at all: nothing is removed, nothing is scheduled,
 nothing needs a follow-up call. It changes *reachability*, and erasure stays
 where it already was -- on the scope's deadline.
 
-Which is why it costs nothing to add. Forgetting a fact is giving it a
+Which is why it costs nothing to add. Admission a fact is giving it a
 deadline in the past, the same ``expire_at`` the scope already runs on, so
 "the user asked me to forget that" and "the scope expired" are one mechanism
 collected by one TTL index. The agent gets the verb it actually needs and

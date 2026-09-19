@@ -168,7 +168,7 @@ async def test_forgetting_still_works_when_the_server_owns_the_vector(embedded):
     client-computed vectors it would be a coincidence, not a guarantee.
     """
     engine = embedded
-    notes = engine.forgetting("notes")
+    notes = engine.admission("notes")
 
     deadline = asyncio.get_running_loop().time() + 300
     while asyncio.get_running_loop().time() < deadline:

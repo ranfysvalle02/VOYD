@@ -91,7 +91,7 @@ class Memory:
         # the same boundary recall does. Building it unscoped meant a later
         # ``model(tenant=...).forgettable()`` on the same collection got this
         # handle back and quietly inherited "no tenant".
-        self.forgetting = engine.forgetting(spec.collection,
+        self.admission = engine.admission(spec.collection,
                                             at_field="expire_at",
                                             tenant=spec.scope_field)
 
@@ -135,7 +135,7 @@ class Memory:
         MongoDB's TTL monitor runs roughly once a minute, so an expired memory
         stays readable for a short window. A forgotten fact must never
         reappear in a context window, so every hit goes through
-        ``Forgetting`` -- which refuses an expired deadline, an unreadable
+        ``Admission`` -- which refuses an expired deadline, an unreadable
         one, and anything explicitly revoked, before it can be returned.
 
         That check is applied in this process rather than pushed into the
@@ -159,12 +159,12 @@ class Memory:
         hits = await self.engine.search(self.spec.collection, vector,
                                         text=text, limit=limit * 2,
                                         filters=filters)
-        # Through the Forgetting handle rather than a hand-written
+        # Through the Admission handle rather than a hand-written
         # ``[h for h in hits if live(h)]``. One object enforces the rule here
         # and on every read path written later, counts what it refused, and
         # covers revocation as well as the deadline -- which a comprehension
         # here never would have.
-        return self.forgetting.reachable(hits)[:limit]
+        return self.admission.reachable(hits)[:limit]
 
     async def forget(self, scope: Any, *, kind: str | None = None) -> int:
         """Drop a scope's memories now, rather than waiting for expiry.

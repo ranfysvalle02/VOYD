@@ -82,9 +82,9 @@ async def main() -> None:
         print("       ^ the revoked fact, returned as a normal result.")
 
         print("\n  Audit can still see it, but has to say so out loud:")
-        audit = await notes.including_forgotten().find_one({"text": SECRET})
+        audit = await notes.including_refused().find_one({"text": SECRET})
         mark = audit["forgotten"]
-        print(f"    including_forgotten() -> reason={mark['reason']!r}")
+        print(f"    including_refused() -> reason={mark['reason']!r}")
         print(f"                             unreachable since {mark['at'].isoformat()}")
 
         print("\n  And it is counted, so it is provable rather than merely true:")

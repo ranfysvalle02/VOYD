@@ -62,7 +62,7 @@ reliably as it is remembered, and the number of places to remember it grows
 with every read path anyone adds.
 
 Which is why it is no longer written that way. Those six call sites now go
-through one ``Forgetting`` handle with no unfiltered read on it, and the
+through one ``Admission`` handle with no unfiltered read on it, and the
 ``_unexpired()`` helper they each had to remember to call is deleted. This
 exhibit still reproduces the leak, because the leak is a property of the
 database and not of our code -- but the second half now shows a rule that
@@ -96,12 +96,12 @@ PARKED_TTL_SECS = 3600
 # column is what it goes through now. One object, six callers, nothing to
 # remember.
 READ_PATHS = (
-    ("get_void", "forgetting_voids.find_one()"),
-    ("list_voids", "forgetting_voids.find()"),
-    ("get_document", "forgetting_documents.find_one()"),
-    ("list_documents", "forgetting_documents.find()"),
-    ("count_indexed", "forgetting_documents.match() inside $match"),
-    ("vector_search", "forgetting_documents.reachable(), doubled fetch budget"),
+    ("get_void", "admission_voids.find_one()"),
+    ("list_voids", "admission_voids.find()"),
+    ("get_document", "admission_documents.find_one()"),
+    ("list_documents", "admission_documents.find()"),
+    ("count_indexed", "admission_documents.match() inside $match"),
+    ("vector_search", "admission_documents.reachable(), doubled fetch budget"),
 )
 
 T0 = time.monotonic()
@@ -241,7 +241,7 @@ async def main() -> int:
         # ---- the guarded query: the same search, one clause added ----------
         head("2. the same search through store.vector_search()")
         print("     identical scope, identical vector. the only difference is")
-        print("     the Forgetting handle, refusing on the read path.\n")
+        print("     the Admission handle, refusing on the read path.\n")
 
         guarded = await store.vector_search(voyd_id, vec(0.9), token="deadvoid")
         say(f"void-scoped on the EXPIRED void -> {names(guarded)}")

@@ -47,9 +47,9 @@ from .errors import (
     ScopeRequired,
 )
 from .expiry import Expiry, ExpirySpec
-from .forgetting import (DEADLINE, QUARANTINED, REVOKED, UNREADABLE, Deadline,
-                         Forgetting, ForgettingSpec, Marked, Rule,
-                         quarantined, revoked, why_unreachable)
+from .admission import (DEADLINE, QUARANTINED, REVOKED, UNREADABLE, Deadline,
+                         Admission, AdmissionSpec, Marked, Rule,
+                         quarantined, revoked, why_refused)
 from .jobs import JobQueue, PermanentFailure, backoff
 from .memory import Memory, MemorySpec
 from .model import Model
@@ -171,10 +171,10 @@ class Engine:
     def queue(self, collection: str, *, when: dict, **kw) -> JobQueue:
         return self.use(JobQueue(db=self.db, collection=collection, when=when, **kw))
 
-    def forgetting(self, collection: str, *, at_field: str = "expire_at",
+    def admission(self, collection: str, *, at_field: str = "expire_at",
                    mark_field: str = "forgotten",
                    tenant: str | None = None,
-                   rules: tuple = ()) -> Forgetting:
+                   rules: tuple = ()) -> Admission:
         """A read handle for ``collection`` that refuses forgotten facts.
 
         Installed as a trait, so ``ensure()`` indexes the mark field and
@@ -189,10 +189,10 @@ class Engine:
         # Normalised before comparison: the handle fills in the default
         # rules, so an un-defaulted spec would never equal a live one and
         # every second declaration would look like a conflict.
-        spec = ForgettingSpec(collection, at_field=at_field,
+        spec = AdmissionSpec(collection, at_field=at_field,
                               mark_field=mark_field, tenant=tenant,
                               rules=tuple(rules or ())).with_defaults()
-        existing = self._installed.get("forgetting", {}).get(collection)
+        existing = self._installed.get("admission", {}).get(collection)
         if existing is not None:
             if existing.spec != spec:
                 raise ValueError(
@@ -203,7 +203,7 @@ class Engine:
                     f"tenant, whichever was declared first would silently "
                     f"decide whether the boundary is enforced at all")
             return existing
-        return self.use(Forgetting(self.db, spec))
+        return self.use(Admission(self.db, spec))
 
     # ---- introspection -------------------------------------------------
 
@@ -233,8 +233,8 @@ class Engine:
             # Refusal is a guarantee, so it is reported like one. A climbing
             # `revoked` count with no erasure requests behind it, or any
             # `unreadable` at all, is a question worth asking.
-            "forgetting": [t.receipts()
-                           for t in self._installed.get("forgetting", {}).values()],
+            "admission": [t.receipts()
+                           for t in self._installed.get("admission", {}).values()],
             "change_streams": self.capabilities.change_streams,
             "time": {"tz": "UTC", "aware": True},
             "declared": {
@@ -251,7 +251,7 @@ __all__ = [
     "Engine", "Capabilities", "detect",
     "SearchEngine", "SearchSpec", "cosine",
     "Expiry", "ExpirySpec",
-    "Forgetting", "ForgettingSpec", "why_unreachable",
+    "Admission", "AdmissionSpec", "why_refused",
     "Rule", "Deadline", "Marked", "revoked", "quarantined",
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED",
     "Memory", "MemorySpec",

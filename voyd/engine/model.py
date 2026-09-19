@@ -23,7 +23,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 from .expiry import ExpirySpec
-from .forgetting import Forgetting
+from .admission import Admission
 from .jobs import JobQueue
 from .memory import Memory, MemorySpec
 from .search import SearchSpec
@@ -73,7 +73,7 @@ class Model:
         return self
 
     def forgettable(self, *, at_field: str = "expire_at",
-                    mark_field: str = "forgotten") -> Forgetting:
+                    mark_field: str = "forgotten") -> Admission:
         """A read handle that cannot return a forgotten fact.
 
         Declares the TTL as well, because a deadline you refuse on read and
@@ -81,11 +81,11 @@ class Model:
         refuse is the bug this exists to remove. They are one policy.
         """
         self.expiring(at_field=at_field)
-        return self.engine.forgetting(
+        return self.engine.admission(
             self.collection, at_field=at_field, mark_field=mark_field,
             tenant=self.tenant)
 
-    def admitting(self, *rules, at_field: str = "expire_at") -> Forgetting:
+    def admitting(self, *rules, at_field: str = "expire_at") -> Admission:
         """A read handle with an explicit list of reasons to refuse.
 
         ``forgettable()`` is this with the two defaults. Naming the rules is
@@ -100,7 +100,7 @@ class Model:
         read and never collected is a storage leak.
         """
         self.expiring(at_field=at_field)
-        return self.engine.forgetting(
+        return self.engine.admission(
             self.collection, at_field=at_field, tenant=self.tenant,
             rules=tuple(rules))
 

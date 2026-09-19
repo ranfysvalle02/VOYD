@@ -18,7 +18,7 @@ there is no second store to keep in step.
 - **Deadline** -- the void's ``expire_at`` is inherited by every document in it.
   Mongo's TTL reaper drops the void, the documents and their vectors together.
 - **Refusal** -- the reaper is eventual, so every read below goes through a
-  ``Forgetting`` handle that cannot return an expired or revoked row. The
+  ``Admission`` handle that cannot return an expired or revoked row. The
   deadline is enforced before the sweeper arrives, not by it.
 - **Guard** -- an access policy on the scope: a passcode on every read.
 
@@ -71,8 +71,8 @@ class MongoStore:
         self.db = None
         self.engine: Engine | None = None
         # Built in _declare(), once the engine exists.
-        self.forgetting_documents = None
-        self.forgetting_voids = None
+        self.admission_documents = None
+        self.admission_voids = None
 
     async def connect(self) -> None:
         self.client = AsyncMongoClient(self.config.uri, tz_aware=True)
@@ -160,10 +160,9 @@ class MongoStore:
         # how six read paths came to disagree about the rule in the first
         # place. The local _unexpired() helper is gone on purpose: a rule
         # you have to remember to apply is not enforced, it is suggested.
-        self.forgetting_documents = self.engine.forgetting("documents",
-                                                          tenant="voyd_id")
-        self.forgetting_voids = self.engine.forgetting("voids",
-                                                      tenant="voyd_id")
+        self.admission_documents = self.engine.admission(
+            "documents", tenant="voyd_id")
+        self.admission_voids = self.engine.admission("voids", tenant="voyd_id")
 
         self.engine.searchable(SearchSpec(
             collection="documents",
@@ -296,12 +295,12 @@ class MongoStore:
         ingest all resolve the void first, so a scope that is over cannot be
         queried or added to even in the window before the reaper runs.
         """
-        return await self.forgetting_voids.find_one(
+        return await self.admission_voids.find_one(
             {"voyd_id": voyd_id, "token": token})
 
     async def list_voids(self, voyd_id: ObjectId) -> list[dict]:
         """Only voids that are still alive. Expired ones are gone, not hidden."""
-        return await self.forgetting_voids.find(
+        return await self.admission_voids.find(
             {"voyd_id": voyd_id}, sort=("created_at", -1))
 
     # ---- documents -----------------------------------------------------
@@ -353,7 +352,7 @@ class MongoStore:
                                reason: str = "revoked") -> int:
         """Make documents unreachable now. Erasure stays the deadline's job.
 
-        The elegant part is that there is no second mechanism here. Forgetting
+        The elegant part is that there is no second mechanism here. Admission
         a fact *is* giving it a deadline in the past: ``revoke()`` stamps the
         same ``expire_at`` the scope already uses, plus a mark recording why.
         So one TTL index collects user-requested erasure and time-based
@@ -365,15 +364,15 @@ class MongoStore:
         flt: dict[str, Any] = {"voyd_id": voyd_id, "token": token}
         if doc_ids:
             flt["doc_id"] = {"$in": list(doc_ids)}
-        return await self.forgetting_documents.revoke(flt, reason=reason)
+        return await self.admission_documents.revoke(flt, reason=reason)
 
     async def get_document(self, voyd_id: ObjectId, token: str,
                            doc_id: str) -> dict | None:
-        return await self.forgetting_documents.find_one(
+        return await self.admission_documents.find_one(
             {"voyd_id": voyd_id, "token": token, "doc_id": doc_id})
 
     async def list_documents(self, voyd_id: ObjectId, token: str) -> list[dict]:
-        return await self.forgetting_documents.find(
+        return await self.admission_documents.find(
             {"voyd_id": voyd_id, "token": token}, {"embedding": 0})
 
     async def count_indexed(self, voyd_id: ObjectId, token: str) -> dict:
@@ -384,7 +383,7 @@ class MongoStore:
         """
         out = {"total": 0, "indexed": 0, "pending": 0, "failed": 0}
         cur = await self.db.documents.aggregate([
-            {"$match": self.forgetting_documents.match(
+            {"$match": self.admission_documents.match(
                 {"voyd_id": voyd_id, "token": token})},
             {"$group": {"_id": "$indexed", "n": {"$sum": 1}}},
         ])
@@ -477,10 +476,10 @@ class MongoStore:
             limit=min(limit * 2, SEARCH_MAX_LIMIT),
             filters=self._search_filter(voyd_id, token),
         )
-        # Through the engine's Forgetting handle, not a local comprehension.
+        # Through the engine's Admission handle, not a local comprehension.
         # This was the second of the two hand-written copies of the same rule;
         # one object now owns it, and counts what it refused.
-        return self.forgetting_documents.reachable(hits)[:limit]
+        return self.admission_documents.reachable(hits)[:limit]
 
     def _search_filter(self, voyd_id, token: str | None) -> dict:
         """Every search is bound to one namespace, and a void-scoped search to

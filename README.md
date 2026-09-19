@@ -21,7 +21,7 @@ structural:
 docs = engine.model("notes").forgettable()
 
 await docs.find({})                        # cannot return a forgotten fact
-await docs.including_forgotten().find({})  # the unsafe thing, named out loud
+await docs.including_refused().find({})  # the unsafe thing, named out loud
 
 await docs.revoke({"_id": x}, reason="credential leaked")
 # unreachable on the next read. The row is still on disk. That is the proof.
@@ -32,7 +32,7 @@ the next author remembering it. And because one document owns the deadline —
 one `expire_at`, inherited by every row in the scope, collected by one TTL
 index — there is no second system holding a stale copy of it. Those are the
 two halves: [one owner](#why-the-deadline-is-trustworthy) so nothing drifts,
-[refusal](#deletion-is-a-storage-event-forgetting-is-a-retrieval-guarantee) so
+[refusal](#deletion-is-a-storage-event-refusal-is-a-retrieval-guarantee) so
 the gap before deletion is not a window in which anything is served.
 
 A **void** is a retrieval scope built on both: it expires, and it refuses.
@@ -174,7 +174,7 @@ which is exactly the point — that call is application code, it is not
 transactional with the first delete, and forgetting it produces an answer
 rather than an error. Details in [`drift/README.md`](drift/README.md).
 
-## Deletion is a storage event. Forgetting is a retrieval guarantee.
+## Deletion is a storage event. Refusal is a retrieval guarantee.
 
 The headline again, with the mechanism this time:
 
@@ -201,14 +201,35 @@ helper they called by hand is deleted. A rule you have to remember to apply
 is not enforced, it is suggested. `store/mongo.py` came out six lines
 *shorter* for the change.
 
-So refusal is structural. `Forgetting` is a read handle, and there is no
-unfiltered `find` to reach for:
+So refusal is structural. `Admission` is a read handle, and there is no
+unfiltered `find` to reach for.
+
+Refusal is the guarantee; the reasons are rules, asked in order, reported by
+name. Forgetting is not the whole idea — it is the first two rules:
+
+| rule | refuses because |
+|---|---|
+| `Deadline()` | the deadline passed, or cannot be read (fails closed) |
+| `revoked()` | somebody said forget this, now |
+| `quarantined()` | held back from models, deliberately still on disk |
+
+`forgettable()` is shorthand for the first two, which is why the name is
+still honest. `admitting(...)` names them yourself:
+
+```python
+notes = engine.model("notes", tenant="t").admitting(
+    Deadline(), revoked(), quarantined())
+```
+
+A flagged document stops reaching prompts and **stays on disk** — you cannot
+investigate what you deleted. Adding that was one entry in a list, which is
+the argument for rules over branches.
 
 ```python
 docs = engine.model("notes").forgettable()
 
 await docs.find({})                        # reachable only — no flag, no filter
-await docs.including_forgotten().find({})  # deliberate, and greppable
+await docs.including_refused().find({})  # deliberate, and greppable
 
 await docs.revoke({"_id": x}, reason="credential leaked")
 ```
@@ -254,7 +275,7 @@ not in the vector index, for the reasons measured in `search.py`.
 ### What the receipts can and cannot tell you
 
 ```bash
-curl -s localhost:8000/healthz | jq '.forgetting[0]'
+curl -s localhost:8000/healthz | jq '.admission[0]'
 # { "revoked_total": 3,          # exact: counted when it happened
 #   "refused_at_boundary": 41,   # a LOWER BOUND, on purpose
 #   "refused_by_reason": {"deadline": 39, "unreadable": 2} }
@@ -277,7 +298,10 @@ breach that arrives as an answer.
 scope, collected by one TTL index, and enforced by a handle with no unfiltered
 read on it. The substrate, not a feature — see above for both halves.
 
-**Guard.** A passcode on the scope, enforced on the read path. There used to
+**Guard.** A passcode on the scope, enforced on the read path. `Guard` asks
+*may this caller read the scope*; `Admission` asks *may this document reach a
+prompt*. Caller and document — two questions, two layers, deliberately not
+one. There used to
 be two doors — query and download — and gating one without the other would
 have made search the way around the lock. There is one door now.
 
@@ -589,8 +613,8 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 | An expired void answers nothing | search, describe and ingest 404 while its rows are still on disk |
 | An expired document cannot reach a prompt | its row is still on disk and `recall` refuses it, with the reaper uninvolved |
 | A read path written in ignorance is still safe | a naive `find({})` through the handle returns neither expired nor revoked rows |
-| Forgetting does not wait for deletion | `revoke()` is unreachable on the next read, with the row still on disk |
-| Setting the guarantee aside has a name | `including_forgotten()` is the only way, and it does not mutate the handle |
+| Admission does not wait for deletion | `revoke()` is unreachable on the next read, with the row still on disk |
+| Setting the guarantee aside has a name | `including_refused()` is the only way, and it does not mutate the handle |
 | A garbage deadline fails closed | a string, int or list `expire_at` reads as expired, and never raises |
 | An unreadable deadline fails closed too | a `datetime.max` that cannot be shifted to UTC is dead, not an exception |
 | The embedding leaves with the document | after the reaper runs, no vector survives its row |
@@ -603,14 +627,14 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 | A wrong-width vector is not "indexed" | a 512-wide vector in a 1024 index is parked as `failed`, not counted as searchable |
 | The server can own the embedding | verified on Atlas: text in, no vector field stored, text query returns the right row |
 | Asking for it is safe where it is unavailable | Atlas Local refuses, the engine falls back to a client vector index, loudly |
-| Forgetting survives the server owning the vector | `revoke()` still refuses a row this process never embedded |
+| Admission survives the server owning the vector | `revoke()` still refuses a row this process never embedded |
 | A cold index cannot look empty | unready indexes route to cosine, logged and counted |
 | A lost oplog window is not silent | `windows_lost` on `health()`, separate from routine `resumes` |
 | A 500 is not input validation | an unrepresentable `ttl_seconds` and an oversized `metadata` are 422s |
 | A 429 is not a bad document | failed embeds retry; a later valid key backfills |
 | There is no way to leak a cleanup chore | no tool is named for reclaiming anything, and `forget` reclaims nothing |
-| Forgetting is reachable from the product | `POST /v1/voids/{token}/forget` and a `forget` tool, not engine-only |
-| Forgetting is not deletion renamed | after `forget`, `describe` reports 0 and the rows are still on disk |
+| Admission is reachable from the product | `POST /v1/voids/{token}/forget` and a `forget` tool, not engine-only |
+| Admission is not deletion renamed | after `forget`, `describe` reports 0 and the rows are still on disk |
 | A stale index cannot pass for a current one | a changed spec is corrected, or named in `stale_indexes` |
 | Atlas filling in its own index defaults is not drift | or every start-up would rewrite every index |
 
@@ -619,11 +643,11 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 - A tenant id must be a scalar. A dict in that position is a query operator,
   and `{"$ne": "nobody"}` used to match every tenant on all three search
   tiers — presence was checked, shape was not.
-- Forgetting is enforced on read, not by the sweeper: an expired or revoked
+- Admission is enforced on read, not by the sweeper: an expired or revoked
   document is refused by the handle every read goes through, so the minute
   before a TTL sweep is not a minute of serving it. `revoke()` is the
   immediate erasure path; the row it leaves on disk is evidence, and
-  `including_forgotten()` is the only way to see it.
+  `including_refused()` is the only way to see it.
 - Passwords and passcodes argon2; sessions and API keys stored only as SHA-256.
 - The passcode hash is stripped from every API response. Verified across every
   endpoint, not just the obvious one.

@@ -25,10 +25,10 @@ import pytest
 
 from voyd.engine import (DEADLINE, QUARANTINED, REVOKED, UNREADABLE, Deadline,
                          ScopeInvalid, ScopeRequired, quarantined, revoked,
-                         why_unreachable)
-from voyd.engine.forgetting import ForgettingSpec
+                         why_refused)
+from voyd.engine.admission import AdmissionSpec
 
-SPEC = ForgettingSpec("facts")
+SPEC = AdmissionSpec("facts")
 
 
 def at(**kw) -> datetime:
@@ -48,14 +48,14 @@ def at(**kw) -> datetime:
     ({"expire_at": []}, UNREADABLE),
 ])
 def test_every_reason_a_fact_may_not_reach_a_prompt(doc, expected):
-    assert why_unreachable(doc, SPEC) == expected
+    assert why_refused(doc, SPEC) == expected
 
 
 def test_revocation_beats_a_deadline_that_has_not_passed():
     """An erasure request does not wait for a TTL, and is not overridden by
     a generous one. Revoked is revoked."""
     doc = {"expire_at": at(days=3650), "forgotten": {"at": at(), "reason": "x"}}
-    assert why_unreachable(doc, SPEC) == REVOKED
+    assert why_refused(doc, SPEC) == REVOKED
 
 
 def test_an_unshiftable_deadline_fails_closed_rather_than_raising():
@@ -63,7 +63,7 @@ def test_an_unshiftable_deadline_fails_closed_rather_than_raising():
     exception -- an exception inside a filter is how the filter gets skipped."""
     doc = {"expire_at": datetime.max.replace(
         tzinfo=timezone(timedelta(hours=-14)))}
-    assert why_unreachable(doc, SPEC) == UNREADABLE
+    assert why_refused(doc, SPEC) == UNREADABLE
 
 
 # ---- against a real database ------------------------------------------
@@ -137,20 +137,20 @@ async def test_exists_is_reachability_not_storage(facts):
 
 # ---- the escape hatch has to work, and has to be named ----------------
 
-async def test_including_forgotten_sees_everything(facts):
+async def test_including_refused_sees_everything(facts):
     """Audit and administration need the whole picture. The point is not that
     it is impossible -- it is that it is *spelled out*."""
     _, _, docs = facts
-    everything = {d["name"] for d in await docs.including_forgotten().find({})}
+    everything = {d["name"] for d in await docs.including_refused().find({})}
     assert everything == {"pinned", "live", "expired", "revoked"}
 
 
 async def test_the_escape_hatch_does_not_leak_into_the_original_handle(facts):
-    """``including_forgotten()`` returns a new handle. If it mutated this one,
+    """``including_refused()`` returns a new handle. If it mutated this one,
     a single audit call would silently disarm refusal for the rest of the
     process."""
     _, _, docs = facts
-    await docs.including_forgotten().find({})
+    await docs.including_refused().find({})
     assert {d["name"] for d in await docs.find({})} == {"pinned", "live"}
 
 
@@ -225,7 +225,7 @@ async def test_a_revoked_fact_can_be_kept_briefly_for_proof(facts):
                       erase_after=timedelta(days=7))
 
     assert await docs.find_one({"name": "live"}) is None
-    kept = await docs.including_forgotten().find_one({"name": "live"})
+    kept = await docs.including_refused().find_one({"name": "live"})
     assert kept is not None
     assert kept["expire_at"] > datetime.now(timezone.utc) + timedelta(days=6)
 
@@ -283,7 +283,7 @@ async def test_refusals_show_up_on_engine_health(facts):
     raw = [d async for d in db.facts.find({})]
     docs.reachable(raw)
 
-    reported = engine.health()["forgetting"]
+    reported = engine.health()["admission"]
     assert len(reported) == 1
     assert reported[0]["collection"] == "facts"
     assert reported[0]["refused_at_boundary"] == 2
@@ -355,17 +355,17 @@ async def test_revoking_cannot_reach_another_tenant(tenanted):
 
 
 async def test_audit_sees_forgotten_rows_but_not_foreign_ones(tenanted):
-    """``including_forgotten`` sets aside the deadline, not the boundary.
+    """``including_refused`` sets aside the deadline, not the boundary.
 
     Seeing forgotten rows is an operational need. Seeing another tenant's
     forgotten rows is a breach with a nicer name.
     """
     _, _, docs = tenanted
     with pytest.raises(ScopeRequired):
-        await docs.including_forgotten().find({})
+        await docs.including_refused().find({})
 
     await docs.revoke({"tenant": "acme"}, reason="audit")
-    seen = await docs.including_forgotten().find({"tenant": "acme"})
+    seen = await docs.including_refused().find({"tenant": "acme"})
     assert [r["text"] for r in seen] == ["acme payroll"]
 
 
@@ -394,18 +394,18 @@ async def test_two_declarations_that_disagree_about_the_tenant_collide(core):
     engine.model("notes", tenant="scope").forgettable()
 
     with pytest.raises(ValueError) as caught:
-        engine.forgetting("notes", tenant="a_different_field")
+        engine.admission("notes", tenant="a_different_field")
     assert "already forgettable" in str(caught.value)
 
     # Declaring it the same way twice is not a conflict; it is the same handle.
     again = engine.model("notes", tenant="scope").forgettable()
-    assert again is engine.installed("forgetting")["notes"]
+    assert again is engine.installed("admission")["notes"]
 
 
 async def test_memory_scopes_its_own_handle(core):
     """The route the bug actually arrived by.
 
-    ``Memory`` builds a Forgetting handle for its collection. Built
+    ``Memory`` builds a Admission handle for its collection. Built
     unscoped, a later ``model(tenant=...).forgettable()`` on that collection
     got the unscoped object back and inherited "no tenant" -- silently
     undoing the enforcement, from a declaration that looked correct.
@@ -433,7 +433,7 @@ def test_a_rule_that_raises_cannot_open_the_gate():
     that if a raising rule were allowed to fall through, so a rule that
     throws is treated as a refusal and named.
     """
-    from voyd.engine.forgetting import ForgettingSpec, why_unreachable
+    from voyd.engine.admission import AdmissionSpec, why_refused
 
     class Explodes:
         reason = "explodes"
@@ -444,31 +444,31 @@ def test_a_rule_that_raises_cannot_open_the_gate():
         def clause(self):
             return None
 
-    spec = ForgettingSpec("facts", rules=(Explodes(),))
-    assert why_unreachable({"anything": 1}, spec) == "explodes"
+    spec = AdmissionSpec("facts", rules=(Explodes(),))
+    assert why_refused({"anything": 1}, spec) == "explodes"
 
 
 def test_the_first_refusal_is_the_one_reported():
     """Order is declared and preserved: an operator needs to know a document
     was quarantined rather than merely expired, because the responses
     differ."""
-    from voyd.engine.forgetting import ForgettingSpec, why_unreachable
+    from voyd.engine.admission import AdmissionSpec, why_refused
 
     doc = {"expire_at": at(hours=-1), "quarantined": {"by": "detector"}}
-    deadline_first = ForgettingSpec(
+    deadline_first = AdmissionSpec(
         "facts", rules=(Deadline(), quarantined()))
-    quarantine_first = ForgettingSpec(
+    quarantine_first = AdmissionSpec(
         "facts", rules=(quarantined(), Deadline()))
 
-    assert why_unreachable(doc, deadline_first) == DEADLINE
-    assert why_unreachable(doc, quarantine_first) == QUARANTINED
+    assert why_refused(doc, deadline_first) == DEADLINE
+    assert why_refused(doc, quarantine_first) == QUARANTINED
 
 
 def test_a_rule_with_no_server_side_clause_is_still_enforced():
     """``clause()`` is an optimisation. A rule that cannot express itself in
     a query must still refuse on the way out, or making rules pluggable
     would be a way to lose the guarantee quietly."""
-    from voyd.engine.forgetting import ForgettingSpec, why_unreachable
+    from voyd.engine.admission import AdmissionSpec, why_refused
 
     class OnlyInPython:
         reason = "computed"
@@ -479,9 +479,9 @@ def test_a_rule_with_no_server_side_clause_is_still_enforced():
         def clause(self):
             return None
 
-    spec = ForgettingSpec("facts", rules=(OnlyInPython(),))
-    assert why_unreachable({"score": -1}, spec) == "computed"
-    assert why_unreachable({"score": 1}, spec) is None
+    spec = AdmissionSpec("facts", rules=(OnlyInPython(),))
+    assert why_refused({"score": -1}, spec) == "computed"
+    assert why_refused({"score": 1}, spec) is None
 
 
 async def test_quarantine_holds_a_document_back_without_destroying_it(core):
@@ -505,7 +505,7 @@ async def test_quarantine_holds_a_document_back_without_destroying_it(core):
     assert [d["text"] for d in await notes.find({"t": "a"})] == ["ordinary note"]
     assert await db.notes.count_documents({"t": "a"}) == 2, \
         "the evidence must survive: you cannot investigate what you deleted"
-    assert len(await notes.including_forgotten().find({"t": "a"})) == 2
+    assert len(await notes.including_refused().find({"t": "a"})) == 2
 
 
 async def test_a_quarantined_search_hit_is_refused_and_counted(core):

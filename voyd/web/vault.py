@@ -18,7 +18,7 @@ Search is always filtered by ``voyd_id``, and narrowed to ``token`` when the
 caller scoped it to one void. Both filters are pushed into the search index --
 the void *is* the retrieval boundary, and a boundary enforced after the fact in
 Python is not one. The *deadline* is the exception and goes the other way:
-every read resolves through a ``Forgetting`` handle, because a TTL index
+every read resolves through an ``Admission`` handle, because a TTL index
 collects eventually and a scope that is over has to read as gone now.
 
 Request bodies are Pydantic models, so the shape of a call is declared once and
@@ -340,7 +340,7 @@ async def forget(request: Request, token: str,
     given no way to remove anything. The rows stay on disk and stop being
     reachable, and the scope's existing deadline still owns erasure.
 
-    Which is the whole design collapsing into one field. Forgetting a fact is
+    Which is the whole design collapsing into one field. Admission a fact is
     giving it a deadline in the past -- the same ``expire_at`` the scope
     already uses -- so a subject erasure request and an ordinary expiry are
     the same mechanism, collected by the same TTL index. There is no erasure

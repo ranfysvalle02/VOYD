@@ -12,7 +12,7 @@ scheduled, and the caller is handed no follow-up obligation. The rows stay on
 disk and stop being reachable; the scope's deadline still owns erasure.
 
 Which is the design collapsing into one field rather than growing a second
-mechanism. Forgetting a fact is giving it a deadline in the past -- the same
+mechanism. Admission a fact is giving it a deadline in the past -- the same
 ``expire_at`` the scope already runs on -- so a subject erasure request and an
 ordinary expiry are collected by the same TTL index and reclaimed by the same
 change-stream event. There is no erasure subsystem here because an erasure

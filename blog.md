@@ -218,10 +218,10 @@ written by the people making the argument. A database that owned the deadline
 an unauthorised read is unreadable — would not make that mistake cheaper to
 avoid. It would make it unavailable.
 
-So that is what the deadline became. `Forgetting` is a read handle with no
+So that is what the deadline became. `Admission` is a read handle with no
 unfiltered `find` on it: every read through it refuses expired, revoked and
 unreadable facts, and seeing everything requires saying
-`including_forgotten()` out loud, where a reviewer can grep for it. The two
+`including_refused()` out loud, where a reviewer can grep for it. The two
 hand-written copies of the rule — one in `recall()`, one in the void search
 path — are gone; one object answers the question now, and the test that
 matters writes the *naive* read path on purpose and asserts it is still safe.

@@ -31,7 +31,7 @@ watches it happen.
 call site remembers, because a rule you have to remember to apply is not
 enforced. ``engine.model(...).forgettable()`` returns a handle with no
 unfiltered read on it: expired, revoked and unreadable facts are refused on
-the way out, and seeing everything requires saying ``including_forgotten()``
+the way out, and seeing everything requires saying ``including_refused()``
 where a reviewer can grep for it. ``revoke()`` makes a fact unreachable on the
 next read while its row is still on disk -- deletion is a storage event,
 refusal is a retrieval guarantee, and only the second one can be immediate.

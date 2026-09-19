@@ -1,4 +1,4 @@
-"""Forgetting as a retrieval guarantee, not a storage event.
+"""Admission as a retrieval guarantee, not a storage event.
 
 Every database can delete. None of them can *refuse*. That distinction is the
 whole point of this module:
@@ -22,14 +22,14 @@ when it learned the lesson. Then it grows a second read path, and a fifth,
 and the rule is only as good as the next author's memory. A guarantee that
 must be remembered is not enforced, it is suggested.
 
-So this makes refusal structural. ``Forgetting`` is a read handle, and every
+So this makes refusal structural. ``Admission`` is a read handle, and every
 read through it refuses forgotten facts. There is no "remember to filter"
 step, because there is no unfiltered ``find`` to reach for. Seeing everything
 remains possible -- audit and administration need it -- but it has a name a
 reviewer can grep for:
 
     await docs.find({"owner": who})                        # reachable only
-    await docs.including_forgotten().find({"owner": who})  # deliberate
+    await docs.including_refused().find({"owner": who})  # deliberate
 
 The failure mode is inverted. Before, you had to remember to be safe. Now you
 have to declare that you want the unsafe thing.
@@ -73,7 +73,7 @@ from typing import Any, Iterable, Protocol
 from .errors import require_tenant
 from .time import aware, living, now
 
-log = logging.getLogger("engine.forgetting")
+log = logging.getLogger("engine.admission")
 
 # Why a fact was refused. Stable strings: they are counted, logged, and end up
 # in an operator's dashboard.
@@ -180,7 +180,7 @@ def quarantined(field: str = "quarantined") -> Marked:
 
 
 @dataclass(frozen=True)
-class ForgettingSpec:
+class AdmissionSpec:
     """Where a collection keeps the two facts that make a document forgettable."""
 
     collection: str
@@ -203,7 +203,7 @@ class ForgettingSpec:
     # by the application through ``admitting()``.
     rules: tuple[Rule, ...] = ()
 
-    def with_defaults(self) -> ForgettingSpec:
+    def with_defaults(self) -> AdmissionSpec:
         if self.rules:
             return self
         return replace(self, rules=(Deadline(self.at_field),
@@ -264,7 +264,7 @@ class Receipts:
         }
 
 
-def why_unreachable(doc: dict, spec: ForgettingSpec,
+def why_refused(doc: dict, spec: AdmissionSpec,
                     *, when: datetime | None = None) -> str | None:
     """The first reason this document may not reach a prompt, or ``None``.
 
@@ -293,7 +293,7 @@ def why_unreachable(doc: dict, spec: ForgettingSpec,
     return None
 
 
-class Forgetting:
+class Admission:
     """A read handle that cannot return a forgotten fact.
 
     Install it on a model (``.forgettable()``) or build it directly. It is a
@@ -301,9 +301,9 @@ class Forgetting:
     be cheap to filter on, or it will be skipped at scale.
     """
 
-    kind = "forgetting"
+    kind = "admission"
 
-    def __init__(self, db, spec: ForgettingSpec):
+    def __init__(self, db, spec: AdmissionSpec):
         self.db = db
         self.spec = spec.with_defaults()
         spec = self.spec
@@ -333,7 +333,7 @@ class Forgetting:
 
     # ---- the escape hatch, deliberately named --------------------------
 
-    def including_forgotten(self) -> Forgetting:
+    def including_refused(self) -> Admission:
         """A handle that returns everything, including what was forgotten.
 
         Audit, administration and the reaper itself need this. It is a
@@ -344,7 +344,7 @@ class Forgetting:
         is an operational need; seeing another tenant's forgotten rows is a
         breach with a nicer name.
         """
-        clone = Forgetting(self.db, self.spec)
+        clone = Admission(self.db, self.spec)
         clone.receipts_log = self.receipts_log
         clone._include = True
         return clone
@@ -389,7 +389,7 @@ class Forgetting:
         """
         if doc is None or self._include:
             return doc
-        reason = why_unreachable(doc, self.spec, when=when)
+        reason = why_refused(doc, self.spec, when=when)
         if reason is None:
             return doc
         self.receipts_log.record(reason)
@@ -462,7 +462,7 @@ class Forgetting:
         shortly after, in that order, because the reverse order is the bug.
 
         ``erase_after`` keeps the tombstone readable for a while through
-        ``including_forgotten()``, for cases where you must prove *when* a fact
+        ``including_refused()``, for cases where you must prove *when* a fact
         stopped being reachable. The default erases as soon as the reaper runs.
         """
         stamp = now()
