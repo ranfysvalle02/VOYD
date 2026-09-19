@@ -142,12 +142,25 @@ async def revoking(core, perimeter):
     return notes, chain
 
 
-async def test_an_owned_sink_is_told_and_the_acknowledgement_is_recorded(core):
+async def test_an_owned_sink_is_told_which_ids_not_merely_that_something(core):
+    """This asserted only the *reason* once, and missed the bug under it.
+
+    The ids were resolved for inherited refusal and reused here, so on a
+    collection tracking no lineage -- the default -- the sink received an
+    empty list. It was told that something had been erased and not what,
+    and acknowledged. A propagation that names nothing is worse than none,
+    because it produces receipts.
+    """
+    engine, db = core
     cache = Cache()
     notes, chain = await revoking(core, Perimeter().register(cache))
+    erased = (await db.notes.find_one({"doc_id": "d1"}))["_id"]
+    await db.notes.insert_one({"t": "a", "doc_id": "untouched"})
+
     await notes.revoke({"t": "a", "doc_id": "d1"}, reason="erasure request")
 
-    assert cache.told and cache.told[0][1] == "erasure request"
+    assert cache.told == [([str(erased)], "erasure request")], \
+        "the sink must be told which ids, and only those"
     acks = (await chain.entries(tenant="a"))[-1]["detail"]["perimeter"]
     assert [(a["sink"], a["acked"]) for a in acks] == [("redis", True)]
 

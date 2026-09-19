@@ -170,24 +170,31 @@ class LocalFile(Custody):
     def _material(self) -> bytes:
         p = Path(self.path).expanduser()
         if p.exists():
-            raw = p.read_bytes().strip()
-            # Base64 when it decodes to the right length -- a key that has
-            # been through a shell, an env var or a secrets manager arrives
-            # text-shaped, and silently hashing it into the wrong 96 bytes
-            # would produce a deployment that cannot read yesterday's data.
+            raw = p.read_bytes()
+            # Raw bytes first, and **never stripped**. A master key is 96
+            # bytes of entropy, so ~4.8% of them begin or end with a byte
+            # that ``bytes.strip()`` treats as whitespace -- measured, not
+            # estimated. Stripping first made one file in twenty read back
+            # short and unusable, which presents as a deployment that can
+            # no longer decrypt anything it wrote, intermittently, with no
+            # cause visible at the point of failure.
+            if len(raw) == LOCAL_KEY_BYTES:
+                return raw
+            # Only then as text: a key that has been through a shell, an
+            # env var or a secrets manager arrives base64-shaped, and
+            # *that* is worth stripping, because the whitespace around it
+            # is punctuation rather than key material.
             try:
-                decoded = base64.b64decode(raw, validate=True)
+                decoded = base64.b64decode(raw.strip(), validate=True)
                 if len(decoded) == LOCAL_KEY_BYTES:
                     return decoded
             except Exception:  # noqa: BLE001 - not base64 is a normal answer
                 pass
-            if len(raw) != LOCAL_KEY_BYTES:
-                raise ValueError(
-                    f"{p} holds {len(raw)} bytes; a local master key is "
-                    f"exactly {LOCAL_KEY_BYTES} raw bytes or its base64. "
-                    f"Refusing to guess: a wrong key is not an error, it is "
-                    f"every document becoming unreadable")
-            return raw
+            raise ValueError(
+                f"{p} holds {len(raw)} bytes; a local master key is exactly "
+                f"{LOCAL_KEY_BYTES} raw bytes or its base64. Refusing to "
+                f"guess: a wrong key is not an error, it is every document "
+                f"becoming unreadable")
         material = os.urandom(LOCAL_KEY_BYTES)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.touch(mode=0o600)

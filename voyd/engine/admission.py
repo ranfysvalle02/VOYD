@@ -1730,12 +1730,18 @@ class Admission:
         the sentence an auditor needs, and a single total cannot say it.
         """
         field = self.spec.lineage_field
-        if not field:
+        # The ids are needed by two callers for two reasons, and the first
+        # version resolved them only for the second -- so on the default
+        # collection, which tracks no lineage, the perimeter was handed an
+        # empty list and every sink was told that *something* had been
+        # erased without being told what. A propagation that names nothing
+        # is worse than none: it produces acknowledgements.
+        if not (field or self.perimeter):
             return [], 0
         ids = [d["_id"] async for d in
                self.db[self.collection].find(query, {"_id": 1})]
-        if not ids:
-            return [], 0
+        if not (ids and field):
+            return ids, 0
         n = await self.db[self.collection].count_documents(
             {field: {"$in": ids}})
         return ids, n
@@ -2038,6 +2044,9 @@ class Admission:
         detail: dict = {}
         if inherited:
             detail |= {"direct": len(ids), "inherited": inherited}
+        # `lift` resolves its own ids; `impose` only resolves them when
+        # something downstream needs them, so the extra round trip is paid
+        # by the deployments that use it and by nobody else.
         if self.perimeter is not None and not rule.reversible:
             # Told after the rows are marked, never before: the fact is
             # already unreachable here, and an erasure must not wait on --

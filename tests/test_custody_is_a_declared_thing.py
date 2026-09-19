@@ -140,6 +140,27 @@ def test_a_local_key_file_is_created_once_and_reused(tmp_path):
         "a second process must get the same key, or the data is gone"
 
 
+def test_a_key_file_is_never_stripped(tmp_path):
+    """The bug this caught, and it presented as a 5%-of-runs flake.
+
+    A master key is 96 bytes of entropy, so **4.8% of them** begin or end
+    with a byte ``bytes.strip()`` calls whitespace -- measured over 20,000
+    samples, not estimated. Stripping on read made one file in twenty come
+    back short, which is a deployment that can no longer decrypt anything
+    it wrote, intermittently, with nothing visible at the point of
+    failure.
+
+    Pinned deterministically with the worst case: a key that is whitespace
+    at both ends.
+    """
+    material = b"\n" + os.urandom(LOCAL_KEY_BYTES - 2) + b" "
+    assert len(material) == LOCAL_KEY_BYTES
+    path = tmp_path / "edgy.key"
+    path.write_bytes(material)
+
+    assert LocalFile(path=path).credentials()["key"] == material
+
+
 def test_a_base64_key_file_is_accepted_because_secrets_arrive_text_shaped(
         tmp_path):
     """Through a shell, an env var or a secrets manager, a key is text.

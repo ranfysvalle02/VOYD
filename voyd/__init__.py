@@ -65,6 +65,21 @@ sufficient alone -- the key cache is a window refusal has already closed, and
 refusal is local in a way the missing key is not. See ``examples/shred.py``,
 which measures both.
 
+Refusal is **answerable after the fact**, too. ``as_of(t)`` replays the scope
+as it stood at an instant and ``reachability_at()`` answers for one document
+with three verdicts, not two -- a row the reaper took is ``unknown``, because
+reporting it as "not reachable" would let a deployment clear itself by
+pointing at the absence of the evidence. ``receipt_for(page)`` hashes what
+reached a prompt, the reasons in force and the ledger head, so *what did the
+model see when it said that* is a value anybody can recompute.
+
+And the reasons themselves can be **data**: ``compile_policy()`` turns a
+``deny`` clause stored on a scope into a rule indistinguishable from a
+hand-written one, refusing at boot anything it cannot express as both a
+per-document check and a query clause -- half of that pair is a hole
+``$vectorSearch`` walks through. What lies outside this process is
+enumerated rather than claimed: see ``engine.perimeter``.
+
 Refusal is also **provable**. Every revocation is a link in an append-only
 hash chain, so "this fact stopped being reachable at 14:02" is a claim
 somebody can check rather than one they have to take -- and the receipt handed

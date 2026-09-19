@@ -747,35 +747,46 @@ tiers is not one.
 
 ## What is not done
 
-Four things, in the order I would do them, and the first is the one that
-matters.
+Three things, and the first is a limit rather than a gap.
 
-**Refusal has a perimeter and does not know where it is.** Refusal governs
-this read path. It does not govern the copies made downstream of it — an
-embedding cache, a rerank cache, a provider-side prompt cache, a vector
-index in another service populated from here, a message a bot posted last
-week. Revoke a fact and every one of those keeps serving it.
+**Refusal has a perimeter, and now it knows where it is — which is not the
+same as controlling it.** Refusal governs this read path. It does not govern
+the copies downstream: an embedding cache, a rerank cache, a provider-side
+prompt cache, a mirrored index, a message a bot posted last week.
 
-Inherited refusal solved exactly this shape one layer in: a summary written
-back into the collection now goes with its source. The same argument applies
-one layer *out*, where I have not made it. Nobody's retrieval stack is one
-database, so this is the question a customer's architecture diagram asks
-immediately, and right now the honest answer is that the guarantee stops at
-the edge of the process.
+I tried to build the obvious answer — register sinks, require an
+acknowledgement, and let an unacked sink mean the fact is refused everywhere
+until it acks — and writing it out is what showed it to be theatre. The fact
+is *already* refused locally, so marking it refused again changes nothing,
+and the unacked sink is still serving its copy. Worse, if an unreachable
+cache can block a revocation, erasure depends on cache uptime.
 
-The shape I would try: downstream holders register as sinks, and a
-revocation must be *acknowledged* — a sink that has not acked makes the fact
-refused everywhere until it does, rather than the revocation optimistically
-reporting success. The hard part is that an unreachable sink must not become
-an outage that blocks erasure requests, and must not become a checkbox
-either. I do not have a clean answer to that yet, which is why this is in
-this section rather than in the repository.
+    You cannot enforce refusal in a system you do not control.
+    You can propagate, observe, and report.
 
-**Rules as data.** A rule is still a Python object, so a per-tenant policy is a
-release. The protocol is ready for it — a rule already declares whether it
-needs the caller, whether it can be waived, and whether it can be taken back,
-and carries its own query fragment — but the policy itself should live on the
-scope document, versioned with it, editable by the people who get audited.
+So what shipped is smaller and honest about it. Copies split three ways and
+each gets a different verb: **ciphertext** is *erased* (shredding the key
+covers every copy with no call to make — which turned out to be the answer
+that was already built and under-claimed); **plaintext you own** is *told*,
+best effort, with the acknowledgement recorded and never enforced;
+a **consequence** — the Slack message, the fine-tune — can only be *found*,
+which is what context receipts are for. A broken sink cannot fail an
+erasure, and the most useful thing in the module is `describe()`, because
+most teams cannot answer "who else holds this fact" at all.
+
+What is genuinely left is that a sink is an integration, and I decided
+against shipping vendor adapters: a Redis adapter here is one somebody has to
+keep current, for a call that is one `DEL` in the caller's own code. The
+mitigation is that registering costs three lines, and a `sealed` claim is
+audited rather than believed.
+
+**Who may edit the policy.** This is the one I would do next, and I only
+noticed it because it blocked three separate things in a row: holds are not
+on the HTTP surface, sealing is not on the HTTP surface, and a policy cannot
+be loaded from the scope document that should own it — each time because
+there is no answer to *who may release, who may shred, who may change the
+rule*. The passcode gates a scope; it says nothing about a review workflow.
+Three blocks on one missing abstraction is a message about what to build.
 
 **The admission overhead as a published number.** p50/p99 per hit. The obvious
 reviewer objection is "so you pay on every read, forever," and the answer

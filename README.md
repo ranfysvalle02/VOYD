@@ -831,8 +831,11 @@ measuring the other's setting.
 ## The engine
 
 `import voyd` is `Engine` and a MongoDB driver — that is the whole install.
-Everything else is an extra: `app`, `voyage`, `mcp` (and `drift`, for the
-exhibit's argument-by-counterexample). CI asserts that importing `Engine` does
+Everything else is an extra: `app`, `voyage`, `mcp`, `crypto` (and `drift`,
+for the exhibit's argument-by-counterexample). Refusal, inherited refusal,
+holds, the chain, policies, `as_of` and the perimeter all work on the bare
+install — `crypto` buys the erasure that survives a backup, and nothing
+else depends on it. CI asserts that importing `Engine` does
 not load FastAPI. There is no `r2` extra any more, which is the object-storage
 section below arriving in the install list: text is a field on the row, so
 there is no second store to add a dependency for.
