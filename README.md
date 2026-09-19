@@ -21,22 +21,42 @@ structural:
 docs = engine.model("notes").forgettable()
 
 await docs.find({})                        # cannot return a forgotten fact
+await docs.search(vector, text="P0301")  # nor can the search path
 await docs.including_refused().find({})  # the unsafe thing, named out loud
 
 await docs.revoke({"_id": x}, reason="credential leaked")
 # unreachable on the next read. The row is still on disk. That is the proof.
 ```
 
-There is no unfiltered `find` on that handle, so refusal does not depend on
-the next author remembering it. And because one document owns the deadline —
-one `expire_at`, inherited by every row in the scope, collected by one TTL
-index — there is no second system holding a stale copy of it. Those are the
-two halves: [one owner](#why-the-deadline-is-trustworthy) so nothing drifts,
+There is no unfiltered read on that handle — no `find`, and no `search` —
+so refusal does not depend on the next author remembering it. And because one
+document owns the deadline — one `expire_at`, inherited by every row in the
+scope, collected by one TTL index — there is no second system holding a stale
+copy of it. Those are the two halves:
+[one owner](#why-the-deadline-is-trustworthy) so nothing drifts,
 [refusal](#deletion-is-a-storage-event-refusal-is-a-retrieval-guarantee) so
 the gap before deletion is not a window in which anything is served.
 
-A **void** is a retrieval scope built on both: it expires, and it refuses.
-`pip install voyd` is the library; the service on top is five HTTP calls.
+Taking that seriously past the first commit turned out to mean three more
+things, each of which is a section below. A refusal has to be **legible** —
+`admission.refused` on every answer, because a model handed a short list
+describes it as the whole truth. It has to be **provable** — an append-only
+hash chain, and a receipt you keep, because the party holding the log is the
+party being audited. And it has to know **who is asking** — clearance is a
+claim on the caller compared against a field on the document, since a
+scope-level lock has only two settings and neither one is right.
+
+A **void** is a retrieval scope built on those two halves: it expires, and it
+refuses. `pip install voyd` is the library; the service on top is five HTTP
+calls.
+
+Two documents beside this one. [**blog.md**](blog.md) is the argument at
+length — the four-owners exhibit, the same bug arriving three times in
+different clothes, the two bugs in the audit chain that made it worthless
+while it looked healthy — and every number in it is re-runnable from `bench/`
+and `drift/`. [**ideas.md**](ideas.md) is what is worth building next, in
+order and with the reasoning, including what is deliberately *not* being
+built.
 
 ## See it forget
 
@@ -101,6 +121,12 @@ curl -X POST http://acme.voyd.com/v1/voids/k6kC2pJz/forget \
 # -> {"forgotten": 1, "unreachable_since": "...", "note": "the rows are
 #     still on disk and are erased by the scope's deadline, not by this call"}
 ```
+
+There is a sixth, and it is deliberately not in that list because nothing in
+the working loop needs it: `GET /v1/voids/{token}/proof` returns the
+tamper-evident record of every refusal in the namespace. Five calls to use the
+thing; the sixth is for the conversation afterwards. See
+[the ledger](#the-ledger-is-the-part-that-is-a-ledger).
 
 Embedding is asynchronous, so `GET /v1/voids/{token}` is not an afterthought:
 "added" and "searchable" are different facts, and an index that is still
@@ -202,17 +228,46 @@ is not enforced, it is suggested. `store/mongo.py` came out six lines
 *shorter* for the change.
 
 So refusal is structural. `Admission` is a read handle, and there is no
-unfiltered `find` to reach for.
+unfiltered `find` to reach for — nor an unfiltered `search`, which took two
+more passes to get right, because the same bug came back twice wearing
+different clothes.
+
+The second time, six read paths became two that each had to *remember to wrap*
+the search primitive — and each wrote out its own fetch-budget guess, the same
+wrong constant twice. A convention with two instances is a convention about to
+fail a third time. So the handle owns the query as well as the rule:
+
+```python
+await docs.search(vector, text="P0301", limit=5, filters={"tenant": t})
+```
+
+`engine.search` is still there and still unfiltered, because it is the
+*primitive*: the deadline is deliberately not in the vector index, so a
+`$vectorSearch` hit has never been filtered by anything. That makes it the one
+genuine footgun in the engine, so reaching for it is no longer a matter of
+having read the docstring —
+`tests/test_no_module_reaches_past_the_handle.py` walks the AST of every module
+in the package and asserts none does. Two files are exempt, each for a stated
+reason: `admission.py`, which is where the wrapping lives, and `verify.py`,
+which calls it deliberately to assert the unwrapped version really does leak.
 
 Refusal is the guarantee; the reasons are rules, asked in order, reported by
 name. Forgetting is not the whole idea — it is the first two rules:
 
-| rule | refuses because |
-|---|---|
-| `Deadline()` | the deadline passed, or cannot be read (fails closed) |
-| `revoked()` | somebody said forget this, now |
-| `quarantined()` | held back from models, deliberately still on disk |
-| `EmbeddedWith(m)` | a different model produced this vector |
+| rule | refuses because | waivable by `including_refused()` |
+|---|---|---|
+| `Deadline()` | the deadline passed, or cannot be read (fails closed) | yes |
+| `revoked()` | somebody said forget this, now | yes |
+| `quarantined()` | held back from models, deliberately still on disk | yes |
+| `EmbeddedWith(m)` | a different model produced this vector | yes |
+| `Clearance(order=…)` | the caller is not cleared for this document | **no** |
+| `Restricted()` | the document names who may see it, and it is not this caller | **no** |
+
+That last column is the load-bearing one. The first four say a fact is
+*forgotten*, and seeing what was forgotten is exactly the job the audit handle
+exists for. The last two say *this caller* may not have it, which is not a
+forgetting reason and not that handle's to waive — or "let me see the deleted
+rows" becomes a privilege escalation. A rule declares which kind it is.
 
 `forgettable()` is shorthand for the first two, which is why the name is
 still honest. `admitting(...)` names them yourself:
@@ -319,6 +374,188 @@ drops them server-side. Counting those would mean issuing every read twice. It
 is a signal, not a ledger: any `unreadable` at all means something is writing
 deadlines it shouldn't.
 
+### The ledger is the part that is a ledger
+
+Counters answer *how much has this process refused*. An auditor asks something
+narrower: *show me that this fact stopped being reachable at 14:02, and show me
+the record has not been edited since*. So every revocation is a link in an
+append-only hash chain — `sha256(seq || prev || entry)` — and each link commits
+to its predecessor, so no entry can be removed, reordered or backdated without
+breaking every hash after it.
+
+```bash
+curl -X POST .../forget -d '{"doc_ids": ["d1"], "reason": "credential leaked"}'
+# -> "receipt": {"seq": 0, "hash": "9cd69b1b...", "prev": "0000..."}
+
+curl .../v1/voids/k6kC2pJz/proof
+# -> "chain": {"intact": true, "entries": 2, "head": "4d71cc06...", "signed": false}
+```
+
+**Keep the receipt.** That is the design, not a nicety. A hash chain is
+evidence against somebody who cannot rewrite it, and the operator of this
+database can: wipe the collection, rebuild it without the awkward entry, and
+what remains verifies perfectly. What falsifies that is the hash the caller was
+handed *before the dispute existed*. Verification itself needs no key —
+`intact` is arithmetic over data you are being given — and the HMAC on the head
+is reported as `signed` because it is an attestation to whoever trusts the key
+holder, not a public proof.
+
+The response also states what it does **not** prove, in the payload rather than
+only here: not that any row was deleted (they deliberately stay on disk), and
+not that individual reads were refused — that is enforced on every read, and
+recording it would cost a write per refused hit. Two further properties fall
+out of taking this seriously:
+
+- **The chain never expires.** Every other collection here inherits one
+  deadline from one document. A proof collected by the same TTL index as the
+  thing it proves is a coincidence with a short life, so this collection has no
+  TTL index and a test asserts the absence.
+- **An entry never carries the document's text.** It is the one collection with
+  no deadline, so a quoted secret would outlive every mechanism built to forget
+  it. Ids and reasons only, also asserted.
+
+### Refusal is part of the answer
+
+A read that refuses returns a shorter list, and a shorter list is ambiguous:
+"nothing else matched" and "four more matched and were forgotten" are the same
+three hits. The caller is usually a model, which will describe what it got as
+what exists.
+
+```bash
+curl -X POST .../search -d '{"query": "pension liability"}'
+# -> "matches": [],
+#    "admission": {"refused": [{"reason": "quarantined", "count": 3}],
+#                  "starved": false}
+```
+
+Three facts matched and are being withheld — a reason to say so, or to ask, and
+not a reason to answer as though the scope were empty. The MCP `search` tool
+documents the field to the model for exactly that reason. No other vector
+database can offer this, because none of them know *why* a row is missing.
+
+### A page of refusals is refilled, not truncated
+
+Enforcing the deadline on read means forgotten documents are fetched and then
+dropped — they spend the fetch budget. That budget was a fixed `limit * 2` in
+both read paths, with a docstring admitting the worst case. The worst case was
+worse than the docstring:
+
+```
+40 expired rows ahead of 6 live ones, limit=5  ->  0 hits
+```
+
+Zero. All six live rows indexed, queryable and on disk, and the caller got an
+empty list indistinguishable from an empty scope — the same
+fewer-rows-instead-of-an-error shape this codebase blocks startup over.
+
+`Admission.saturate()` owns the budget now: it re-asks for candidates, sizing
+each round from the refusal rate it just measured, until the page is full or the
+candidates are genuinely exhausted. It returns a `Page` — a `list`, so no caller
+had to change — carrying `refused`, `examined` and `starved`.
+
+`starved` is narrow on purpose: the page is short **and** the search gave up
+while candidates remained. A short answer over an exhausted candidate list is
+the whole truth, however many refusals it took to establish. The first
+definition here flagged those too, and `voyd verify` caught it doing so on a
+healthy deployment — a warning that fires when nothing is wrong is a warning
+people learn to ignore.
+
+## Who is asking is part of the question
+
+`Guard` asks *may this caller read the scope*. `Admission` asks *may this
+document reach a prompt*. Neither asks the one that actually leaks: *may this
+document reach **this** caller's prompt*.
+
+A scope-level lock is all-or-nothing, so the moment one document in a scope is
+more sensitive than the rest, the available answers are "everyone gets
+everything" and "split the scope" — and one retrieval boundary per sensitivity
+level is four owners of one deadline all over again. So sensitivity is a field
+on the document, clearance is a claim on the caller, and they are compared per
+hit by the layer that already refuses things:
+
+```python
+docs = engine.model("docs", tenant="t").admitting(
+    Deadline(), revoked(), Clearance(order=("public", "internal", "secret")))
+
+await docs.for_caller({"clearance": "internal"}).search(vector, filters={"t": t})
+# "secret" documents are not lower-ranked. They are not returned.
+```
+
+`for_caller` returns a **new handle**, and that is load-bearing rather than
+stylistic: `engine.admission()` deduplicates per collection and hands every
+request the same object, so a version that assigned to it would make the last
+request's identity the current one, under concurrency, inside an access check.
+That bug does not error and does not reproduce. There is a test that
+interleaves twelve requests specifically because it is the only place it would
+ever be caught.
+
+`Clearance` fails closed in four directions, which is the argument for a rule
+object over a comparison written at a call site:
+
+| | and it is refused, because |
+|---|---|
+| the caller has no clearance claim | absence is the lowest level, not a pass |
+| the document's label is not in `order` | an unrecognised classification is not a low one |
+| the document has no label at all | untagged is not public — or every row predating the policy is world-readable |
+| **no caller is bound at all** | *raises.* Both answers are wrong: everything is the breach, nothing looks like an empty scope |
+
+The last row is the one that came from writing the example rather than the
+tests. Unbound, the query clause permits no level — so reads came back empty
+and `revoke()` matched zero rows and **reported success**, telling the caller a
+fact was unreachable when it was not. A silent no-op on the forget path is the
+worst failure available here, so it raises `CallerRequired` instead of picking
+an answer. `for_caller({})` is the distinct, legitimate case: authenticated,
+holding no claims, entitled to nothing.
+
+`including_refused()` cannot waive any of this — that is the last column of the
+[rules table](#deletion-is-a-storage-event-refusal-is-a-retrieval-guarantee)
+above, and the reason rules declare which kind they are.
+
+This is engine-only on purpose. The HTTP product has one credential and no
+claims worth trusting — a handle that believed `{"clearance": "secret"}`
+because a request said so would be an authorisation system whose only input is
+the attacker's. Claims come from whatever already authenticated the caller.
+
+## Verify it on your own deployment
+
+Every retrieval system's README makes claims; this one ships the experiment
+that would disprove them. That asymmetry matters because the failure is *silent
+by construction* — a forgotten document answering a query, scored and
+well-formed, with nothing logged — and a property whose violation is invisible
+cannot be checked by looking at it.
+
+```bash
+voyd verify --uri "$MONGO_URI"    # exit 0 = the guarantee held here
+```
+
+It plants documents that must not be reachable, asks for them through every
+read path that carries the guarantee, and fails if any of them answers — against
+your indexes, your MongoDB version, and whatever tier your deployment actually
+degraded to.
+
+```
+  mongodb 8.2.11  tier=hybrid  search=True
+
+  [ok  ] deadline: an expired document is unreachable while its row is on disk
+         the row is still on disk (TTL monitor parked), so every refusal below
+         is the read path and not the sweeper
+  [ok  ] revocation: a revoked fact is refused on the next read, and its row stays
+  [ok  ] starvation: a page of refusals is refilled, not truncated
+         filled 5 of 5 after examining 46 candidates, refusing 40
+  [ok  ] chain: the refusal ledger recomputes intact
+```
+
+It parks `ttlMonitorSleepSecs` so "still on disk" is a fact rather than a race,
+and restores it on the way out including on failure — that is a server global,
+so do not run it beside anything else that cares. It works on a bare `pip
+install voyd`: no app extra, no running server, and it only ever touches a
+scratch database it creates and drops.
+
+CI runs it on every commit, and `tests/test_the_falsifier_can_fail.py` breaks
+the guarantee four different ways to prove each check bites. A checker that
+cannot fail is worse than no checker — it turns an unknown into a false
+assurance somebody then makes a promise on.
+
 ## Three primitives
 
 **Scope.** A namespace the Host header selects — `{slug}.voyd.com` — and a void
@@ -333,7 +570,9 @@ read on it. The substrate, not a feature — see above for both halves.
 **Guard.** A passcode on the scope, enforced on the read path. `Guard` asks
 *may this caller read the scope*; `Admission` asks *may this document reach a
 prompt*. Caller and document — two questions, two layers, deliberately not
-one. There used to
+one. The pair of them is a third question, and `for_caller()` is where it is
+answered: [who is asking is part of the
+question](#who-is-asking-is-part-of-the-question). There used to
 be two doors — query and download — and gating one without the other would
 have made search the way around the lock. There is one door now.
 
@@ -341,7 +580,7 @@ have made search the way around the lock. There is one door now.
 
 Agent runtimes are the channel, not the competition. AgentCore, Vertex and
 Claude managed agents all run agents and all hand the result back with nowhere
-to put it. VOYD is the somewhere, reachable as four MCP tools:
+to put it. VOYD is the somewhere, reachable as five MCP tools:
 
 ```bash
 VOYD_URL=http://acme.localhost:8000 VOYD_API_KEY=voyd_... \
@@ -412,24 +651,30 @@ purpose: the point being demonstrated is the database, not the model.
 | `examples/why_this_belongs_in_the_database.py` | The exhibit. Parks the TTL monitor, runs the query *as it was written before the deadline check existed* — an expired document comes back as a confident, scored, well-formed hit — then the same search refusing it. Self-checking. |
 | `examples/worker.py` | A queue with no queue. The document *is* the job; `fail()` decides whether the failure was the world (retry) or the document (park). |
 | `examples/agent.py` | Memory that forgets: hybrid recall + TTL, pinning as the absence of a deadline. What an agent backend actually needs. |
+| `examples/clearance.py` | The same query, three callers, one scope. What a document is classified plus what a caller is cleared for, compared per hit — and the audit handle that can waive a revocation but not a clearance. |
 | `examples/scope.py` | The HTTP product end to end, through the same client the MCP server wraps. Needs a running server and an API key. |
 
-Two more that need something extra, and say so:
+Two more that need something extra, and one that is not an example at all:
 
 | | |
 |---|---|
 | `drift/exhibit.py` | The four-owners argument, run against real Postgres + Qdrant + MinIO. Needs `drift/docker-compose.drift.yml` and the `drift` extra. |
 | `bench/measure.py` | The numbers above: expiry lag, the cosine cliff, per-tier latency. Verifies which tier actually served each query before reporting it. |
+| `voyd verify` | Not an example — the falsifier, pointed at your deployment. Parks the TTL monitor, plants documents that must not be reachable, and exits non-zero if any read path answers. |
 
-Run them one at a time: `forget.py` and the exhibit both park
+Run them one at a time. `forget.py`, the exhibit and `voyd verify` all park
 `ttlMonitorSleepSecs`, which is a server-global, and the test suite has a
-reaper test that does the same.
+reaper test that does the same — so two of them at once is one of them
+measuring the other's setting.
 
 ## The engine
 
 `import voyd` is `Engine` and a MongoDB driver — that is the whole install.
-Everything else is an extra: `app`, `voyage`, `r2`, `mcp`. CI asserts that
-importing `Engine` does not load FastAPI.
+Everything else is an extra: `app`, `voyage`, `mcp` (and `drift`, for the
+exhibit's argument-by-counterexample). CI asserts that importing `Engine` does
+not load FastAPI. There is no `r2` extra any more, which is the object-storage
+section below arriving in the install list: text is a field on the row, so
+there is no second store to add a dependency for.
 
 ```python
 from voyd import Engine, PermanentFailure
@@ -551,6 +796,65 @@ If you can take the downtime, dropping and rebuilding is simpler and fine —
 just do it knowing that search answers "nothing found" rather than erroring
 while it rebuilds.
 
+## Extending it
+
+Two extension points, and neither needs a fork. Both are duck-typed protocols
+— inherit nothing, patch nothing, import nothing from the app extra.
+
+**A new primitive is a trait.** Anything with a `kind`, a `collection` and an
+`async ensure()` is something `Engine` will build and `health()` will report:
+
+```python
+class Outbox:
+    kind = "outbox"
+    def __init__(self, db, collection, *, tenant=None):
+        self.db, self.collection, self.tenant = db, collection, tenant
+    async def ensure(self):
+        await self.db[self.collection].create_index("published")
+        return True
+
+engine.model("events", tenant="tenant_id").use(Outbox)
+```
+
+**A new reason to refuse is a rule.** This is the more interesting one,
+because the two access rules this package ships — `Clearance` and
+`Restricted` — were written against exactly the interface you get, and that is
+checked rather than claimed:
+
+| you provide | and the handle will |
+|---|---|
+| `reason` | report it by name, in `receipts()` and on `/healthz` |
+| `refuses(doc, *, when=None)` | ask it per document on the way out — the half that holds for `$vectorSearch` hits |
+| `clause()` | push it into the query when it can be expressed, so the database does the work |
+| `needs_caller = True` *(optional)* | hand it the claims from `for_caller(...)`, plus `clause_for(caller)` for pushdown |
+| `bypassable = False` *(optional)* | refuse to let `including_refused()` waive it |
+
+```python
+class Unreviewed:
+    reason = "unreviewed"
+    def refuses(self, doc, *, when=None):
+        return not doc.get("reviewed_by")
+    def clause(self):
+        return {"reviewed_by": {"$nin": [None, "", False]}}
+
+notes = engine.model("notes", tenant="t").admitting(
+    Deadline(), revoked(), Unreviewed())
+```
+
+`ensure()` indexes the field your rule filters on — a rule whose clause is a
+collection scan is a guarantee somebody eventually turns off. A rule that
+raises is a refusal named after itself, because an exception inside a filter is
+how the filter gets skipped.
+
+What makes this a claim rather than a hope is that a *stranger's* rule is
+tested through the whole loop:
+`tests/test_a_third_party_rule_is_a_first_class_reason.py` installs two rules
+this package does not ship — one plain, one caller-aware — and asserts they
+survive `ensure()`, are enforced on both halves with the two halves *agreeing*,
+are counted under their own name, can decline to be waived by the audit
+handle, and cannot open the gate by throwing. If that interface were not
+enough to write `Clearance`, those tests could not exist.
+
 ## What MongoDB is doing
 
 | Primitive | Replaces | Where |
@@ -560,6 +864,7 @@ while it rebuilds.
 | `$vectorSearch` + `$search` | Pinecone + Elasticsearch | same index |
 | `find_one_and_update` | Celery + Redis | `engine.jobs` |
 | Search index filters | scope checks you remember to write | both `$rankFusion` legs |
+| A unique compound index | a lock service, to keep an audit chain linear | `engine.ledger` |
 
 No Redis. No Kafka. No Elasticsearch. No vector database. No object storage.
 One connection string.
@@ -637,6 +942,18 @@ claims that are only true if the *queries* are right run against Atlas Local.
 They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 `VOYD_TEST_MONGO_URI`.
 
+A suite that cannot fail is the same defect as a proof that cannot fail, so the
+core guarantees have been checked by breaking them on purpose: making
+`why_refused()` refuse nothing fails **31 tests**, removing the page refill
+fails the starvation tests, and stopping the ledger from linking fails 8 proof
+tests. That is not automated — it is a thing to redo when the shape of the
+guarantee changes, and the numbers above are what it produced.
+
+Do not run `voyd verify` or `examples/forget.py` beside the suite. They park
+`ttlMonitorSleepSecs` and build their own search indexes, and mongot is one
+process for the whole server — the symptom is an index-lag timeout in a test
+that has nothing to do with either of them.
+
 | Claim | How |
 |---|---|
 | The engine works with no VOYD | `test_engine_*` import only `voyd.engine` |
@@ -654,7 +971,6 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 | The void is the retrieval boundary | a sibling scope's doc is not a hit, on both `$rankFusion` legs |
 | A tenant id cannot be an operator | `{"$ne": ...}` in the tenant position is refused on all three tiers, not served |
 | Search cannot walk around the lock | a passcode-gated scope refuses to be queried |
-| A read limit cannot be raced | twelve concurrent readers against a limit of three are served three |
 | "Added" is not "searchable" | `describe` reports pending vs indexed separately |
 | A wrong-width vector is not "indexed" | a 512-wide vector in a 1024 index is parked as `failed`, not counted as searchable |
 | A same-width vector from another model is refused | measured: a model swap inverts ranking, and every width check passes |
@@ -665,13 +981,39 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 | Asking for it is safe where it is unavailable | Atlas Local refuses, the engine falls back to a client vector index, loudly |
 | Admission survives the server owning the vector | `revoke()` still refuses a row this process never embedded |
 | A cold index cannot look empty | unready indexes route to cosine, logged and counted |
-| A lost oplog window is not silent | `windows_lost` on `health()`, separate from routine `resumes` |
 | A 500 is not input validation | an unrepresentable `ttl_seconds` and an oversized `metadata` are 422s |
 | A 429 is not a bad document | failed embeds retry; a later valid key backfills |
 | There is no way to leak a cleanup chore | no tool is named for reclaiming anything, and `forget` reclaims nothing |
 | Admission is reachable from the product | `POST /v1/voids/{token}/forget` and a `forget` tool, not engine-only |
 | Admission is not deletion renamed | after `forget`, `describe` reports 0 and the rows are still on disk |
 | A stale index cannot pass for a current one | a changed spec is corrected, or named in `stale_indexes` |
+| Refusal costs the refused document its place, not the page | 40 expired rows ahead of 6 live ones still fills a page of 5 |
+| A short page is not silently passed off as a complete one | `starved` when the search gave up with candidates left, and *not* when they ran out |
+| An empty result says whether refusal is why it is empty | `admission.refused` on every search response, present when empty too |
+| A revocation cannot be quietly un-recorded | deleting, reordering or editing a chain entry is reported as `gap`, `broken` or `forged` |
+| A re-hashed forgery is still caught | the next entry commits to the old hash, so the edit has to reach the head |
+| A rewritten chain is falsified by a receipt | the hash handed to the caller at the time is absent from the rebuilt one |
+| The proof outlives what it proves | no TTL index on the chain, asserted by its absence |
+| The audit record is not a new copy of the secret | a chain entry carries ids and reasons, never document text |
+| A chain cannot fork under concurrency | twelve concurrent revocations produce twelve linear links |
+| A hash survives its own round trip | the stored entry hashes to the receipt handed out, field by field |
+| An unrecordable refusal still refuses | a broken ledger cannot turn a completed revocation into an error |
+| The falsifier can fail | four ways of breaking the guarantee, each caught by the check that claims it |
+| No module reaches past the handle | the AST of every module in the package, not a review comment |
+| A caller with no clearance claim gets nothing | absence is the lowest level, asserted for four shapes of missing |
+| An unrecognised classification is refused, not ranked low | a renamed level cannot become world-readable |
+| Untagged is not public | a document with no label is refused unless a default is declared |
+| Two concurrent callers cannot see each other's documents | twelve interleaved requests against one shared handle |
+| The audit handle cannot waive clearance | `including_refused()` shows forgotten rows, never rows above the caller |
+| Both enforcement points agree about access | the query and the per-document check return the same set, per clearance |
+| An unbound read raises rather than guessing | and an unbound `revoke()` cannot report success having matched nothing |
+| A caller holding no claims is a real answer | `for_caller({})` returns nothing; never binding raises |
+| The image cannot ship a credential | `.dockerignore` excludes `.env`, and `.env.example` is asserted to survive |
+| The documented first run is a run that works | the file the Quickstart copies exists, parses, and covers every setting |
+| Nothing in the package is orphaned | the AST of `voyd/`, with a two-part allowlist that is itself checked |
+| The README cannot promise what is gone | every backticked identifier in this table must still exist in the source |
+| A third party can add a primitive | a trait this package does not ship is built by `ensure()` and listed by `health()` |
+| A third party can add a reason to refuse | a stranger's rule, enforced on both halves, counted by name, and unwaivable if it says so |
 | Atlas filling in its own index defaults is not drift | or every start-up would rewrite every index |
 
 ## Security
@@ -694,6 +1036,31 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
   (10 / 5 min), before the argon2 verify runs — a slow hash is a cost ceiling,
   not a bound. In-process, therefore per-replica: the honest trade for not
   needing Redis, and the first thing to fix on more than one process.
+- Every revocation is recorded on an append-only hash chain, and the record is
+  tamper-evident rather than trusted: `GET /v1/voids/{token}/proof` recomputes
+  it with no key required. The chain's signature is HMAC, so it authenticates
+  the head to a verifier who trusts the key holder and is not a public proof —
+  the response says `signed: false` when no key is configured rather than
+  implying an attestation nobody made. Against the operator of the database
+  itself, the load is carried by the receipt handed back from `forget`.
+- `Clearance` and `Restricted` fail closed in four directions: a missing
+  caller claim is the lowest level rather than a pass, an unrecognised label
+  is refused rather than sorted low, an untagged document is refused unless a
+  default is declared, and a handle with no caller bound raises instead of
+  returning either everything or nothing. `including_refused()` cannot waive
+  any of them — it waives forgetting, not access, or "let me see the deleted
+  rows" would be a privilege escalation.
+- The refusal chain is the one collection with no deadline, so it deliberately
+  never holds document text — an audit record that quoted the secret would
+  outlive every mechanism built to forget it.
+- The container image excludes `.env`, `.venv` and `.git`. It did not, for a
+  while: there was no `.dockerignore`, so the Dockerfile's final `COPY . .`
+  baked the developer's real credentials into a layer anyone pulling the image
+  could read — and a 248MB host-built `.venv` on top of the one `uv sync` had
+  just created. Both are invisible locally, because the build succeeds and the
+  container starts. The exclusions are asserted by a test now, including the
+  one that must *not* apply: `.env.example` stays, because the Quickstart
+  tells you to copy it.
 - CORS is wildcard-open on `/v1`, which is the whole public surface.
 - There is no byte path and no object storage, so there are no presigned URLs
   to leak, no bucket policy to get wrong, and nothing to reclaim out of band

@@ -14,7 +14,7 @@ from pymongo.errors import DuplicateKeyError
 
 from ..auth import new_api_key
 from ..guards import compile_guard_defaults
-from ..slugs import RESERVED_SLUGS, SLUG_RE
+from ..slugs import slug_error
 from .deps import get_engine, hash_api_key, jsonify, require_apex, require_owner
 
 log = logging.getLogger("voyd.web.owner")
@@ -59,10 +59,11 @@ async def create_voyd(request: Request, owner: dict = Depends(require_owner),
     slug = (payload.get("slug") or "").strip().lower()
     name = (payload.get("name") or "").strip()
 
-    if not SLUG_RE.match(slug):
-        raise HTTPException(422, "slug must be 3-40 chars, lowercase letters/digits/hyphens.")
-    if slug in RESERVED_SLUGS:
-        raise HTTPException(422, f"'{slug}' is reserved.")
+    # One arbiter. These three checks used to be written out here, beside a
+    # predicate in voyd/slugs.py that nothing called -- two copies of one rule,
+    # which is the defect this codebase is organised against.
+    if problem := slug_error(slug):
+        raise HTTPException(422, problem)
     if await store.get_voyd_by_slug(slug) is not None:
         raise HTTPException(409, f"voyd '{slug}' already exists.")
 

@@ -140,10 +140,12 @@ class Memory:
 
         That check is applied in this process rather than pushed into the
         search index, which costs something: expired hits are fetched and then
-        discarded, so they consume part of the ``limit * 2`` budget below. In
-        the worst case -- more than ``limit`` of the top ``2 * limit`` hits
-        expired -- recall returns fewer live memories than asked for while more
-        exist further down the ranking.
+        discarded, so they spend part of the fetch budget. That budget used to
+        be a fixed ``limit * 2``, and a fixed multiple is a guess -- 40
+        expired memories ahead of 6 live ones returned *nothing* for a
+        ``limit=5`` recall, with all six indexed and on disk. ``saturate()``
+        refills instead, and says so when it cannot fill the page; see its
+        docstring.
 
         Pushing it into the search index is possible -- ``living()`` works as
         a ``$vectorSearch`` filter, and the lexical leg can express the same
@@ -156,15 +158,13 @@ class Memory:
         if kind is not None:
             filters["kind"] = kind
 
-        hits = await self.engine.search(self.spec.collection, vector,
-                                        text=text, limit=limit * 2,
-                                        filters=filters)
-        # Through the Admission handle rather than a hand-written
-        # ``[h for h in hits if live(h)]``. One object enforces the rule here
-        # and on every read path written later, counts what it refused, and
-        # covers revocation as well as the deadline -- which a comprehension
-        # here never would have.
-        return self.admission.reachable(hits)[:limit]
+        # One call, through the Admission handle, because the handle owns the
+        # rule *and* the query. It used to own only the rule, which left this
+        # method holding a fetch-budget guess -- and the other read path in
+        # this package holding an identical copy of the same guess. Two
+        # copies of a convention is how the six-read-paths bug started.
+        return await self.admission.search(vector, text=text, limit=limit,
+                                           filters=filters)
 
     async def forget(self, scope: Any, *, kind: str | None = None) -> int:
         """Drop a scope's memories now, rather than waiting for expiry.

@@ -1,588 +1,748 @@
-# The application is a document
+# Every database can delete. None of them can refuse.
 
-*The View did not leave. It became the experience.*
+Delete a document. Then ask your vector index about it.
 
-Fabian Valle · 17 September 2026
+For up to a full minute, it answers. Not with an error, not with a stale-cache
+warning — with a normal, well-scored, well-formed hit, ranked among the live
+results, indistinguishable from a document that still exists. Nothing is
+logged. No counter moves. There is nothing to page on, because from the
+database's point of view nothing is wrong: the delete was accepted, the
+sweeper is scheduled, the system is behaving exactly as designed.
 
----
-
-You can tell an architecture is lying by counting the logos.
-
-A thing that calls itself an agent in 2026 is a Python process, a vector
-database, a lexical search, a queue, a broker, a tracing SaaS, and a cron job
-that was supposed to delete yesterday's memories and did not. The README says
-*simple*. The invoice says otherwise. Five services, five failure modes, five
-ways to be down at 3am because a fact that should have died is still ranking
-into a prompt.
-
-Ask a question that sounds too small: **why does a new product require a new
-deploy?**
-
-Not a new *version*. A new product. A new tenant. A new workspace. A new
-conversation that needs its own memory, its own retrieval, its own tools, its
-own deadline. Why is that a pipeline?
-
-Because we decided, around 1979 and then again around 2005, that **the
-application is the code**. Models, views, controllers: files in a repo. The
-database is a drawer the code opens. To ship a new application you ship new
-files. That was reasonable when an application was a company. It is a category
-error when an application is a namespace you minted at 2pm.
-
-Watch what happens if you refuse the error.
-
----
-
-## The controller freezes. The View keeps moving.
-
-There is a process. It is already running. It stamps every query with a
-tenant id. It does not know your trade. It does not know what an agent is.
-It will not know what you build next. It does not know whether the person
-on the other side is holding a phone, a watch, a headset, or a pair of
-glasses. That is not its job.
-
-A *voyd* is the gap that process opens onto — a namespace, every MongoDB
-query scoped by `voyd_id`. Creating one is an insert, and nothing else. The
-voids, the documents, the deadlines, the embeddings, the guards: rows. Not
-packages. Not a second database. Not a second process.
-
-HTTP is how we proved it the first time. `{slug}.voyd.com`, a Host header,
-a slug that scopes every query. The routing and the handlers are the same
-functions they were before the insert. That is one modality. It is not the
-View.
+That minute is measured, not estimated. Inserting a row already past its
+deadline and waiting for MongoDB's TTL monitor, twenty times:
 
 ```
-Host: auto.voyd.com  →  slug "auto"  →  every query {voyd_id: ...}
-POST /v1/voyds       →  insert          →  live
+n=20   min=9.4s   p50=60.0s   p99=60.2s   max=60.2s   mean=57.5s
 ```
 
-The View never left. 1979's View was pixels in a window. 2005's was a
-template in a repo you deployed. 2026's is the *experience* — however
-this namespace is met, on whatever surface is in front of the person.
-Phone, VR headset, AR glasses, a watch that only has a glance: those are
-not new applications. They are new ways to consume the same Model and
-the same Controller. Swap the surface and the voyd does not move.
+Nineteen of the twenty sit at 60.0s, and that is the method rather than the
+world: each sample starts immediately after the previous sweep finishes, so it
+waits a full period. Only the first — landing at a random phase — shows 9.4s.
+So this measures the **ceiling**, and pins it precisely. The sweep interval is
+60.0 seconds. A document expiring at a random moment waits uniformly somewhere
+in [0, 60].
 
-MVC still describes the meeting. It just no longer describes the
-*product*.
+A minute is the *good* case, because MongoDB's TTL monitor is the fastest
+sweeper in the stack. An S3 lifecycle rule has a minimum granularity of one
+day. A cleanup cron runs whenever it last worked. And a Pinecone namespace has
+no expiry mechanism at all — nothing in it owns a deadline, so nothing in it
+ever expires.
 
-| | Classic MVC | This |
+Now attach that to the thing everybody is building. A retrieval scope holds
+what a model is about to read. "Deleted" is not a storage state anybody cares
+about there; the question is whether a fact can **reach a prompt**. And in the
+window above, it can, and the answer arrives with a confident score attached.
+
+## Retrieval does not need a faster sweeper
+
+It needs a different guarantee.
+
+> **this fact may not reach a prompt** — answered on every read, immediately,
+> whatever the sweeper is doing.
+
+Call it *refusal*. It is not deletion done faster; it is a different kind of
+operation entirely, and the distinction is the whole argument:
+
+| | what it is | when it takes effect |
 |---|---|---|
-| Controller | new code per app | one process, already up |
-| View | templates in the repo you deploy | the experience, for this modality, now |
-| Model | schema you migrate | documents you insert, stamped with a tenant |
-| A new app | a deploy | an insert |
+| **delete** | a storage operation | eventually — a TTL sweep (60.0s), a lifecycle rule (~a day), a cron (when it last worked) |
+| **refuse** | a retrieval guarantee | the next read |
 
-**MVC put the application in the codebase. This puts it in a document. The
-View is how you meet that document. The process is already running.**
+Every system's honest answer to *"when was this forgotten?"* is *"whenever the
+sweeper got to it"* — a timestamp nobody can defend to an auditor, describing
+a window nobody is watching.
 
-That is the trick that freezes the body. It is not yet the trick that
-scales. The rest of this essay is why the document has to live in
-MongoDB — and why Atlas already does most of the magic that used to be
-five logos.
+Nobody ships the second row. VOYD is an attempt to, and this is what that took.
+Not the pitch: the three times the same bug came back, the two bugs in the
+proof I built to prevent bugs, and the number that turned out to be worse than
+I had written down.
 
----
+## Whose problem this is
 
-## You cannot ship a namespace with no shape
+Four situations, and if none of them is yours then the rest of this is just an
+argument about databases.
 
-A document that is "an application" still has to do *something*. An empty
-namespace is a 404 with extra steps. So the first shape is the void: an
-expiring, guarded retrieval scope, four calls wide — open one, put text in
-it, search inside it, ask what is in it. Pick a name in the console, watch
-the address appear, hit launch. Ten seconds later `{slug}.localhost` is
-answering those four calls.
+**A session ends.** An agent has been accumulating memories against a
+conversation, and the conversation is over. "This session is forgotten" has to
+be true of the next retrieval, not of the next sweep — otherwise the following
+session inherits context nobody intended it to have, with a good score
+attached.
 
-That surface is not the product. It is the first *experience* the inversion
-needed in order to be true — a browser, a `curl`, an agent holding the same
-four calls as MCP tools. A food truck or a clinic would be the same write
-with a different experience on top. An agent workspace would be the same
-write. A headset would be a different View onto the same rows. The frozen
-controller does not notice. That is the test that the seam is real:
-**the experience can change and the voyd does not.**
+**Somebody asks to be erased.** A subject erasure request whose effective
+timestamp is *"whenever the cron ran"* is not a timestamp you can defend. And
+the artifact the requester should walk away with is not a 200 — it is something
+that proves, later, what happened and when, and that the record has not been
+edited since.
 
-If this still sounds like a CMS, keep reading. WordPress already did "sites
-are rows." It stopped at pages. The interesting behaviour leaked into plugins,
-cron, Elasticsearch, Redis, a queue named after a vegetable. The application
-was data. The *operating system* was still a pile of services.
+**A credential leaks into a scope.** You need it out of prompts immediately and
+you need the row for the investigation. Those are contradictory requirements
+for `DELETE` and the same requirement for refusal: unreachable now, on disk
+until the deadline, with `including_refused()` as the only way to look at it
+and a name a reviewer can grep for.
 
-The move is not "put HTML in MongoDB." The move is **put the operating system
-in the same documents as the application.**
+**One scope, documents of different sensitivity.** The moment that is true, a
+scope-level passcode has two settings and neither is right — and splitting the
+scope by sensitivity level means one retrieval boundary per level, which is the
+drift problem below with extra steps.
 
----
+All four are the same question asked at different volumes: *may this fact reach
+this prompt, right now?* None of them is a question about storage.
 
-## A vector is a field
+## Why nobody ships it
 
-Here is the sentence the last three years of "AI infrastructure" have been
-dancing around and not saying:
+Because refusal is not a feature you add. It is a shape, and almost every
+retrieval stack has the wrong one.
 
-A vector is a field on a document. A deadline is a field on a document. A
-claim is a document. A change is an event the database already emitted. A
-tenant boundary is a filter the index can enforce.
+Consider what owns the deadline in a normal build:
 
-None of that is a product. It is the document model, taken seriously.
-
-Watch the five things every agent actually needs, and what they are when you
-stop assembling them from logos:
-
-| An agent needs | The usual stack | What it actually is |
+| | owns the expiry | granularity |
 |---|---|---|
-| Retrieval that works on identifiers | vector DB + BM25 + a reranker | `$rankFusion` over one collection |
-| Memory that doesn't rot | vector DB + a cleanup cron | **vector search + TTL** |
-| Tool calls that survive a 429 | Celery + Redis | a claim with a retry policy |
-| Triggers on state change | Kafka or a webhook mesh | a change stream |
-| Trace trees and token spend | a tracing SaaS | `$graphLookup` + a time series |
+| Postgres row | your code | whenever the cron runs |
+| Pinecone namespace | **nothing** | never |
+| S3 object | a lifecycle rule | ~a day, per prefix |
+| the cleanup cron | whoever wrote it | whenever it last worked |
 
-Five services, five failure modes, five bills — or one connection string. VOYD
-carries the first four; the fifth is MongoDB's and not something this codebase
-ships, which is why you will not find `$graphLookup` in it.
+Four owners, four clocks, four ways to drift — and the drift *is* the bug. The
+vector outlives the document. The bytes outlive the row. The lifecycle rule was
+never applied to the new prefix. Now a deleted document is still answering
+queries, and nothing anywhere is wrong enough to notice.
 
-The one nobody packages is the second row, and it is the one that makes the
-inversion load-bearing instead of cute.
+That claim is an architecture opinion, so it does not get to stay prose.
+`drift/` stands the four owners up as four real services — Postgres, Qdrant,
+MinIO — and runs the scenario. Every service gets its real mechanism: Postgres
+a cron `DELETE`, S3 a real lifecycle rule (whose real minimum granularity is
+`Days: 1`, against a 5-second deadline), Qdrant its real delete API. Nothing is
+stubbed and nothing is sabotaged:
 
-Bolt a vector store onto an agent and it only grows. Yesterday's decision, the
-retracted fact, the stale config: all still score well, forever. Retrieval
-quality decays while the bill climbs. The usual fixes are a cron nobody
-maintains and a relevance hack nobody trusts.
+```
+  4. So the cron runs. It deletes expired rows, which is exactly
+     what it was written to do -- and all it was written to do.
+    [ok  ] the cron deleted the expired row -- Postgres is now correct
+    [ok  ] the document is gone from the system of record
 
-But if the embedding lives *on the document*, the document can carry its own
-deadline. MongoDB's TTL monitor drops the row. The vector goes with it. No
-orphaned embeddings, no reaper process, no second collection for "the
-memories we meant to forget." Pinning is the absence of a deadline, so
-permanent and ephemeral facts share one collection instead of two subsystems.
+  5. Now ask the retrieval system a question.
+     -> returned 1 hit(s). Top hit:
+        score   1.0000
+        text    'the 2019 acquisition fell through because of the pension liability'
+        pg_id   1 <- this row no longer exists
+    [ok  ] THE DELETED DOCUMENT ANSWERED THE QUERY
+    [ok  ] and S3 still serves the bytes -- the lifecycle rule cannot fire for ~a day
+```
+
+Score 1.0000. The system of record is *correct* — the row is genuinely gone —
+and the answer is a leak. The exhibit's last step shows that one more delete
+call fixes it, which is precisely the point: that call is application code, it
+is not transactional with the first delete, and forgetting it produces an
+answer rather than an error.
+
+So the first move is not a feature. It is collapsing four owners into one: one
+document with one `expire_at`, inherited by every row in the scope, collected
+by one TTL index. Nothing to drift, because there is nothing to keep in step.
+The bottom row of that table does not exist here at all — text is a field on
+the document rather than an object in a bucket, so there is no second store.
+That is a stronger answer than keeping two stores in step well.
+
+Which fixes *who* owns the deadline. It does not fix *when* it takes effect,
+because deletion is eventually consistent no matter who owns it. That is the
+other half, and it is the interesting one.
+
+## Refusal, made structural
+
+The instinct is easy and it is not enough. Two read paths in this codebase
+re-checked the deadline per hit from the very first version. Both were correct.
+Both were a **convention** — one line each call site had to remember — and the
+repository's own history records what conventions are worth:
+
+> `get_void`, `list_voids`, `get_document`, `list_documents`, `count_indexed`,
+> `vector_search` — six read paths, every one of them going to MongoDB with a
+> tenant filter and no deadline.
+
+Six. Not one forgotten by a newcomer: six, written by someone who knew the
+rule, in a codebase whose entire thesis is the rule. That is what a convention
+decays to, and it decays silently, because a read path that forgets to filter
+does not error. It returns more rows.
+
+So the rule stopped being a line to remember and became an object you cannot
+read around. `Admission` is a read handle with **no unfiltered read on it**:
 
 ```python
-mem = engine.model("memories", tenant="session").memory(
-    default_ttl=timedelta(hours=1))
+docs = engine.model("notes").forgettable()
 
-await mem.remember(session, "user prefers concise answers", vec)          # decays
-await mem.remember(session, "the user's name is Dana", vec, pinned=True)  # forever
-hits = await mem.recall(session, qvec, text="E_QUOTA_429")                # hybrid
+await docs.find({})                        # cannot return a forgotten fact
+await docs.search(vector, text="P0301")  # nor can the search path
+await docs.including_refused().find({})  # the unsafe thing, named out loud
+
+await docs.revoke({"_id": x}, reason="credential leaked")
+# unreachable on the next read. The row is still on disk. That is the proof.
 ```
 
-Hybrid, because identifiers have no useful embedding. `P0301`, a VIN, a
-ticket code, an order id: the lexical half exists so the vector half is not
-asked to do a job it cannot do. `$rankFusion` fuses both legs server-side —
-mongot, over fields that never left the document. One round trip. No
-reranker service. No hand-normalised scores.
+The failure mode is inverted. Before, you had to remember to be safe. Now you
+have to *declare* that you want the unsafe thing — and the declaration has a
+name a reviewer can grep for.
 
-This is not a feature list. It is a consequence of the same decision: **the
-application is a document, so the document must be allowed to do everything
-the application needs.** If it cannot, you are back to five logos.
+Two enforcement points, always both. The rule is pushed into the query where
+the query can express it, *and* re-checked per document on the way out. That
+second one is the guarantee rather than an optimisation, because
+`$vectorSearch` hits never went through a query at all: deadlines are
+deliberately not pushed into the vector index, for reasons I will come back to.
 
----
+And `revoke()` is the operation no vector database has:
 
-## Three correctness problems wearing an AI costume
+```
+  Now somebody says: forget that first one. Right now.
+    revoke() marked 1 fact(s) unreachable
 
-Most of what people call "AI reliability" is data-plane correctness that
-presents as a model problem.
+    recall  -> ['the fault code is P0301']
+    on disk -> 2 rows        <- the secret is STILL HERE
+       and it is already unreachable. No sweeper ran. Nothing
+       was deleted. The next read simply refused it.
+```
 
-**Cross-scope recall is a data breach that arrives as an answer.** One
-tenant's documents in another tenant's context window is not a ranking bug.
-It is isolation failing at the one place your tenant boundary leaves your
-process: search. `find()` with a `voyd_id` filter is table stakes.
-`$vectorSearch` and `$rankFusion` will happily ignore it unless the tenant
-field is in the index itself — both legs, including `compound.must` on the
-lexical side. A library that scopes `find()` and not search is a library that
-has not met an agent.
+That row is deliberately still on disk. It is not a failure to clean up — it is
+the proof. **Unreachable first, erased second**, because the reverse order is
+the bug. Erasure stays on the scope's deadline: `revoke()` moves a deadline
+into the past, so the same TTL index that collects expired scopes collects
+these too. There is no erasure subsystem, because an erasure request *is* a
+deadline that has already passed.
 
-**An expired memory must never reach a prompt.** MongoDB's TTL monitor runs
-about once a minute, so a "forgotten" fact stays readable for a window.
-`recall()` has to re-check the deadline itself, on every hit, before it
-returns one. A TTL index is a cleanup mechanism, not a guarantee. If your
-forgetting is a cron, you have a race. If your forgetting is the read path,
-you have a contract.
+## The same bug, three times
 
-We can be precise about that because we got it wrong here, in this repository,
-after writing the paragraph above. `Memory.recall()` was right from the first
-commit. The void API was not: `get_void`, `list_voids`, `get_document`,
-`list_documents`, `count_indexed`, `vector_search` — six read paths, every one
-of them going to MongoDB with a tenant filter and no deadline. So for the
-sixty-odd seconds between a void's deadline and the TTL monitor collecting it,
-an expired scope was fully alive. Void-scoped search returned its documents.
-Namespace-wide search returned them. `GET /v1/voids` listed it. Ingest would
-add more rows to a scope that was already over.
+Here is the part I would want to read, and the part most write-ups leave out.
 
-Nothing failed, and that is the entire point. No exception, no warning, no
-elevated error rate, no slow query, no degraded tier — a well-formed,
-confidently scored hit, carrying an `expire_at` five minutes in the past that
-nobody reads. The suite was green. The scope the user was told had expired
-answered a question. `examples/why_this_belongs_in_the_database.py` parks the
-TTL monitor and reproduces it in about two seconds, because a claim like this
-one should be runnable and not merely asserted.
+Making refusal structural did not take one fix. It took three passes, and each
+time the job looked finished. Each time, the same bug came back wearing
+different clothes — and the tell was always identical: **a rule
+that had to be remembered, by a smaller number of people, in a place that
+looked too small to matter.**
 
-Which is the argument for where the primitive belongs, paid for instead of
-assumed. A deadline enforced by remembering to write a clause is enforced
-exactly as reliably as it is remembered, and the number of places to remember
-it grows with every read path anyone adds. Six, in a codebase this small,
-written by the people making the argument. A database that owned the deadline
-— that made an expired scope unreadable one layer below every query, the way
-an unauthorised read is unreadable — would not make that mistake cheaper to
-avoid. It would make it unavailable.
+**First disguise: six read paths.** Fixed by the handle above. The
+hand-written `_unexpired()` helper is deleted; `store/mongo.py` came out six
+lines *shorter* for the change. A rule you have to remember to apply is not
+enforced, it is suggested.
 
-So that is what the deadline became. `Admission` is a read handle with no
-unfiltered `find` on it: every read through it refuses expired, revoked and
-unreadable facts, and seeing everything requires saying
-`including_refused()` out loud, where a reviewer can grep for it. The two
-hand-written copies of the rule — one in `recall()`, one in the void search
-path — are gone; one object answers the question now, and the test that
-matters writes the *naive* read path on purpose and asserts it is still safe.
+**Second disguise: two read paths, each remembering to wrap a search.** The
+handle refused documents, but it did not own the *query*. So the two search
+paths each called the search primitive themselves and each passed the hits
+through the handle afterwards. Both remembered. Both were correct. And both
+wrote out their own fetch budget, because enforcing the deadline on read means
+expired hits are fetched and then dropped — they spend the budget:
 
-It also separates two things every other system conflates. Deletion is a
-storage event, eventually consistent by nature. Refusal is a retrieval
-guarantee, and it can be immediate. `revoke()` is the second one: a fact is
-unreachable on the next read while its row is still on disk, which is not a
-failure to clean up but the proof. Unreachable first, erased second, because
-the reverse order is the bug this whole essay is about.
+```python
+# Memory.recall
+hits = await self.engine.search(..., limit=limit * 2, ...)
 
-**Tool failures have exactly two kinds, and conflating them is fatal.** A 429
-is the *world* being broken and must be retried. A malformed argument is the
-*call* being broken and must not be. Mark the second kind the same way as the
-first and a bad API key permanently poisons every job in the queue; a later
-valid key backfills nothing. Silent, permanent, invisible. The document that
-is the job has to know the difference, or the namespace that is the
-application quietly dies.
+# MongoStore.vector_search, independently
+hits = await self.engine.search(..., limit=min(limit * 2, MAX_LIMIT), ...)
+```
 
-These are not model-vendor problems. They are what you pay for when the
-application is code and the memory is a sidecar. They go away — not the
-engineering, the *class* of bug — when the application, the memory, and the
-deadline are the same row.
+The same guess, twice, with a docstring in each admitting the worst case. The
+worst case turned out to be worse than the docstring. Against real mongot:
 
----
+```
+40 expired rows ahead of 6 live ones, limit=5  ->  0 hits
+```
 
-## The hole where the answer used to be
+Zero. Not "fewer". Six live documents, indexed, queryable, sitting on disk, and
+the caller handed an empty list — indistinguishable from an empty scope. Which
+is the exact failure shape this codebase blocks startup to avoid elsewhere: a
+rebuilding vector index returns zero rows instead of raising, and that
+ambiguity is considered serious enough to hold the process closed until the
+index is ready. Here the same ambiguity had walked in through the front door.
 
-On 30 September 2025, MongoDB ended Atlas App Services. Not just Device Sync.
-The EOL took auth, Functions, HTTPS Endpoints, the Data API, GraphQL, and
-Static Hosting. Database Triggers survived.
+The fix is that the handle owns the fetch budget: `saturate()` re-asks for
+candidates, sizing each round from the refusal rate it just measured, until the
+page is full or the candidates are genuinely exhausted. Refusal costs the
+*refused document* its place, not the page.
 
-For a year there has been a hole exactly where "build your backend on Atlas"
-used to be. They removed the convenience layer and did not replace it. Anyone
-building a serious app on Atlas today writes the same five things by hand:
-sessions, HTTP, rules, a worker, a stream listener.
+**Third disguise: the primitive itself.** `engine.search` is a public method
+that returns what the index ranked. On a collection that refuses things, that
+is an unfiltered read sitting one import away from anybody who has not read its
+docstring. Two read paths remembering to wrap it is a convention with two
+instances, which is a convention about to fail a third time.
 
-App Services was a platform. A platform can be switched off. Everyone who
-built on Functions and the Data API found that out on one day with one
-deprecation notice.
+So the handle owns the query as well as the rule:
 
-A library cannot be taken away from you. It is a dependency you pin, on a
-database you already run. That is not a detail. It is the reason this should
-be Python you import, not a service you rent.
+```python
+await docs.search(vector, text="P0301", limit=5, filters={"tenant": t})
+```
 
-The lesson of App Services is also the argument for the inversion. They
-already sold "an application is configuration on Atlas." They were right
-about the shape and wrong about the ownership. **The application is a
-document in *your* database. The runtime is *your* process. MongoDB is the
-operating layer, not the landlord.**
+And this time the enforcement is not prose.
+`tests/test_no_module_reaches_past_the_handle.py` walks the AST of every module
+in the package and asserts none of them calls the primitive. AST rather than a
+regex, because `.search(` appears in strings and comments all over the package —
+including inside the docstring explaining the rule — and a guard that fires on
+prose is a guard somebody deletes. Two files are exempt, each for a stated
+reason: `admission.py`, which is where the wrapping lives, and `verify.py`,
+which calls it deliberately to assert that the unwrapped version really does
+leak.
 
----
+A grep does not need anybody to be paying attention. That is the only property
+that distinguishes it from the two conventions it replaced.
 
-## Why MongoDB, specifically
+## What a guarantee owes its caller
 
-This is the part that has to be inevitable, so it has to be honest.
+A read that refuses returns a shorter list. A shorter list is ambiguous:
+"nothing else matched" and "four more matched and were forgotten" are the same
+three hits.
 
-You can approximate every row of that table on Postgres. `pgvector`,
-`tsvector`, `LISTEN/NOTIFY`, `SKIP LOCKED`, `cron`, a graph extension, a
-hypertables extension. You will. People do. What you will not get is **one
-document that is simultaneously the record, the vector, the deadline, the
-claim, and the event.** You will get five extensions, five syntaxes, five
-ways the backup story diverges, and a search index that is not the same
-engine as the transactional one.
+For a human that is a minor annoyance. For the caller this API actually has —
+a model — it is a fabrication engine. Hand an LLM two results where there were
+six and it will describe the two as what exists. Silence reads as absence.
 
-You can approximate it with the logo pile too. Pinecone plus Elasticsearch
-plus Redis plus Celery plus Kafka plus a TTL cron. That is the current
-default. It works until it is 3am and the fact you expired in the database is
-still live in the vector store because they do not share a row.
+So refusal is part of the answer:
 
-MongoDB is the one mainstream database where that row can be all of it.
-TTL, change streams, atomic claims, `$graphLookup`, time series, the vector
-as a field: those run on `mongod`. They are not Atlas-only.
+```bash
+curl -X POST .../search -d '{"query": "pension liability"}'
+# -> "matches": [],
+#    "admission": {"refused": [{"reason": "quarantined", "count": 3}],
+#                  "starved": false}
+```
 
-Hybrid ranking is the exception, and it is a real one. `$search`,
-`$vectorSearch`, and `$rankFusion` run in **mongot** — Atlas Search — a
-companion process. A plain `mongod` still *holds* the vectors; it cannot
-rank them server-side. That is operational surface. Pretending it isn't is
-how we spent months on the cosine fallback without a log line. The
-accounting is in the appendix. The short version: mongot indexes the same
-row. It does not copy it into another product.
+Three facts matched and are being withheld. That is a reason to say so, or to
+ask a human, and it is not a reason to answer as though the scope were empty.
+The MCP `search` tool documents the field to the model for exactly that
+purpose, because the tool description is the only documentation a model reads.
 
-The agent age does not need a new database. It needs the application to live
-where the data already lives, and it needs that place to be allowed to
-forget, to search, to claim, and to isolate. MongoDB already does those
-things — mongod always, mongot when you have it, loudly when you don't.
-Atlas already addresses a huge part of the magic: the vector as a field,
-the deadline as a field, the claim as a document, the change as an event,
-the tenant as a filter the index can enforce. The missing piece is not
-another database. It is a thin layer of manners on top of the one you
-already run — so a namespace is an insert, a forgotten fact cannot reach
-a prompt, and a 429 is the world, not the document. That layer is what
-this repo calls VOYD. The name of the body it sits on, once you stop
-counting primitives, is ModelController.
+Nothing else in the retrieval stack reports this, and the reason is structural
+rather than an oversight. A payload filter in a vector database does know it
+excluded something — it could tell you if it were asked. A *deadline* that the
+sweeper has not reached yet excluded nothing, because as far as the index is
+concerned the row is live and correctly ranked. There is no reason to report,
+because nothing decided anything. Knowing why a row is missing is a side
+effect of refusing rather than deleting, which is the same reason `forget`
+can report a count at all.
 
----
+The `starved` flag next to it is narrower than it looks, and getting it wrong
+taught me something. The first definition was "the page is short and something
+was refused" — which fires on a perfectly healthy scope whose candidate list is
+simply short. A short answer over an exhausted candidate list is the **whole
+truth**, however many refusals it took to establish. Flagging those would train
+whoever reads the field to ignore it, which costs more than not having the
+field. So `starved` now means: the search gave up while candidates remained.
+There is more, and this page could not reach it.
 
-## ModelController
+I did not work that out by thinking. The falsifier told me, on its first run,
+about the feature I had shipped alongside it.
 
-MVC was a three-body problem. 1979 had windows. 2026 has tenants, and
-six ways to meet one. The View was never a leftover. It was how the
-Model reached a human. It still is. What changed is the surface: a
-phone, a headset, glasses, a watch, a speaker that has no screen at all.
-Those are not new backends. They are new experiences of the same
-document.
+## What a guarantee owes an auditor
 
-What cannot change with the surface, today, is everything the Controller
-was supposed to do after the meeting ended: remember, forget, retry, wake
-up, refuse to leak into the next namespace. So the industry built a second
-MVC in the basement, out of logos, and called it a platform. It is a
-divorce. Redis got memory. Elasticsearch got find. Celery got retry.
-Kafka got wake-up. Pinecone got the vector that used to live on the row.
-Istio got the therapy bill.
+Refusal being *true* is not the same as refusal being *provable*, and those are
+different products.
 
-A service mesh is couples counselling for a data plane that moved out.
+The counters were the honest version of getting this wrong. `/healthz` reports
+what the read path has refused and why, which answers *how much has this
+process refused since it started*. That is a dashboard. The question an auditor
+asks is narrower and much harder:
 
-**ModelController is the marriage.** Two letters. One replica set. The
-View is the experience — modality in front, voyd underneath. Atlas does
-most of the physics. VOYD is the thin layer of primitives so you can
-build the next surface without assembling the logo pile first.
+> show me that this fact stopped being reachable at 14:02, and show me the
+> record has not been edited since.
 
-| The basement MVC | The logo | ModelController |
+Counters have nothing to say to that. Neither does a log line, because the
+party holding the log is the party being audited.
+
+So every revocation is a link in an append-only hash chain —
+`sha256(seq || prev || canonical(entry))` — where each link commits to its
+predecessor. You cannot remove an entry, reorder two, or backdate one without
+breaking every hash after it. Verification is arithmetic over public data:
+`verify()` needs no secret and recomputes the whole chain, reporting the first
+break and distinguishing three failures that mean different things — `gap` (an
+entry was deleted), `broken` (the order changed, or one was inserted), `forged`
+(an entry was edited in place).
+
+**Then the interesting objection.** A hash chain is evidence against somebody
+who cannot rewrite it. The operator of this database can: wipe the collection,
+rebuild it without the awkward entry, and what remains verifies perfectly. A
+chain held entirely by the auditee proves nothing about the auditee.
+
+That is why the API shape matters more than the cryptography. Every `forget`
+hands back a receipt:
+
+```bash
+curl -X POST .../forget -d '{"doc_ids": ["d1"], "reason": "credential leaked"}'
+# -> "receipt": {"seq": 0, "hash": "9cd69b1b...", "prev": "0000..."}
+```
+
+Keep it. The caller who asked for the erasure walks away with a hash computed
+*before any dispute existed*, so a later chain that does not contain it is
+falsified by a record the auditee never held. The HMAC signature on the chain
+head is the weaker half and is labelled as such — it is symmetric, so it
+authenticates the head to a verifier who trusts the key holder and is not a
+public proof. When no key is configured the response says `signed: false`
+rather than implying an attestation nobody made.
+
+And the endpoint states what it does **not** prove, in the payload rather than
+only in the docs:
+
+- not that any row was deleted — they deliberately stay on disk;
+- not that individual *reads* were refused, which is enforced on every read and
+  would cost a write per refused hit to record;
+- not anything to a third party who does not hold the key, on its own.
+
+A proof that overstates itself is worse than no proof, because somebody makes a
+retention promise on the strength of it.
+
+Two properties fall out of taking this seriously, and both are the opposite of
+what the rest of the system does:
+
+**The chain never expires.** Every other collection here inherits one deadline
+from one document — that is the argument of the whole project. A proof
+collected by the same TTL index as the thing it proves is a coincidence with a
+short life. So this collection has no TTL index, and a test asserts the
+*absence*.
+
+**An entry never carries the document's text.** It is the one collection with no
+deadline, so a quoted secret would outlive every mechanism built to forget it.
+Ids and reasons only — also asserted, because that is the kind of field
+somebody adds helpfully.
+
+### Two bugs in the proof, and why I am telling you
+
+The chain is the component whose entire value is being trustworthy. It arrived
+with two bugs, both of the kind that would have been discovered by whoever was
+relying on it.
+
+**The first made every entry verify as forged.** BSON dates are milliseconds.
+`now()` is microseconds. So an entry hashed on the way in and re-hashed on the
+way out disagreed about its own timestamp, and the chain was 100% internally
+consistent and 100% unverifiable — the worst of the available outcomes. The fix
+is to truncate *before hashing and before storing*, so the bytes in the
+database are the bytes that were hashed. Rounding at verify time would have
+meant the stored value is not the value that was signed, and a verifier
+reconstructing the hash would have to know to apply the same rounding: a rule
+that has to be remembered, in the one place that cannot afford another one.
+
+**The second made the hash depend on the auditor's timezone.** The
+canonicaliser called `astimezone(tz=None)` on naive datetimes, which assumes
+*local* time — so a chain written by a default (non-`tz_aware`) client would
+hash differently in London and in New York. The docstring directly above it
+claimed to rule out exactly this. The engine already had the correct rule —
+naive means UTC, because that is what BSON stored — it simply was not the one
+being used.
+
+Same failure, twice, arriving once by codec and once by geography: **the value
+you hashed and the value the database kept are not automatically the same
+value.** Anything hashed through a database needs its round trip asserted field
+by field, which is now a test.
+
+A third, found during what was meant to be a cleanup pass: the receipt was
+returned by stashing it on the handle for a second method to collect. Handles
+are deduplicated per collection, so that was shared mutable state on an object
+every request holds — two concurrent erasure requests could hand each caller
+the *other's* hash. The receipt's entire value is that it belongs to a specific
+caller. That bug was the same species as one I had fixed two hundred lines
+above and written a comment about.
+
+## Who is asking is part of the question
+
+There were two access questions in the system, and between them they missed the
+one that leaks.
+
+`Guard` asks *may this caller read the scope*. `Admission` asks *may this
+document reach a prompt*. Neither asks: *may this document reach **this**
+caller's prompt*.
+
+A scope-level lock is all-or-nothing, so the moment one document in a scope is
+more sensitive than the rest, the available answers are "everyone gets
+everything" and "split the scope" — and one retrieval boundary per sensitivity
+level is four owners of one deadline all over again.
+
+So sensitivity is a field on the document, clearance is a claim on the caller,
+and they are compared per hit by the layer that already refuses things:
+
+```python
+docs = engine.model("docs", tenant="t").admitting(
+    Deadline(), revoked(), Clearance(order=("public", "internal", "secret")))
+
+await docs.for_caller({"clearance": "internal"}).search(vector, filters={"t": t})
+# "secret" documents are not lower-ranked. They are not returned.
+```
+
+The access-control content of that feature is not the comparison. It is the
+four ways it refuses:
+
+| | and it is refused, because |
+|---|---|
+| the caller has no clearance claim | absence is the lowest level, not a pass |
+| the document's label is not in `order` | an unrecognised classification is not a low one |
+| the document has no label at all | untagged is not public — or every row predating the policy is world-readable |
+| **no caller is bound at all** | *raises.* Both answers are wrong |
+
+The first is the one that makes tests pass. A missing claim reading as
+"unrestricted" is how datasets become world-readable on the single code path
+nobody threaded the claim through. The third is the one that matters most in
+practice: the documents written before anybody thought about sensitivity are
+the population most likely to be sensitive.
+
+The fourth came from writing the example rather than the tests. Unbound, the
+query clause permits no level — so reads came back empty, and `revoke()`
+matched zero rows and **reported success**, telling the caller a fact was
+unreachable when it was not. A silent no-op on the forget path is the worst
+failure available in this system. It raises now, because both available answers
+are wrong: returning everything is the breach, and returning nothing looks
+exactly like an empty scope.
+
+`for_caller` returns a **new handle**, which is load-bearing rather than
+stylistic. Handles are deduplicated per collection and every request holds the
+same object, so a version that assigned to it would make the last request's
+identity the current one, under concurrency, inside an access check. That bug
+does not error and does not reproduce. There is a test interleaving twelve
+requests specifically because it is the only place it would ever be caught.
+
+And the structural consequence, which is the part I did not anticipate:
+**`including_refused()` could not stay a blanket waiver.** It skipped every
+rule, which is the naive reading and was the implementation. That is right for
+forgetting reasons — auditing what was forgotten is the entire job of that
+handle — and wrong the instant a rule encodes who may see what. An auditor is
+entitled to read what was erased, and entitled to nothing above their own
+clearance. One method waiving both makes "let me see the deleted rows" a
+privilege escalation.
+
+So the reasons in the module are not one kind of thing, and a rule now declares
+which kind it is:
+
+| rule | refuses because | waivable by the audit handle |
 |---|---|---|
-| Find | Elasticsearch + a vector DB | mongot, over the same row |
-| Forget | a cron you do not maintain | TTL, plus a read path that re-checks so a prompt cannot cheat |
-| Claim | Celery + Redis | the document *is* the job |
-| Wake | Kafka | a change stream you resume, not a process you bury |
-| Survive Tuesday | hope | a replica set, a resume token, a probe that tells the truth |
+| `Deadline()` | the deadline passed, or cannot be read | yes |
+| `revoked()` | somebody said forget this, now | yes |
+| `quarantined()` | held back from models, deliberately still on disk | yes |
+| `EmbeddedWith(m)` | a different model produced this vector | yes |
+| `Clearance(order=…)` | the caller is not cleared for this document | **no** |
+| `Restricted()` | the document names who may see it, and it is not this caller | **no** |
 
-Eight primitives was a mesh with better names. Two nouns is an architecture.
+That last column is a one-word answer to a question the system did not know it
+had.
 
-**Model** is a collection of documents. The document is the record, the
-vector, the deadline, the claim. Traits are optional — searchable,
-expiring, forgettable, memory, queue, and `use()` for one this package does
-not ship. The document is not. Tenant is a field you write
-once and the index is not allowed to forget.
+## Ship the experiment that would disprove you
 
-**Controller** is what the runtime does when the world is broken, which
-is the world on a replica set: a primary will step down, an index will
-build, a 429 will happen, mongot will be missing on a laptop. Probe.
-Wait until a search index is a catalog and not a lie. Retry the *world*,
-not the document. Resume after the election. Say the tier out loud.
-Degraded is a first-class state, not a vibe.
+Every retrieval system's README makes claims. None of them hands you the thing
+that would falsify the claims, and that asymmetry is worst precisely here:
+this failure is **silent by construction**. A forgotten document answering a
+query looks like a working system. A property whose violation is invisible
+cannot be checked by looking at it. It has to be attacked.
 
-That is operational resiliency as a property of the document, not a
-product you install next to it. MongoDB already ships the physics —
-elections, oplog, TTL, `find_one_and_update`, mongot-or-not. The
-controller is the manners: never silent, never URI-guessed, never a
-zero-row index dressed up as "no results."
-
-The vow is short, because vows that last are:
-
-```python
-engine = Engine(client, db)
-await engine.connect()     # what can this replica set actually do?
-
-docs = engine.model("docs", tenant="tenant_id")
-docs.searchable(text_paths=("title", "body"))
-engine.model("sessions").expiring()
-mem = engine.model("memories", tenant="session").memory(
-    default_ttl=timedelta(hours=1))
-
-await engine.ensure()      # indexes queryable, or we wait
-engine.health()            # the tier, out loud
+```bash
+voyd verify --uri "$MONGO_URI"    # exit 0 = the guarantee held here
 ```
 
-MapReduce was a paper. REST was a dissertation. The patterns that
-survive are the ones you can import *or* recreate in an afternoon once
-you have seen them. This is that kind. `engine.db` is still PyMongo. If
-a trait is in your way you step past it in one line, on documents with
-no wrapper type. We are not replacing your event loop. We are refusing
-to shatter Model and Controller across five vendors so you can spend the
-decade putting them back.
+It parks the TTL monitor so "still on disk" is a fact rather than a race,
+plants documents that must not be reachable, asks for them through every read
+path that carries the guarantee, and exits non-zero if any of them answers —
+against your indexes, your MongoDB version, and whatever tier your deployment
+actually degraded to.
 
-The next generation of apps will not be compiled per tenant. They will
-be inserted. They will not subscribe to five clocks. They will marry
-find, forget, claim, and wake on the row they already have. An agent, a
-workspace, a storefront, a clinic, a thing you only see through glasses —
-those are experiences. The voyd is the gap they all open onto.
-ModelController is the body. Atlas is most of the magic. VOYD is the
-rest: a layer of primitives, small enough to import, honest enough to
-say when mongot is missing.
+```
+  mongodb 8.2.11  tier=hybrid  search=True
 
----
-
-## What we actually built
-
-VOYD is not the platform. Atlas is closer to that. VOYD is a layer of
-magic and primitives on top of a database that already knows how to
-forget, search, claim, and wake — so the apps of the next decade can be
-documents, and the experience can keep changing without a second deploy.
-
-The proof is one Python process, Host-header tenancy, a first experience
-that happens to be an expiring retrieval scope with four calls on it,
-because you have to meet someone *somewhere*. The engine underneath —
-`voyd/engine/` — has no idea VOYD exists. Collections, fields, filters. Never storefronts, never headsets.
-`health()` will not even say the word.
-
-The vow is in the previous section. Given `mem` from it:
-
-```python
-await mem.remember(session, "prefers concise answers", vec)
-hits  = await mem.recall(session, qvec, text="E_QUOTA_429")
-job   = await engine.queue("runs", when={"kind": "embed"}).claim()
+  [ok  ] deadline: an expired document is unreachable while its row is on disk
+         the row is still on disk (TTL monitor parked), so every refusal below
+         is the read path and not the sweeper
+  [ok  ] revocation: a revoked fact is refused on the next read, and its row stays
+  [ok  ] starvation: a page of refusals is refilled, not truncated
+         filled 5 of 5 after examining 46 candidates, refusing 40
+  [ok  ] clearance: a document above the caller's clearance is absent, not ranked
+  [ok  ] chain: the refusal ledger recomputes intact
 ```
 
-It declares. It does not intercept. `engine.db` is PyMongo. If a trait is
-in your way, step past it in one line. It picks no embedding vendor —
-`memory` takes vectors, not an API key. A test asserts `openai`, `voyage`,
-and `cohere` appear nowhere in it. A memory layer that chooses your model
-is a cage wearing a convenience label.
+Four of the five checks are worth reading closely for what they refuse to
+accept as a pass:
 
-Capability is detected, never guessed from the URI. The opposite bit us: a
-`"mongodb.net" in uri` heuristic meant `$vectorSearch` never ran against
-Atlas Local, for months, silently. Every other primitive degrades along the
-same spine: best-available, announced, counted, never quiet. A
-`$vectorSearch` against an index that is still building returns *zero rows
-instead of raising*. It looks exactly like an empty catalog. Startup waits.
+- **revocation** asserts the row is *still there* afterwards. A version that
+  deleted on `forget` would pass any check asking only "is it unreachable" and
+  would break the actual promise — you cannot investigate what you erased.
+- **clearance** compares *both enforcement points against each other* per
+  level, because the failure that matters is them disagreeing. The
+  `$vectorSearch` path only ever uses one of the two.
+- **chain** refuses to accept `intact` alone, because an empty chain verifies
+  vacuously. A deployment recording nothing at all would have passed.
+- **deadline** reports that the unwrapped primitive *does* still leak. A
+  falsified expectation is worth knowing too: if that stopped being true, the
+  read-path check would have quietly become a tautology and would keep passing
+  after somebody removed the thing it tests.
 
-**199 tests.** Fifty of them drive the engine from applications VOYD knows
-nothing about: a recipes app, an agent runtime, and a kitchen that speaks
-only `engine.model()`. That second set is the deliverable. If the agent story had needed new machinery it would be
-marketing. It needed one composition — memory as vector search plus TTL —
-and no new subsystems. If ModelController had needed a framework it would
-be a cage. It needed a handle on a collection.
+CI runs it on every commit. And `tests/test_the_falsifier_can_fail.py` breaks
+the guarantee six different ways to prove each check bites — because a checker
+that cannot fail is worse than no checker. It converts an unknown into a false
+assurance, and then somebody makes a promise on it.
 
-Limits, named, because overselling is how this dies:
+The best argument for building this is the first thing it did: it flagged a
+healthy deployment, because my definition of `starved` was wrong. The tool
+found the feature it shipped with.
 
-- Change streams are not Kafka. No consumer groups, no fan-out, no replay
-  past the oplog window, at-least-once with ordering caveats.
-- Mongo as a job queue has a ceiling. Polling latency, no priorities,
-  `find_one_and_update` contention under load. The long tail of apps that
-  will never need Celery, not the ones that do.
-- Hybrid search wants mongot. On a plain `mongod` you get a worse tier, and
-  the process says so. That split is not a footnote; it is the appendix.
+## Why MongoDB, specifically — and what that does not mean
 
-The measure of success is not how much of your app runs through this. It is
-how little of it you notice.
+The honest version of this section is shorter than the marketing version.
 
----
+**One document owns the deadline.** One `expire_at`, inherited by every row in
+the scope, collected by one TTL index. That is the entire architectural claim,
+and it is why this is a database rather than a wrapper over four services. The
+four-owners table has no MongoDB row because there is only one owner.
 
-## Going live is an insert
+**The embedding leaves with the document**, because they were never two things.
+A vector is a field. There is no second store to keep in step, which is a
+stronger property than keeping it in step well.
 
-The unit of software in 2026 is not a company. It is a namespace: a tenant,
-a session, a workspace, a storefront, an agent run. Namespaces that are
-*code* cannot be minted at 2pm. Namespaces that are *documents* can.
+**Hybrid ranking happens in the database.** `$rankFusion` (8.1+) fuses a
+`$vectorSearch` leg and a `$search` leg in one round trip, with no
+hand-normalised scores. That matters because semantic search is bad at
+identifiers, and the things agents put in a scope are full of them — `P0301`
+has no useful embedding.
 
-A namespace that is a document still has to retrieve, forget, retry, react,
-and refuse to leak into its neighbour. Those are not five products. They are
-operations on a row that is allowed to hold a vector, a deadline, a claim,
-and a tenant field the index will honour.
+**The tenant filter is pushed into the index**, including inside both
+`$rankFusion` legs, where a miss leaks every tenant's data.
 
-MongoDB is the database where that row is not a metaphor.
+**A unique compound index replaces a lock service** for keeping the audit chain
+linear. Appending is inherently serial — an entry cannot exist before its
+predecessor's hash — so concurrent writers cannot cooperate, only retry. Unique
+`(tenant, seq)` makes the loser re-read the head and re-link instead of
+silently overwriting. A chain that can fork under load is not a chain.
 
-The process that hosts it does not change when you insert another one.
-**Going live is a write.** The View is however you meet that write —
-phone, headset, glasses, watch, whatever comes next. The voyd is the
-gap underneath. ModelController is the body. Atlas is most of the
-magic. VOYD is the thin layer of primitives so the next experience does
-not require the next mesh. One connection string. A process that
-refuses to lie about Tuesday.
+No Redis. No Kafka. No Elasticsearch. No vector database. No object storage.
+One connection string.
 
-You can keep assembling the logo pile. It will keep working, at 3am, in the
-way that five clocks almost agree. Or you can marry Model to Controller on
-the database you already run, let the next tenant be an insert, and let
-the View keep evolving.
+**And now the part that keeps the rest honest.** "Just MongoDB" is doing work
+in that sentence that it has not earned. `$vectorSearch` and `$search` are
+served by **mongot**, a separate process. It is a process, not a product —
+Atlas Local runs it next to `mongod` in one container, with no Atlas account —
+but an essay that attacks silent degradation does not get to smuggle it past
+you. When mongot is there, fusion is one round trip and the boundary is
+enforced where ranking happens. When it is not, the same documents still
+expire, still refuse, still claim jobs, and search says so out loud:
 
-The process is already running. Insert the next one. Meet it however
-you want.
+| Tier | Requires | Used for |
+|---|---|---|
+| `hybrid` | MongoDB 8.1+ with Atlas Search | `$rankFusion` over both legs |
+| `vector` | Atlas Search | `$vectorSearch` only |
+| `cosine` | anything | exact in-process fallback, capped |
 
----
+Degrading is loud. Every fallback is logged at ERROR, counted, and on
+`/healthz`. The cosine cap is not asserted, it is derived:
 
-## Appendix: mongot is a process, not a product
+| rows | hybrid p50 | vector p50 | cosine p50 |
+|---|---|---|---|
+| 100 | 2.1 ms | 1.5 ms | 6.4 ms |
+| 1,000 | 1.7 ms | 1.2 ms | 66.5 ms |
+| 5,000 | 5.0 ms | 2.3 ms | 346.4 ms |
+| 10,000 | 3.9 ms | 2.8 ms | 699.5 ms |
 
-If you read the last sections and thought *that's Atlas Search, not
-MongoDB*, you were right. This appendix exists so the essay does not get
-to win an argument it did not earn.
+The indexed tiers are flat in collection size; cosine is over a hundred times
+its 100-row cost by 10,000 rows. So the cap is a decision about a ceiling you can state: at
+`COSINE_CAP` a degraded query costs about **0.7s p50**. Survivable as a
+fallback, indefensible as a steady state — which is why it is logged at ERROR
+rather than quietly absorbed.
 
-`$vectorSearch` and `$rankFusion` do not run inside `mongod`. They run in
-**mongot**, a companion process Atlas calls Search. A community `mongo:7`
-container will store your embeddings as fields, honour your TTL, emit your
-change streams, and then cosine in Python if you ask it to rank. Hybrid
-fusion is Atlas, or Atlas Local, which is mongod and mongot in one image.
-That is a second process. It has a build, a readiness story, and failure
-modes that look like empty results instead of exceptions. We hit all three.
+Capability is probed, never guessed from the URI. `"mongodb.net" in uri` once
+called Atlas Local "not Atlas", so `$vectorSearch` never ran locally, for
+months, silently. That is the same failure as everything else in this essay: a
+wrong answer that looks like a working system.
 
-Naming it is the point. The enemy of this essay is not "a process." It is a
-*product* that took a copy of the row and left. Three ways people add
-search to a database, and only one of them keeps the document as the
-application:
+### The two things that cost the most to learn
 
-| | Extra moving part | What it does to the row | Query language | When it is missing |
-|---|---|---|---|---|
-| **Postgres + extensions** | in-process plugins | the row stays; syntax multiplies | SQL + `pgvector` + `tsvector` + whatever fuses them | you don't have vectors, or you don't have BM25, or you fuse in the app |
-| **The logo pile** | other companies | **the row is copied** | each product's API | 3am: expired in one place, live in the other |
-| **mongod + mongot** | a companion process | **the row is indexed in place** | the same aggregation pipeline | cosine over the same fields, announced |
+**A search index that is missing or still building returns zero rows instead of
+raising.** It is indistinguishable from "nothing matched". So startup blocks
+until the indexes are queryable, and queries refuse the Atlas path until they
+are. Without that, a cold start silently reports an empty database. This is
+also why the starvation bug was serious rather than cosmetic: it produced the
+same ambiguity the startup gate exists to prevent.
 
-Postgres extensions are the honest nearest neighbour. They keep the row.
-They also keep five syntaxes, five version matrices, five backup stories,
-and — for anything that looks like `$rankFusion` — usually a sixth moving
-part anyway, because in-tree `tsvector` is not a lexical search engine in
-the sense mongot is. Plenty of serious Postgres shops still add
-Elasticsearch or ParadeDB for the half this essay cares about. At that
-moment they have joined the logo pile while remaining a Postgres shop.
+**An embedding is not a vector. It is a (vector, model) pair.** A 512-wide
+vector in a 1024 index fails on width. A vector from a *different model of the
+same width* passes every check — and a whole generation of one vendor's models
+is 1024 dimensions, so that is the normal case for anyone who upgrades.
+Measured against the real API, same text, both 1024-wide:
 
-mongot is the other nearest neighbour: it is, bluntly, a search sidecar.
-The difference that is load-bearing for the inversion is what the sidecar
-is *allowed to see*. Pinecone is a copy of the vector. Elasticsearch is a
-copy of the text. mongot reads the document MongoDB already has. A TTL
-drop deletes the memory from ranking because there is nothing left to
-index. Tenant isolation can be pushed into the search index because the
-index is of the same tenant field `find()` already uses. `$rankFusion`
-is a stage in the same pipeline as `$match`, not a score you fetch from
-another HTTP host and renormalise in Python.
+| | cosine |
+|---|---|
+| identical text, old model vs new | **−0.053** |
+| unrelated text, both on the new model | **+0.301** |
 
-That is why "a vector is a field" survives contact with mongot. The field
-lives on `mongod`. mongot is how you *ask* it. When you cannot ask it, the
-field is still there, and in-process cosine is still correct — just
-linear, and loud. The logo pile cannot say this. An expired Pinecone
-vector is a second delete you remembered to issue.
+A model swap does not degrade ranking, it **inverts** it: unrelated text
+outranks the document you were looking for, by five times. Nothing errors,
+`indexed: true` is recorded, and `describe()` reports a healthy scope. So the
+model is written in the same `$set` as the vector and cleared with it, and a
+vector whose model is unrecorded is refused rather than ranked.
 
-The operational nuances are not theoretical. They are the engine's
-keystone, paid for:
+Which collapses the migration, too. Change the model and every row is refused,
+so nothing is searchable, so the embed worker re-embeds them and the pending
+count is the progress bar. **A model change is a document that needs
+embedding.** There is no migration subsystem because there is nothing left for
+one to do.
 
-- **Presence is a probe, never a URI.** `"mongodb.net" in uri` called Atlas
-  Local — `mongodb://localhost` — "not Atlas." `$listSearchIndexes` is the
-  honest question. A plain `mongod` raises `Unrecognized pipeline stage
-  name`. Atlas and Atlas Local answer.
-- **A building index is indistinguishable from an empty catalog.**
-  `$vectorSearch` against a mongot index that is not yet queryable returns
-  **zero rows instead of raising**. Startup blocks until `indexes_ready`.
-  Skipping that wait is how a cold boot looks like you have no data.
-- **The tenant field type in the index must match the stored value**, or
-  the query is rejected. Isolation that is "in the index" is only as true
-  as the index definition.
-- **An index that exists is not automatically the right index.** Skipping
-  any index whose *name* you recognise leaves the old definition in place
-  after a spec changes, and every later query runs against it — silently,
-  and forever. A lexical definition can be corrected in place; a
-  `vectorSearch` definition cannot, so that one can only be reported.
+## What it costs, stated plainly
 
-Atlas Local is the laptop claim, qualified: `docker compose up` starts
-mongod and mongot together, no Atlas account, no network. A laptop running
-`mongo:7` is a real environment for TTL, claims, and streams, and a
-degraded one for search, and the health endpoint says `cosine`. That is
-the positioning already chosen — Atlas is the best path, not the only
-one — and it only stays honest if the runtime refuses to pretend.
+Refusal is enforced on read, which is not free.
 
-So the claim, restated without the gloss:
+Deadlines are the one filter deliberately *not* pushed into the vector index.
+Both legs can express it — `living()` works verbatim as a `$vectorSearch`
+filter, and the lexical leg says the same thing with `range` + `equals: null` +
+`mustNot: exists` — so this is a decision, not an omission. What rules it out
+is that a `vectorSearch` definition **cannot be updated in place**, so pushing
+it down would be a drop-and-rebuild on every existing deployment, and a
+rebuilding index returns zero rows rather than erroring. Trading a correct
+filter for a silently empty index is not a trade.
 
-Not "MongoDB has no sidecar."
-Not "hybrid search is free on any `mongod`."
-Not "Postgres cannot do this."
+So: expired hits are fetched and then dropped, and they spend part of the fetch
+budget. The handle refills rather than guessing, and reports `examined` per
+query so the over-fetch factor is a number rather than a belief. In the
+pathological case above — 40 expired rows ahead of 6 live ones — filling a page
+of 5 examined 46 candidates. The per-hit CPU cost of the admission check itself
+is still unmeasured, and I would rather say that than estimate it.
 
-**The document is the application. mongot is how that document gets ranked
-without becoming someone else's row.** When mongot is there, `$rankFusion`
-is one round trip and isolation can hold where ranking happens. When it is
-not, the same documents still expire, still claim, still stream, and
-search says so out loud. That is the opposite of five clocks that almost
-agree. It is also the opposite of the URI heuristic. An essay that
-attacked silent degradation does not get to smuggle mongot past the reader
-as "just MongoDB."
+The read path is also the only layer that works on the cosine fallback, where
+there is no index to push anything into. A guarantee that holds on two of three
+tiers is not one.
 
-It is a process. It is not a product. The row never left.
+## What is not done
+
+Four things, in the order I would do them:
+
+**Rules as data.** A rule is still a Python object, so a per-tenant policy is a
+release. The protocol is ready for it — a rule already declares whether it
+needs the caller and whether it can be waived, and carries its own query
+fragment — but the policy itself should live on the scope document, versioned
+with it, editable by the people who get audited.
+
+**Cryptographic erasure.** This is the one honest gap in the pitch. "The row is
+still on disk" is proof to an engineer and a *finding* to a security reviewer.
+A per-scope data key, text encrypted with it, and the deadline destroying the
+key would make refusal unreachable *and* unrecoverable, with no sweeper
+involved either way.
+
+**The admission overhead as a published number.** p50/p99 per hit. The obvious
+reviewer objection is "so you pay on every read, forever," and the answer
+should be a figure.
+
+**The two small sharp ones.** Passcode rate limiting is in-process, therefore
+per-replica — the honest trade for not needing Redis, and the first thing to
+fix on more than one process. CORS is wildcard-open on `/v1`, which is the whole
+public surface.
+
+## The claim, restated without the gloss
+
+Not "MongoDB is faster." Not "vector databases are bad." Not "we solved
+deletion."
+
+**Deletion is a storage event. Refusal is a retrieval guarantee. They are not
+the same operation, and retrieval needs the second one.**
+
+Everything else here is consequence. One document owns the deadline, so
+nothing drifts. The read path refuses, so the minute before the sweeper is not
+a minute of serving forgotten facts. The handle owns the query, so the rule
+cannot be forgotten by the next author. The answer reports what it refused, so
+a model cannot mistake withheld for absent. The revocation is a link in a
+chain, and you keep the receipt, so the record is evidence rather than
+testimony. And the caller's claims are part of the question, so one scope can
+hold documents of different sensitivity without becoming four boundaries.
+
+372 tests, five skipped. A falsifier that has failed on purpose six ways and
+caught one real bug on its first run. Three bugs found in the proof, and one
+found by writing an example. Every number in this essay is in `bench/` or
+`drift/` and re-runnable on a laptop.
+
+The row is still on disk. That is not the part that went wrong.
+
+```bash
+docker compose up -d
+uv run python examples/forget.py     # ~10 seconds, no API key, no vendor
+voyd verify                          # then point it at your own deployment
+```

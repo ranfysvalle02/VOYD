@@ -74,6 +74,7 @@ class MongoStore:
         # Built in _declare(), once the engine exists.
         self.admission_documents = None
         self.admission_voids = None
+        self.refusals = None
 
     async def connect(self) -> None:
         self.client = AsyncMongoClient(self.config.uri, tz_aware=True)
@@ -174,6 +175,16 @@ class MongoStore:
             "documents", tenant="voyd_id", rules=tuple(doc_rules))
         self.admission_voids = self.engine.admission("voids", tenant="voyd_id")
 
+        # Every revocation is witnessed on a per-namespace hash chain, so
+        # "this fact stopped being reachable at 14:02" is a claim somebody can
+        # check rather than one they have to take. Attached only to documents:
+        # a void's own expiry is a deadline passing, not an instruction
+        # anybody gave, and a ledger of clock ticks is noise that makes the
+        # entries that matter harder to find.
+        self.refusals = self.engine.ledger("refusals", tenant="voyd_id",
+                                           key=self.config.ledger_key)
+        self.admission_documents.witnessed_by(self.refusals)
+
         self.engine.searchable(SearchSpec(
             collection="documents",
             vector_path="embedding",
@@ -210,19 +221,13 @@ class MongoStore:
     async def count_owners(self) -> int:
         return await self.db.owners.count_documents({})
 
+    # No ``get_owner``, ``get_owner_by_email`` or ``set_owner_api_key``: they
+    # belonged to the owner plane, and the owner plane was a browser surface
+    # that no longer exists. One credential, looked up one way. A duplicate
+    # email is arbitrated by the unique index rather than by a read-then-write,
+    # which could not have been correct anyway.
     async def get_owner_by_key_hash(self, api_key_hash: str) -> dict | None:
         return await self.db.owners.find_one({"api_key_hash": api_key_hash})
-
-    async def get_owner_by_email(self, email: str) -> dict | None:
-        return await self.db.owners.find_one({"email": email})
-
-    async def get_owner(self, owner_id: ObjectId) -> dict | None:
-        return await self.db.owners.find_one({"_id": owner_id})
-
-    async def set_owner_api_key(self, owner_id: ObjectId, api_key_hash: str) -> None:
-        await self.db.owners.update_one(
-            {"_id": owner_id}, {"$set": {"api_key_hash": api_key_hash}}
-        )
 
     # ---- voyds (namespaces) -------------------------------------------
 
@@ -247,32 +252,6 @@ class MongoStore:
         await self.db.voyds.insert_one(doc)
         return doc
 
-    async def find_free_slug(self, base: str) -> str:
-        """First available slug for ``base``, suffixing -2, -3, ... on collision."""
-        if await self.get_voyd_by_slug(base) is None:
-            return base
-        for n in range(2, 100):
-            suffix = f"-{n}"
-            candidate = base[: 40 - len(suffix)].strip("-") + suffix
-            if await self.get_voyd_by_slug(candidate) is None:
-                return candidate
-        return base  # caller surfaces the duplicate error
-
-    async def stats_for_voyds(self, voyd_ids: list[ObjectId]) -> dict:
-        """Counts per voyd, for the owner plane."""
-        out: dict = {vid: {"voids": 0, "documents": 0} for vid in voyd_ids}
-        if not voyd_ids:
-            return out
-        for coll in ("voids", "documents"):
-            cur = await self.db[coll].aggregate([
-                {"$match": {"voyd_id": {"$in": voyd_ids}}},
-                {"$group": {"_id": "$voyd_id", "n": {"$sum": 1}}},
-            ])
-            async for row in cur:
-                if row["_id"] in out:
-                    out[row["_id"]][coll] = row["n"]
-        return out
-
     async def delete_voyd(self, slug: str) -> dict | None:
         voyd = await self.get_voyd_by_slug(slug)
         if not voyd:
@@ -291,7 +270,10 @@ class MongoStore:
             "voyd_id": voyd_id,
             "token": token,
             "guards": policy,
-            "download_count": 0,
+            # No ``download_count``: it counted an operation that no longer
+            # exists. It went with the byte path, and a field written on every
+            # scope, read by nothing, is a schema somebody will later feel
+            # obliged to keep.
             "doc_count": 0,
             "expire_at": expire_at,
             "created_at": _utcnow(),
@@ -366,7 +348,7 @@ class MongoStore:
                                reason: str = "revoked") -> int:
         """Make documents unreachable now. Erasure stays the deadline's job.
 
-        The elegant part is that there is no second mechanism here. Admission
+        The elegant part is that there is no second mechanism here. Forgetting
         a fact *is* giving it a deadline in the past: ``revoke()`` stamps the
         same ``expire_at`` the scope already uses, plus a mark recording why.
         So one TTL index collects user-requested erasure and time-based
@@ -379,6 +361,38 @@ class MongoStore:
         if doc_ids:
             flt["doc_id"] = {"$in": list(doc_ids)}
         return await self.admission_documents.revoke(flt, reason=reason)
+
+    async def witness_forget(self, voyd_id: ObjectId, token: str, *,
+                             doc_ids: list[str] | None = None,
+                             reason: str = "revoked") -> dict:
+        """``forget_documents``, returning the chain receipt as well.
+
+        The receipt is the half of the audit story this database cannot
+        provide on its own: a hash the caller holds, computed before anybody
+        had a reason to rewrite the chain.
+        """
+        flt: dict[str, Any] = {"voyd_id": voyd_id, "token": token}
+        if doc_ids:
+            flt["doc_id"] = {"$in": list(doc_ids)}
+        return await self.admission_documents.witness(flt, reason=reason)
+
+    async def proof(self, voyd_id: ObjectId, *, token: str | None = None) -> dict:
+        """The chain for a namespace, recomputed, with its limits attached."""
+        assert self.refusals is not None
+        report = await self.refusals.verify(tenant=voyd_id)
+        # ``_id`` is dropped rather than serialised: it is assigned by the
+        # database and deliberately excluded from the hash, so showing it
+        # beside the entry invites somebody to include it when they
+        # re-verify and conclude the chain is forged.
+        entries = [{k: v for k, v in e.items() if k != "_id"}
+                   for e in await self.refusals.entries(tenant=voyd_id)]
+        if token is not None:
+            # Filtered for display only. Verification is always over the whole
+            # chain: a subset of a hash chain cannot be verified, since the
+            # links run through the entries that were filtered out.
+            entries = [e for e in entries
+                       if (e.get("subject") or {}).get("token") == token]
+        return {"chain": report, "entries": entries}
 
     async def get_document(self, voyd_id: ObjectId, token: str,
                            doc_id: str) -> dict | None:
@@ -483,25 +497,24 @@ class MongoStore:
         engine. What stays here is the part that is about VOYD: the boundary.
         """
         assert self.engine is not None
-        # Over-fetch, then drop anything past its deadline. ``expire_at`` is
-        # deliberately not a filter field on either $rankFusion leg. Both legs
-        # *can* express the rule -- that was measured, and the numbers are in
-        # the module docstring of ``voyd/engine/search.py`` -- but a
-        # vectorSearch definition cannot be updated in place, so pushing it
-        # down would mean an unmigratable index change on every existing
-        # deployment. Enforcing it here also keeps the cosine fallback correct,
-        # where there is no index to push into. The cost of doing it this way
-        # is that expired hits consume part of the fetch budget, hence the
-        # doubling.
-        hits = await self.engine.search(
-            "documents", query_vec, text=query_text,
-            limit=min(limit * 2, SEARCH_MAX_LIMIT),
-            filters=self._search_filter(voyd_id, token),
-        )
-        # Through the engine's Admission handle, not a local comprehension.
-        # This was the second of the two hand-written copies of the same rule;
-        # one object now owns it, and counts what it refused.
-        return self.admission_documents.reachable(hits)[:limit]
+        # One call, through the engine's Admission handle. Not a local
+        # comprehension, and not a local call to the search primitive: the
+        # handle owns the rule *and* the query, so this method cannot hold a
+        # stale copy of either -- which is exactly what it used to do,
+        # alongside an identical copy in ``Memory.recall``.
+        #
+        # ``expire_at`` is deliberately not a filter field on either
+        # $rankFusion leg. Both legs *can* express the rule -- that was
+        # measured, and the numbers are in the module docstring of
+        # ``voyd/engine/search.py`` -- but a vectorSearch definition cannot be
+        # updated in place, so pushing it down would mean an unmigratable
+        # index change on every existing deployment. Enforcing it on read also
+        # keeps the cosine fallback correct, where there is no index to push
+        # into. The cost is that expired hits spend part of the fetch budget,
+        # which is why the handle refills it instead of trusting a multiple.
+        return await self.admission_documents.search(
+            query_vec, text=query_text, limit=min(limit, SEARCH_MAX_LIMIT),
+            filters=self._search_filter(voyd_id, token))
 
     def _search_filter(self, voyd_id, token: str | None) -> dict:
         """Every search is bound to one namespace, and a void-scoped search to

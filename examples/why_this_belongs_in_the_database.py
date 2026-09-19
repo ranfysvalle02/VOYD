@@ -101,7 +101,7 @@ READ_PATHS = (
     ("get_document", "admission_documents.find_one()"),
     ("list_documents", "admission_documents.find()"),
     ("count_indexed", "admission_documents.match() inside $match"),
-    ("vector_search", "admission_documents.reachable(), doubled fetch budget"),
+    ("vector_search", "admission_documents.search(), which refills the page"),
 )
 
 T0 = time.monotonic()
@@ -285,6 +285,26 @@ async def main() -> int:
             assert hasattr(store, fn), (
                 f"MongoStore has no {fn}() -- the read-path enumeration in "
                 "this exhibit is out of date")
+
+        # And then actually call the four document/void readers against the
+        # expired scope, rather than only asserting they exist. Naming six read
+        # paths and exercising one of them is the same species of gap the
+        # exhibit is about: a list that is checked for spelling and not for
+        # behaviour. Every one of these must come back empty while the rows are
+        # still on disk.
+        expired_reads = {
+            "get_void": await store.get_void(voyd_id, "deadvoid"),
+            "get_document": await store.get_document(voyd_id, "deadvoid",
+                                                     "deadvoid.md"),
+            "list_documents": await store.list_documents(voyd_id, "deadvoid"),
+            "count_indexed": (await store.count_indexed(voyd_id,
+                                                        "deadvoid"))["total"],
+        }
+        for fn, result in expired_reads.items():
+            assert not result, (
+                f"store.{fn}() returned {result!r} for a scope whose deadline "
+                f"has passed -- the handle is not on that read path")
+        say("the other four read paths, asked the same question -> all empty")
 
         print("     Six call sites. One small codebase. Written by the person")
         print("     who wrote the thesis, in a repository whose entire premise")

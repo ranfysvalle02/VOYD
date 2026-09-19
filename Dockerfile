@@ -1,24 +1,28 @@
 FROM python:3.11-slim
 
-# Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 WORKDIR /app
 
-# Copy dependency files and README
+# Dependency metadata first, so a code change does not invalidate the layer
+# that resolved and installed the environment. README.md is here because
+# pyproject declares it as the package readme and the build reads it.
 COPY pyproject.toml uv.lock* README.md ./
-# Also copy the voyd directory so hatchling can find voyd/themes
+
+# The package itself, before `uv sync`, because this project is installed
+# rather than merely depended on -- hatchling needs `voyd/` present to build
+# the wheel it then installs.
 COPY voyd/ voyd/
 
-# The container boots the Host (`python -m voyd`), so it needs the full costume:
-# FastAPI, templates, embeddings, blob storage. Engine alone would be pymongo.
+# The container boots the HTTP service (`python -m voyd`), which needs the
+# `app` extra; `all` adds embeddings and the MCP server. `Engine` alone would
+# be pymongo and nothing else -- that is the library install, not this one.
 RUN uv sync --extra all --frozen --no-dev || uv sync --extra all --no-dev
 
-# Copy the rest of the application
+# Examples, tests and the exhibit. Last, because they change most often and
+# nothing above depends on them.
 COPY . .
 
-# Expose the port
 EXPOSE 8000
 
-# Run the application
 CMD ["uv", "run", "python", "-m", "voyd"]

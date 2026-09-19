@@ -29,11 +29,26 @@ Five traits ship, all of which chain onto a model: ``searchable``,
 its own if a single one is all you need.
 
 ``forgettable`` is the one worth knowing about. It returns a read handle
-with no unfiltered ``find`` on it, so a document that may not reach a prompt
-cannot come back from one -- a rule enforced by convention is enforced
-exactly as reliably as it is remembered. It installs two reasons to refuse,
-a deadline and a revocation; ``admitting(*rules)`` is the same trait with
-the list written out, for a collection that has more of them.
+with no unfiltered ``find`` on it -- and no unfiltered ``search`` either, so
+a document that may not reach a prompt cannot come back from either: a rule
+enforced by convention is enforced exactly as reliably as it is remembered.
+It installs two reasons to refuse, a deadline and a revocation;
+``admitting(*rules)`` is the same trait with the list written out, for a
+collection that has more of them.
+
+Two of the shipped rules compare the document against *who is asking* rather
+than against the clock, which makes the handle the place the third question
+gets answered -- not "may this caller read the scope" and not "may this
+document reach a prompt", but the pair:
+
+    docs = engine.model("docs", tenant="t").admitting(
+        Deadline(), revoked(), Clearance(order=("public", "internal", "secret")))
+
+    await docs.for_caller(claims).search(vector, filters={"t": t})
+
+``for_caller`` returns a new handle rather than setting a field, because
+handles are deduplicated per collection and every request is holding the same
+one.
 
 ``model()`` is the main entry point: one collection, tenant threaded, traits
 chained, ``use()`` for anything this package does not ship. ``ensure()``
@@ -47,17 +62,20 @@ from __future__ import annotations
 
 from .capabilities import Capabilities, detect
 from .errors import (
+    CallerRequired,
     FilterInvalid,
     ScopeError,
     ScopeInvalid,
     ScopeRequired,
 )
 from .expiry import Expiry, ExpirySpec
-from .admission import (DEADLINE, QUARANTINED, REVOKED, UNREADABLE, WRONG_MODEL,
-                        Deadline, EmbeddedWith,
+from .admission import (DEADLINE, NOT_CLEARED, QUARANTINED, REVOKED,
+                        UNREADABLE, WRONG_MODEL,
+                        Clearance, Deadline, EmbeddedWith, Page, Restricted,
                          Admission, AdmissionSpec, Marked, Rule,
                          quarantined, revoked, why_refused)
 from .jobs import JobQueue, PermanentFailure, backoff
+from .ledger import GENESIS, Ledger, LedgerSpec, canonical, digest
 from .memory import Memory, MemorySpec
 from .model import Model
 from .search import SearchEngine, SearchSpec, cosine
@@ -166,6 +184,25 @@ class Engine:
 
     async def search(self, collection: str, vector, *, text=None,
                      limit: int = 5, filters=None) -> list[dict]:
+        """Rank documents. **This is the primitive, not a read path.**
+
+        It returns what the index ranked, which on a collection that refuses
+        things is not the same as what may be returned: deadlines are
+        deliberately not pushed into the vector index -- see ``search.py``
+        for the measurements -- so a ``$vectorSearch`` hit has never been
+        filtered by one.
+
+        If the collection has an ``Admission`` handle, search *through it*:
+
+            docs = engine.model("docs", tenant="t").forgettable()
+            await docs.search(vector, text="P0301", limit=5)
+
+        That applies the rules and refills the page. Calling this method
+        directly is correct only when the collection has no admission policy,
+        or when you are deliberately looking at what the index holds --
+        ``tests/test_no_module_reaches_past_the_handle.py`` asserts no module
+        in this package does the former by accident.
+        """
         return await self.search_engine.query(
             collection, vector, text=text, limit=limit, filters=filters)
 
@@ -210,7 +247,27 @@ class Engine:
                     f"tenant, whichever was declared first would silently "
                     f"decide whether the boundary is enforced at all")
             return existing
-        return self.use(Admission(self.db, spec))
+        return self.use(Admission(self.db, spec, engine=self))
+
+    def ledger(self, collection: str = "refusals", *,
+               tenant: str | None = None,
+               key: bytes | str | None = None) -> Ledger:
+        """An append-only hash chain of refusal events.
+
+        Idempotent per collection, for the same reason ``admission()`` is: two
+        handles on one chain is two writers who each believe they know where
+        the head is.
+
+        Attach it to a handle with ``Admission.witnessed_by()``. It is not
+        installed automatically, because a ledger is a retention decision --
+        this collection is the one thing here that deliberately never
+        expires, and that is not a default anybody should get by accident.
+        """
+        existing = self._installed.get("ledger", {}).get(collection)
+        if existing is not None:
+            return existing
+        return self.use(Ledger(self.db, LedgerSpec(collection, tenant=tenant),
+                               key=key))
 
     # ---- introspection -------------------------------------------------
 
@@ -261,11 +318,13 @@ __all__ = [
     "Admission", "AdmissionSpec", "why_refused",
     "Rule", "Deadline", "Marked", "revoked", "quarantined",
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
-    "EmbeddedWith",
+    "NOT_CLEARED", "EmbeddedWith", "Clearance", "Restricted", "Page",
     "Memory", "MemorySpec",
     "Model",
     "JobQueue", "PermanentFailure", "backoff",
+    "Ledger", "LedgerSpec", "canonical", "digest", "GENESIS",
     "ScopeRequired", "ScopeInvalid", "ScopeError", "FilterInvalid",
+    "CallerRequired",
     "Trait", "kind_of", "collection_of",
     "now", "aware", "live", "living", "deadline", "bind", "UTC",
 ]

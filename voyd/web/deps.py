@@ -56,9 +56,13 @@ async def get_current_voyd(request: Request) -> dict:
     return voyd
 
 
-async def require_voyd_owner(request: Request,
-                             voyd: dict = Depends(get_current_voyd),
+async def require_voyd_owner(voyd: dict = Depends(get_current_voyd),
                              owner: dict = Depends(require_owner)) -> dict:
+    """The namespace this host selects, if the bearer token owns it.
+
+    Takes no ``Request``: both dependencies below resolve one themselves, so a
+    third copy was a parameter FastAPI filled in and nothing read.
+    """
     if voyd.get("owner_id") != owner.get("_id"):
         raise HTTPException(403, "You do not own this voyd.")
     return voyd

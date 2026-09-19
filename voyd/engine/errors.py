@@ -36,6 +36,33 @@ class ScopeError(ValueError):
     """
 
 
+class CallerRequired(ScopeError):
+    """A collection with a caller-aware rule was read without a caller.
+
+    Neither available answer is acceptable, which is why this raises rather
+    than picking one. Returning everything is the breach the rule exists to
+    prevent. Returning nothing -- which is what the query clause does on its
+    own, since an unknown clearance permits no level -- is worse in a
+    different way: reads come back empty and *writes silently match no rows*,
+    so a revocation reports success having done nothing at all. That was a
+    real bug here, found by an example rather than a test, which is the usual
+    way a silent no-op is found.
+
+    Binding an authenticated caller with no clearance claim is a different
+    thing and does not raise: that caller is entitled to nothing, which is a
+    real answer. ``for_caller({})`` says it.
+    """
+
+    def __init__(self, collection: str, reasons: tuple):
+        self.collection = collection
+        self.reasons = reasons
+        super().__init__(
+            f"{collection} refuses on {', '.join(reasons)}, which depends on "
+            f"who is asking; call .for_caller(claims) first. Use "
+            f"for_caller({{}}) for an authenticated caller holding no claims"
+        )
+
+
 class ScopeRequired(ScopeError):
     """A scoped primitive was queried without its tenant field.
 

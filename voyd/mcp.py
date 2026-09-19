@@ -21,7 +21,7 @@ hands it no obligation at all: nothing is removed, nothing is scheduled,
 nothing needs a follow-up call. It changes *reachability*, and erasure stays
 where it already was -- on the scope's deadline.
 
-Which is why it costs nothing to add. Admission a fact is giving it a
+Which is why it costs nothing to add. Forgetting a fact is giving it a
 deadline in the past, the same ``expire_at`` the scope already runs on, so
 "the user asked me to forget that" and "the scope expired" are one mechanism
 collected by one TTL index. The agent gets the verb it actually needs and
@@ -169,6 +169,20 @@ def build_server(client: VoydClient):
         Results carry their text, so you can use them directly without a
         second fetch. Documents in other scopes are not lower-ranked here;
         they are not reachable.
+
+        Read ``admission`` before concluding anything from a short result.
+        Matching documents can be *refused* -- expired, revoked, quarantined
+        -- and a refused document is absent, not low-ranked, so the list
+        alone cannot tell you whether the scope is empty:
+
+            "admission": {"refused": [{"reason": "quarantined", "count": 3}],
+                          "starved": false}
+
+        Three facts matched and are being withheld. That is a reason to say
+        so, or to ask, and not a reason to answer as though the scope held
+        nothing. ``starved: true`` is stronger: reachable documents exist
+        that this page could not get to, so treat the results as partial and
+        search again more narrowly.
         """
         return await client.search(token, query, limit=limit, passcode=passcode)
 

@@ -21,6 +21,14 @@ class MongoConfig:
     uri: str
     db_name: str = "voyd"
 
+    # Signs the refusal chain's head. Optional, and its absence is reported
+    # rather than papered over: an unsigned chain is still tamper-evident,
+    # because verifying it is arithmetic over public data and needs no key.
+    # What a key adds is an attestation -- "this head was produced by
+    # something holding the secret" -- so a missing one costs authentication,
+    # not integrity. See ``engine/ledger.py``.
+    ledger_key: str | None = None
+
     # There is deliberately no ``looks_like_atlas`` here. Guessing capability
     # from the URI is what made Atlas Local "not Atlas" for months, silently.
     # Capability is probed -- see ``voyd.engine.capabilities.detect``.

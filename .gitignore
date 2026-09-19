@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local agent/editor state. Per-machine permissions and paths, not project
+# configuration -- committing it shares one person's local allowlist with
+# everybody who clones.
+.claude/

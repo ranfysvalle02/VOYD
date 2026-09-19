@@ -25,16 +25,27 @@ class VoyageIntelligence:
     def _truncate(self, text: str) -> str:
         return text[: self.config.max_input_chars]
 
-    async def embed_document(self, text: str) -> list[float]:
+    async def _embed(self, text: str, input_type: str) -> list[float]:
+        """One call, two input types.
+
+        The two public methods below differ by exactly one string, and that
+        string is load-bearing: Voyage embeds documents and queries
+        asymmetrically, so a query vector and a document vector are meant to
+        be produced differently and compared to each other. What must *not*
+        differ is everything else -- the model and the truncation window --
+        and writing the call twice is how they come to. A query embedded with
+        a different model than the corpus is the cosine inversion measured in
+        ``engine/admission.py``: no error, no warning, and unrelated text
+        outranking the document being looked for.
+        """
         client = self._get_client()
-        resp = await client.embed(
-            [self._truncate(text)], model=self.config.model, input_type="document"
-        )
+        resp = await client.embed([self._truncate(text)],
+                                  model=self.config.model,
+                                  input_type=input_type)
         return list(resp.embeddings[0])
 
+    async def embed_document(self, text: str) -> list[float]:
+        return await self._embed(text, "document")
+
     async def embed_query(self, text: str) -> list[float]:
-        client = self._get_client()
-        resp = await client.embed(
-            [self._truncate(text)], model=self.config.model, input_type="query"
-        )
-        return list(resp.embeddings[0])
+        return await self._embed(text, "query")

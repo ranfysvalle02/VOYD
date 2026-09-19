@@ -9,6 +9,10 @@ forgotten. Five calls are the whole API, and text goes in as text:
     GET  /v1/voids/{token}              what is in it, and how much is ready
     POST /v1/voids/{token}/forget       make facts unreachable now
 
+And one that is not part of using the thing at all:
+
+    GET  /v1/voids/{token}/proof        the tamper-evident record of refusals
+
 The fifth is the only destructive-sounding one and it deletes nothing: it
 gives facts a deadline in the past, so the TTL index that already collects
 expired scopes collects these too. There is no erasure subsystem because an
@@ -340,7 +344,7 @@ async def forget(request: Request, token: str,
     given no way to remove anything. The rows stay on disk and stop being
     reachable, and the scope's existing deadline still owns erasure.
 
-    Which is the whole design collapsing into one field. Admission a fact is
+    Which is the whole design collapsing into one field. Refusing a fact is
     giving it a deadline in the past -- the same ``expire_at`` the scope
     already uses -- so a subject erasure request and an ordinary expiry are
     the same mechanism, collected by the same TTL index. There is no erasure
@@ -357,16 +361,85 @@ async def forget(request: Request, token: str,
         raise HTTPException(404, "void not found.")
 
     at = datetime.now(timezone.utc)
-    n = await engine.store.forget_documents(
+    receipt = await engine.store.witness_forget(
         voyd["_id"], token, doc_ids=body.doc_ids, reason=body.reason)
-    return {
-        "forgotten": n,
+    out = {
+        "forgotten": receipt.get("count", 0),
         "unreachable_since": at.isoformat(),
         "reason": body.reason,
         # Said plainly, because "forgotten" and "deleted" are different
         # promises and only one of them is being made.
         "note": ("unreachable on the next read; the rows are still on disk "
                  "and are erased by the scope's deadline, not by this call"),
+    }
+    if receipt.get("hash"):
+        # Keep this. It is the one piece of the audit trail that does not live
+        # in a database its operator can rewrite: a hash taken before anybody
+        # had a reason to dispute it. GET /proof returns a chain; this proves
+        # that chain has to contain *your* entry.
+        out["receipt"] = {
+            "seq": receipt["seq"],
+            "hash": receipt["hash"],
+            "prev": receipt["prev"],
+            "note": ("a link in this namespace's refusal chain. Keep it: a "
+                     "chain that later does not contain this hash has been "
+                     "rewritten. Verify at GET /v1/voids/{token}/proof"),
+        }
+    return out
+
+
+@router.get("/voids/{token}/proof")
+async def proof(request: Request, token: str,
+                voyd: dict = Depends(require_voyd_owner)):
+    """The refusal chain for this namespace, recomputed on the way out.
+
+    ``forget`` is a promise; this is the evidence for it. Every revocation is
+    a link in an append-only hash chain, and each link commits to its
+    predecessor, so an entry cannot be removed, reordered or backdated
+    without breaking every hash after it. ``chain.intact`` is the result of
+    recomputing the whole thing, which needs no key -- the integrity half of
+    this is arithmetic over data you are being handed.
+
+    Read ``claims`` before quoting any of it. What is proven here is that the
+    *record* of refusal is unaltered. Not that rows were deleted -- they
+    deliberately were not -- and not that individual reads were refused,
+    which is a property of the read path rather than an event worth a write
+    per refused hit.
+
+    Scoped to the owner, and verified over the whole namespace even when
+    ``entries`` is filtered to one void: a subset of a hash chain cannot be
+    verified, because the links run through the entries left out.
+    """
+    engine = get_engine(request)
+    void = await engine.store.get_void(voyd["_id"], token)
+    if not void:
+        raise HTTPException(404, "void not found.")
+
+    report = await engine.store.proof(voyd["_id"], token=token)
+    return {
+        "voyd": voyd["slug"],
+        "token": token,
+        **jsonify(report),
+        "claims": {
+            "proves": [
+                "the recorded sequence of revocations has not been altered "
+                "since it was written",
+                "when each fact stopped being reachable, and on what stated "
+                "reason",
+            ],
+            "does_not_prove": [
+                "that any row was deleted -- refusal is a retrieval "
+                "guarantee, and the rows stay on disk until the scope's "
+                "deadline collects them",
+                "that individual reads were refused; that is enforced by the "
+                "read path on every read, and is not ledgered because it "
+                "would cost a write per refused hit",
+                "anything to a third party who does not hold the signing "
+                "key, on its own -- a hash chain is only evidence against "
+                "someone who cannot rewrite it, which is why each forget "
+                "response hands you a receipt to keep",
+            ],
+        },
     }
 
 
@@ -390,7 +463,8 @@ async def search_void(request: Request, token: str,
     qvec = await engine.intelligence.embed_query(query)
     matches = await engine.store.vector_search(voyd["_id"], qvec, token=token,
                                                query_text=query, limit=limit)
-    return {"matches": await _present_matches(engine, matches)}
+    return {"matches": _present_matches(matches),
+            "admission": _admission_of(matches)}
 
 
 @router.post("/search")
@@ -408,18 +482,44 @@ async def search_voyd(request: Request, body: SearchRequest = Body(...),
     qvec = await engine.intelligence.embed_query(query)
     matches = await engine.store.vector_search(voyd["_id"], qvec, token=None,
                                                query_text=query, limit=limit)
-    return {"matches": await _present_matches(engine, matches)}
+    return {"matches": _present_matches(matches),
+            "admission": _admission_of(matches)}
 
 
-async def _present_matches(engine, matches: list[dict], *,
-                           snippet_chars: int = 600) -> list[dict]:
+def _admission_of(matches) -> dict:
+    """Why the answer is the size it is.
+
+    A search that refuses documents returns a shorter list, and a shorter
+    list is ambiguous: "nothing else matched" and "four more matched and were
+    forgotten" are the same three hits. The asymmetry matters most for the
+    caller this API actually has -- a model, which will describe an empty
+    scope to a user rather than ask about one.
+
+    So refusal is part of the answer. ``starved: true`` is the case worth
+    acting on: reachable documents exist that this page could not get to.
+
+    Defensive about the type because a ``Page`` is a ``list`` and a slice of
+    one is not: a caller that filters matches before they arrive here loses
+    the metadata, and that must degrade to "no claim" rather than a 500.
+    """
+    if not hasattr(matches, "as_dict"):
+        return {"refused": [], "refused_total": 0, "starved": False}
+    return matches.as_dict()
+
+
+def _present_matches(matches: list[dict], *,
+                     snippet_chars: int = 600) -> list[dict]:
     """A hit carries its text, not a link to go fetch it.
 
     The caller is usually a model about to put this in a prompt, so making it
-    do a second round trip per result would be the wrong default. A document
-    whose text lives in a blob still gets a URL, because we do not have it --
-    unless there is no object storage, in which case the hit is returned
-    without one. A search must not 500 over a row it cannot offer bytes for.
+    do a second round trip per result would be the wrong default -- and there
+    is nowhere to send it anyway: the text is a field on the document, so
+    there is no URL to mint, no bucket policy to get wrong, and nothing to
+    reclaim out of band when the scope expires.
+
+    This used to be ``async`` and used to take the engine, because a hit whose
+    bytes lived in object storage needed a presigned URL built for it. Both
+    are gone with the byte path.
     """
     out = []
     for m in matches:

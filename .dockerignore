@@ -1,0 +1,48 @@
+# Without this file, `COPY . .` in the Dockerfile copies the whole working
+# directory into the image. Three of those things must never be in there:
+#
+#   .env    real credentials, baked into a layer that anyone who pulls the
+#           image can read. This is the one that matters.
+#   .venv   248MB of host-built binaries, copied *over* the venv `uv sync`
+#           just created one layer earlier -- so the image was both enormous
+#           and holding an environment linked against the wrong machine.
+#   .git    the full history, including anything ever committed to it.
+#
+# Everything the build actually needs is copied explicitly before this point
+# (pyproject.toml, uv.lock, README.md, voyd/) or is source that `COPY . .` is
+# there to pick up (examples/, tests/, bench/, drift/).
+
+# Secrets. The example is deliberately NOT excluded: it is documentation.
+.env
+.env.*
+!.env.example
+
+# Environments and build output -- recreated inside the image.
+.venv/
+dist/
+build/
+*.egg-info/
+
+# History and CI, which the runtime has no use for.
+.git/
+.github/
+.gitignore
+
+# Caches, none of which are portable across machines.
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Editor, agent and OS noise.
+.DS_Store
+.claude/
+.idea/
+.vscode/
+*.swp
+
+# Compose files: the image is a build artifact, not the orchestration.
+docker-compose*.yml
+Dockerfile
+.dockerignore

@@ -34,6 +34,11 @@ class VoydSettings(BaseSettings):
 
     require_passcode: bool = False
 
+    # Signs the head of the refusal chain served by GET /v1/voids/{token}/proof.
+    # Unset means the chain is served unsigned and says so (`signed: false`);
+    # it is still verifiable, because verification needs no key.
+    ledger_key: str | None = None
+
     # Set false on a private instance to refuse new owners after the first.
     allow_signup: bool = True
 
@@ -47,7 +52,8 @@ def build_app(settings: VoydSettings | None = None) -> Voyd:
 
     app = Voyd(
         domain=s.domain,
-        store=Store.Mongo(s.mongo_uri, db_name=s.db),
+        store=Store.Mongo(s.mongo_uri, db_name=s.db,
+                          ledger_key=s.ledger_key),
         intelligence=Intelligence.Voyage(api_key=s.voyage_api_key, model=s.voyage_model),
         guards=guards,
         allow_signup=s.allow_signup,

@@ -10,8 +10,10 @@ class Store:
     """Public factory. ``Store.Mongo(uri, db_name=...)`` -> :class:`MongoStore`."""
 
     @staticmethod
-    def Mongo(uri: str, db_name: str = "voyd") -> MongoStore:
-        return MongoStore(MongoConfig(uri=uri, db_name=db_name))
+    def Mongo(uri: str, db_name: str = "voyd", *,
+              ledger_key: str | None = None) -> MongoStore:
+        return MongoStore(MongoConfig(uri=uri, db_name=db_name,
+                                      ledger_key=ledger_key))
 
 
 __all__ = ["Store", "MongoStore"]

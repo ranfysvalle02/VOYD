@@ -70,7 +70,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Protocol
 
-from .errors import require_tenant
+from .errors import CallerRequired, require_tenant
 from .time import aware, living, now
 
 log = logging.getLogger("engine.admission")
@@ -82,6 +82,10 @@ REVOKED = "revoked"
 UNREADABLE = "unreadable"
 QUARANTINED = "quarantined"
 WRONG_MODEL = "wrong_model"
+# Not a reason a fact was *forgotten* -- a reason this caller may not have it.
+# Counted separately for that reason: a climbing `not_cleared` is somebody
+# probing, while a climbing `deadline` is the system working.
+NOT_CLEARED = "not_cleared"
 
 
 # ---- rules -------------------------------------------------------------
@@ -102,9 +106,27 @@ WRONG_MODEL = "wrong_model"
 
 
 class Rule(Protocol):
-    """One reason a document may not reach a prompt."""
+    """One reason a document may not reach a prompt.
+
+    Two optional class attributes change how a rule is treated, and both
+    default to the behaviour of the original three rules:
+
+    ``needs_caller``  the rule compares the document against *who is asking*,
+                      so it is handed the caller's claims. A rule without it
+                      is never passed them, which keeps the ordinary rules
+                      free of a parameter they have no use for.
+    ``bypassable``    whether ``including_refused()`` sets this rule aside.
+                      True for reasons a fact is *forgotten* -- audit and
+                      administration exist to see those. False for reasons a
+                      *caller* may not see it, which are not this handle's to
+                      waive: an auditor is entitled to read what was
+                      forgotten, and entitled to nothing above their own
+                      clearance.
+    """
 
     reason: str
+    needs_caller: bool
+    bypassable: bool
 
     def refuses(self, doc: dict, *, when: datetime | None = None) -> bool: ...
 
@@ -204,6 +226,143 @@ class EmbeddedWith:
         return {"$or": [{self.field: self.model}, {"embedding": None}]}
 
 
+@dataclass(frozen=True)
+class Clearance:
+    """Refused because the caller is not cleared for this document.
+
+    ``Guard`` asks *may this caller read the scope*. ``Admission`` asks *may
+    this document reach a prompt*. Neither asks the question that actually
+    leaks, which is the pair of them: *may this document reach **this**
+    caller's prompt*. A scope-level lock is all-or-nothing, so the moment one
+    document in a scope is more sensitive than another, the only available
+    answers are "give everyone everything" and "split the scope" -- and
+    splitting the scope means one retrieval boundary per sensitivity level,
+    which is four owners of one deadline again.
+
+    So sensitivity is a field on the document and clearance is a claim on the
+    caller, compared per hit, in the layer that already refuses things:
+
+        docs = engine.model("docs", tenant="t").admitting(
+            Deadline(), revoked(),
+            Clearance(order=("public", "internal", "secret")))
+
+        await docs.for_caller({"clearance": "internal"}).search(vector)
+        # "secret" documents are not lower-ranked. They are not returned.
+
+    **It fails closed in three directions**, which is the whole reason this
+    is a rule object rather than a comparison somebody writes at a call site:
+
+    - a caller with no clearance claim gets the *lowest* level, not a pass.
+      The tempting default is to treat a missing claim as "unrestricted",
+      and it is tempting because that is what makes the tests pass first.
+    - a document whose level is not in ``order`` is refused. An unrecognised
+      classification is not a low one: it is a document somebody labelled
+      with something this deployment does not understand.
+    - a document with no level field at all is refused unless ``default`` is
+      set. Untagged is not public. Getting this backwards means every
+      document written before the policy existed is world-readable, which is
+      exactly the population most likely to be sensitive.
+
+    Not bypassable. ``including_refused()`` exists so an operator can see
+    what was forgotten; clearance is not a forgetting reason and no handle
+    here is entitled to waive it.
+    """
+
+    order: tuple[str, ...]
+    field: str = "classification"
+    claim: str = "clearance"
+    default: str | None = None
+    reason: str = NOT_CLEARED
+    needs_caller: bool = True
+    bypassable: bool = False
+
+    def _rank(self, level: Any) -> int | None:
+        """Position in the ordering, or ``None`` for anything unrecognised."""
+        try:
+            return self.order.index(level)
+        except (ValueError, TypeError):
+            return None
+
+    def refuses(self, doc: dict, *, when: datetime | None = None,
+                caller: dict | None = None) -> bool:
+        level = doc.get(self.field, self.default)
+        needed = self._rank(level)
+        if needed is None:
+            return True                      # unlabelled, or a label we do not know
+        held = self._rank((caller or {}).get(self.claim))
+        if held is None:
+            return True                      # no claim is the lowest, not the highest
+        return held < needed
+
+    def clause(self) -> dict | None:
+        # Not expressible without the caller, and ``clause()`` is called
+        # without one -- the per-document check is the guarantee anyway. See
+        # ``clause_for`` below, which the handle uses when it has the claims.
+        return None
+
+    def clause_for(self, caller: dict | None) -> dict | None:
+        """The same rule as a query fragment, once the caller is known.
+
+        An optimisation, like every other clause here: it lets MongoDB drop
+        the rows this caller may not see instead of shipping them to be
+        refused. It cannot express the "unknown label" case -- ``$in`` on the
+        permitted levels does that implicitly, by matching nothing else --
+        which is fine, because ``refuses`` above is what holds.
+        """
+        held = self._rank((caller or {}).get(self.claim))
+        if held is None:
+            # Cleared for nothing. An impossible clause is the honest
+            # translation, and cheaper than fetching everything to refuse it.
+            return {self.field: {"$in": []}}
+        return {self.field: {"$in": list(self.order[:held + 1])}}
+
+
+@dataclass(frozen=True)
+class Restricted:
+    """Refused because the document names who may see it, and it is not you.
+
+    The complement of ``Clearance``: no ordering, just a list on the document
+    of audiences allowed to receive it. The shape access control actually
+    takes outside the military metaphor -- a support ticket visible to the
+    filing team, a contract visible to legal and the deal desk.
+
+    An empty or absent list is refused, on the same reasoning as an untagged
+    document above: a restriction nobody filled in is not an absent
+    restriction.
+    """
+
+    field: str = "audience"
+    claim: str = "groups"
+    reason: str = NOT_CLEARED
+    needs_caller: bool = True
+    bypassable: bool = False
+
+    @staticmethod
+    def _set(value: Any) -> set:
+        if value is None:
+            return set()
+        if isinstance(value, (str, bytes)):
+            return {value}
+        try:
+            return set(value)
+        except TypeError:
+            return set()
+
+    def refuses(self, doc: dict, *, when: datetime | None = None,
+                caller: dict | None = None) -> bool:
+        allowed = self._set(doc.get(self.field))
+        if not allowed:
+            return True
+        return not (allowed & self._set((caller or {}).get(self.claim)))
+
+    def clause(self) -> dict | None:
+        return None
+
+    def clause_for(self, caller: dict | None) -> dict | None:
+        held = sorted(self._set((caller or {}).get(self.claim)))
+        return {self.field: {"$in": held}}
+
+
 def revoked(field: str = "forgotten") -> Marked:
     """Forgotten on request: unreachable now, erased by the deadline."""
     return Marked(field=field, reason=REVOKED)
@@ -284,6 +443,22 @@ class Receipts:
         self.last_reason = reason
         self.last_at = now()
 
+    def record_many(self, tally: dict[str, int]) -> None:
+        """Commit one page's refusals.
+
+        A refill re-admits a *superset* of the candidates it already saw, so
+        recording as it goes would count the same forgotten document once per
+        round -- inflating a number this class documents as a lower bound, in
+        the one direction that makes a lower bound a lie. So a page is tallied
+        locally and committed here, once, from the round that produced it.
+        """
+        for reason, n in tally.items():
+            if n <= 0:
+                continue
+            self.refused[reason] = self.refused.get(reason, 0) + n
+            self.last_reason = reason
+            self.last_at = now()
+
     def record_revocation(self, n: int, reason: str) -> None:
         if n:
             self.revoked += n
@@ -306,8 +481,72 @@ class Receipts:
         }
 
 
+class Page(list):
+    """The hits, and what it cost to get them.
+
+    A ``list`` first, because every read path in this package already treats a
+    result as one -- iterates it, compares it to ``[]``, slices it. A
+    guarantee that forces a return-type migration on its own callers is a
+    guarantee that gets reverted. The metadata rides along:
+
+    ``refused``   what was dropped on the way out, by reason. Exact *for this
+                  page*, unlike the handle-wide lower bound in ``receipts()``:
+                  here the candidates were counted as they went past.
+    ``examined``  how many candidates it took to fill the page. The cost of
+                  enforcing on read rather than in the index, as a number.
+    ``starved``   the page is short and the search **gave up before running
+                  out of candidates**. That is the only state in which the
+                  caller was told less than the truth.
+
+    ``starved`` is the field worth wiring to an alert, and its definition is
+    narrower than it first looks. It is not "short", and it is not "short and
+    something was refused" -- that was the first definition here and it was
+    wrong, and the falsifier shipped alongside it caught the mistake within
+    the hour: it flagged a page that asked for 50, got 1, and was *complete*: one live document existed, the rest were
+    expired, and nothing further down the ranking was being withheld. A short
+    answer over an exhausted candidate list is the whole truth, however many
+    refusals it took to establish. Flagging it would have trained whoever
+    reads the field to ignore it, which costs more than not having it.
+
+    So ``starved`` means: ``rounds`` ran out, or the search tier's own
+    ceiling did, while candidates remained. There is more, and this page
+    could not reach it -- the one thing a bare list cannot say.
+    """
+
+    __slots__ = ("refused", "examined", "starved")
+
+    def __init__(self, hits: Iterable[dict] = (), *, refused: dict | None = None,
+                 examined: int = 0, starved: bool = False):
+        super().__init__(hits)
+        self.refused: dict[str, int] = dict(refused or {})
+        self.examined = examined
+        self.starved = starved
+
+    @property
+    def refused_total(self) -> int:
+        return sum(self.refused.values())
+
+    def as_dict(self) -> dict:
+        """The part of this a caller -- or a model -- should be told.
+
+        Shaped for an answer, not a dashboard: ``refused`` as a list of
+        ``{reason, count}`` because that is what reads out loud. An agent told
+        "three facts exist and are quarantined" asks a human; an agent handed
+        silence invents an answer.
+        """
+        return {
+            "refused": [{"reason": r, "count": n}
+                        for r, n in sorted(self.refused.items())],
+            "refused_total": self.refused_total,
+            "examined": self.examined,
+            "starved": self.starved,
+        }
+
+
 def why_refused(doc: dict, spec: AdmissionSpec,
-                    *, when: datetime | None = None) -> str | None:
+                    *, when: datetime | None = None,
+                    caller: dict | None = None,
+                    only_unbypassable: bool = False) -> str | None:
     """The first reason this document may not reach a prompt, or ``None``.
 
     Asks each declared rule in order and returns the first refusal. Order is
@@ -321,11 +560,19 @@ def why_refused(doc: dict, spec: AdmissionSpec,
     must not come back through a third-party rule.
     """
     for rule in spec.with_defaults().rules:
+        if only_unbypassable and getattr(rule, "bypassable", True):
+            continue
         try:
             if isinstance(rule, Deadline):
                 why = rule.why(doc, when=when)
                 if why is not None:
                     return why
+            elif getattr(rule, "needs_caller", False):
+                # Only rules that declared they compare against the caller
+                # are handed the claims, so the ordinary three keep a
+                # signature with nothing irrelevant in it.
+                if rule.refuses(doc, when=when, caller=caller):
+                    return rule.reason
             elif rule.refuses(doc, when=when):
                 return rule.reason
         except Exception:  # noqa: BLE001 - a rule must not be able to open
@@ -345,8 +592,12 @@ class Admission:
 
     kind = "admission"
 
-    def __init__(self, db, spec: AdmissionSpec):
+    def __init__(self, db, spec: AdmissionSpec, *, engine=None):
         self.db = db
+        # Optional, and only so ``search()`` below can exist. A handle built
+        # by hand (tests, a script) keeps working without one and raises a
+        # sentence rather than an AttributeError if asked to search.
+        self.engine = engine
         self.spec = spec.with_defaults()
         spec = self.spec
         self.rules: tuple[Rule, ...] = spec.rules
@@ -354,6 +605,30 @@ class Admission:
         self.tenant = spec.tenant
         self.receipts_log = Receipts()
         self._include = False
+        self.ledger = None
+        self._caller: dict | None = None
+        # Bound and holding no claims is not the same as never bound: the
+        # first is a caller entitled to nothing, the second is a code path
+        # that forgot to say who is asking. Conflating them is how a read
+        # returns empty and a write silently matches nothing.
+        self._bound = False
+
+    # ---- proof ---------------------------------------------------------
+
+    def witnessed_by(self, ledger) -> Admission:
+        """Record every revocation on a hash chain. Returns ``self``.
+
+        Counters answer "how much has this process refused"; a chain answers
+        "show me that this fact stopped being reachable at 14:02, and that
+        the record has not been edited since". Only the second one survives
+        contact with an auditor, and only revocations go on it -- see
+        ``ledger.py`` for why ledgering reads is the wrong trade.
+
+        Attached rather than built in, because a chain that never expires is
+        a retention decision and retention decisions should be typed out.
+        """
+        self.ledger = ledger
+        return self
 
     # ---- schema --------------------------------------------------------
 
@@ -373,6 +648,46 @@ class Admission:
                                                             sparse=True)
         return True
 
+    # ---- who is asking -------------------------------------------------
+
+    def for_caller(self, claims: dict | None) -> Admission:
+        """Bind this handle to one caller's claims. Returns a new handle.
+
+        A clone, not a setting, and that is load-bearing rather than
+        stylistic: ``engine.admission()`` deduplicates handles per collection
+        and hands every caller *the same object*. A ``for_caller`` that
+        mutated would make the last request's identity the current one, under
+        concurrency, in an access-control check -- the kind of bug that does
+        not reproduce and does not error and shows the wrong tenant's
+        documents to whoever asked second.
+
+        Rules that declared ``needs_caller`` see these claims. The rest do
+        not, so binding a caller onto a collection with no caller-aware rule
+        changes nothing, which is the behaviour that makes it safe to call
+        unconditionally in a request handler.
+
+        Claims come from whatever already authenticated the caller. This
+        method does not verify them and cannot: a handle that believed
+        ``{"clearance": "secret"}`` because it was passed one would be an
+        authorisation system whose only input is the attacker's.
+        """
+        clone = self._clone()
+        clone._caller = dict(claims) if claims else {}
+        clone._bound = True
+        return clone
+
+    def _clone(self) -> Admission:
+        clone = Admission(self.db, self.spec, engine=self.engine)
+        # Receipts are shared: a refusal is a refusal whichever derived
+        # handle saw it, and a per-request clone with its own counters would
+        # report nothing on /healthz.
+        clone.receipts_log = self.receipts_log
+        clone.ledger = self.ledger
+        clone._include = self._include
+        clone._caller = self._caller
+        clone._bound = self._bound
+        return clone
+
     # ---- the escape hatch, deliberately named --------------------------
 
     def including_refused(self) -> Admission:
@@ -382,16 +697,39 @@ class Admission:
         separate object rather than a flag on every call so that a review can
         grep for the phrase and find every place the guarantee was set aside.
 
-        Note what it does *not* set aside: the tenant. Seeing forgotten rows
-        is an operational need; seeing another tenant's forgotten rows is a
-        breach with a nicer name.
+        Note what it does *not* set aside. The tenant, first: seeing
+        forgotten rows is an operational need, seeing another tenant's
+        forgotten rows is a breach with a nicer name. And second, any rule
+        that marks itself unbypassable -- which is how the caller-aware rules
+        are declared.
+
+        That distinction is the one worth stating, because the naive version
+        of this method is "skip every rule", and it was. The reasons in this
+        module are not one kind of thing. A *deadline* and a *revocation* say
+        the fact is forgotten, and auditing what was forgotten is precisely
+        the job this handle exists for. A *clearance* says this caller may
+        not have it, which is not a forgetting reason and not this handle's
+        to waive: an auditor is entitled to see what was erased, and entitled
+        to nothing above their own clearance. One method waiving both would
+        make "let me see the deleted rows" a privilege escalation.
         """
-        clone = Admission(self.db, self.spec)
-        clone.receipts_log = self.receipts_log
+        clone = self._clone()
         clone._include = True
         return clone
 
     # ---- the rule ------------------------------------------------------
+
+    def _needs_a_caller(self) -> tuple:
+        """The reasons on this handle that cannot be decided without a caller."""
+        return tuple(r.reason for r in self.rules
+                     if getattr(r, "needs_caller", False))
+
+    def _require_caller(self) -> None:
+        if self._bound:
+            return
+        reasons = self._needs_a_caller()
+        if reasons:
+            raise CallerRequired(self.collection, reasons)
 
     def _query(self, filters: dict | None) -> dict:
         """Push refusal *and* the tenant into the query.
@@ -408,20 +746,33 @@ class Admission:
         where ``doc_id: {"$in": [...]}`` is how a batch is forgotten. The
         hazards differ, so the rules do.
         """
+        self._require_caller()
         q = require_tenant(self.collection, self.tenant, filters)
-        if self._include:
-            return q
         # Only the rules that *can* be expressed server-side. A rule with no
         # clause is not skipped -- it is simply enforced on the way out
         # instead, by _admit, which is the authoritative half anyway.
-        clauses = [c for c in (r.clause() for r in self.rules) if c]
+        #
+        # Under ``including_refused()`` the forgetting rules drop out and the
+        # unbypassable ones stay, so an audit read is still bounded by who is
+        # asking.
+        usable = [r for r in self.rules
+                  if not self._include or not getattr(r, "bypassable", True)]
+        clauses = [c for c in (self._clause_of(r) for r in usable) if c]
         if not clauses:
             return q
         existing = q.pop("$and", [])
         q["$and"] = [*existing, *clauses] if existing else clauses
         return q
 
-    def _admit(self, doc: dict | None, *, when: datetime | None = None):
+    def _clause_of(self, rule) -> dict | None:
+        """A rule's query fragment, handing over the caller when it wants one."""
+        if getattr(rule, "needs_caller", False):
+            for_caller = getattr(rule, "clause_for", None)
+            return for_caller(self._caller) if for_caller else None
+        return rule.clause()
+
+    def _admit(self, doc: dict | None, *, when: datetime | None = None,
+               tally: dict[str, int] | None = None):
         """The authoritative check, on the way out.
 
         The query above is an optimisation. *This* is the guarantee, and it is
@@ -429,12 +780,23 @@ class Admission:
         -- every hit from ``$vectorSearch``, where the deadline is deliberately
         not an index filter.
         """
-        if doc is None or self._include:
+        if doc is None:
             return doc
-        reason = why_refused(doc, self.spec, when=when)
+        # Loud on the per-document path as well. A handle that refused every
+        # hit for want of a caller would look exactly like a scope where
+        # everything is forgotten -- and that is the one diagnosis this whole
+        # module exists to make impossible to reach by accident.
+        self._require_caller()
+        reason = why_refused(doc, self.spec, when=when, caller=self._caller,
+                             only_unbypassable=self._include)
         if reason is None:
             return doc
-        self.receipts_log.record(reason)
+        if tally is None:
+            self.receipts_log.record(reason)
+        else:
+            # Counted for this page; committed by the caller once the page is
+            # final, so a refill does not count the same document twice.
+            tally[reason] = tally.get(reason, 0) + 1
         log.debug("refused a %s document from %s", reason, self.collection)
         return None
 
@@ -447,6 +809,160 @@ class Admission:
         be, so they are admitted one at a time, here.
         """
         return [d for d in docs if self._admit(d, when=when) is not None]
+
+    def _classify(self, docs: list[dict], *, when: datetime | None = None
+                  ) -> tuple[list[dict], dict[str, int]]:
+        """Admit a candidate set without recording anything yet."""
+        tally: dict[str, int] = {}
+        kept = [d for d in docs
+                if self._admit(d, when=when, tally=tally) is not None]
+        return kept, tally
+
+    async def search(self, vector, *, text: str | None = None,
+                     limit: int = 5, filters: dict | None = None,
+                     when: datetime | None = None,
+                     rounds: int = 3) -> Page:
+        """Search this collection and admit the hits. The whole read, one call.
+
+        This exists because the engine's own ``search()`` is a **primitive,
+        not a read path**: it returns what the index ranked. Deadlines are
+        deliberately not pushed into the vector index -- the measurements are
+        in ``search.py`` -- so a hit arriving from ``$vectorSearch`` has never
+        been filtered by anything, and admitting it is the caller's job.
+
+        Which is precisely the shape this module was written to abolish. The
+        original sin was six read paths that each had to remember a deadline
+        filter; replacing it with two read paths that each had to remember to
+        wrap a search is the same bug with a smaller number. Both of them did
+        remember, and both wrote out their own fetch-budget guess, and the
+        two guesses were the same wrong constant -- which is what a
+        convention looks like just before it fails a third time.
+
+        So the handle owns the query as well as the rule. There is now one
+        named way to search a collection that refuses things, and reaching
+        past it means naming the primitive on the engine, which a review can
+        grep for and CI asserts no module in this package does.
+        """
+        if self.engine is None:
+            raise RuntimeError(
+                f"this {self.collection} handle was built without an engine, "
+                "so it cannot search. Build it with engine.admission(...) / "
+                "model(...).forgettable(), or call saturate() with your own "
+                "fetch")
+
+        async def fetch(n: int) -> list[dict]:
+            return await self.engine.search(self.collection, vector,
+                                            text=text, limit=n,
+                                            filters=filters)
+
+        return await self.saturate(fetch, limit=limit, when=when,
+                                   rounds=rounds)
+
+    async def saturate(self, fetch, *, limit: int,
+                       when: datetime | None = None,
+                       rounds: int = 3) -> Page:
+        """Fill a page of ``limit`` reachable documents, refusal notwithstanding.
+
+        Enforcing the deadline on read -- rather than in the vector index,
+        for the reasons measured in ``search.py`` -- means forgotten
+        documents are fetched and then dropped. They spend the fetch budget.
+        Both read paths in this package knew that and both bought the same
+        fixed insurance: ask for ``limit * 2``, admit, slice. Which is a
+        guess, and a guess that fails in the direction this repository
+        otherwise refuses to fail in:
+
+            40 expired rows outranking 6 live ones, limit=5  ->  0 hits
+
+        Zero. Not "fewer". The live documents were indexed, queryable and
+        present, and the caller was handed an empty list that is
+        indistinguishable from "nothing matched" -- the same
+        fewer-rows-instead-of-an-error shape that this codebase blocks
+        startup over and refuses to let a rebuilding index produce. Refusal
+        is supposed to cost the *forgotten* document its place, not the page.
+
+        So the budget is not a constant. ``fetch(n)`` is asked for candidates
+        in ranking order; each round re-asks for more and re-admits the
+        superset, until the page is full or the candidates run out. The next
+        size is derived from the refusal rate just observed rather than
+        doubled blindly -- at a 90% refusal rate, doubling takes four rounds
+        to find what one round of arithmetic gets in one.
+
+        Three things end the loop, and all three are honest:
+
+        1. the page is full;
+        2. ``fetch`` returned fewer rows than asked for -- there is nothing
+           further down the ranking. This also covers the search tier's own
+           ceiling (``MAX_LIMIT``): a request past it comes back short, which
+           is the truth from where this sits, since no more are reachable;
+        3. ``rounds`` is spent. A scope where *everything* is forgotten must
+           not turn one query into an unbounded sequence of them.
+
+        Only case 3 sets ``page.starved``, and the distinction is the
+        interesting part. Case 2 can also leave the page short, and that
+        short page is *complete*: the candidates are exhausted, so nothing is
+        being withheld and there is nothing to go back for, however many
+        refusals it took to establish. Case 3 is the opposite -- candidates
+        remained and this page could not reach them -- and it is the only
+        state a caller needs to treat as partial.
+
+        Case 2 does swallow one thing worth naming: a request past the search
+        tier's ``MAX_LIMIT`` comes back clamped, which is indistinguishable
+        here from "that is all there is". It is reported as complete because
+        from this layer it is -- no further document is reachable by any
+        query this engine will issue. A deployment that needs to see past
+        that ceiling needs a bigger ceiling, not a different flag.
+        """
+        want = max(1, int(limit))
+        rounds = max(1, int(rounds))
+        asked = want * 2          # the cheap first guess, unchanged
+        kept: list[dict] = []
+        tally: dict[str, int] = {}
+        examined = 0
+        exhausted = False
+
+        for attempt in range(rounds):
+            candidates = list(await fetch(asked))
+            examined = len(candidates)
+            kept, tally = self._classify(candidates, when=when)
+            # Fewer rows than asked for: there is nothing further down the
+            # ranking, so whatever the page holds is the whole answer.
+            exhausted = examined < asked
+            if len(kept) >= want or exhausted:
+                break
+            if attempt + 1 < rounds:
+                asked = self._next_ask(asked, want, kept=len(kept),
+                                       examined=examined)
+
+        self.receipts_log.record_many(tally)
+        page = Page(kept[:want], refused=tally, examined=examined,
+                    starved=len(kept) < want and not exhausted)
+        if page.starved:
+            # Worth a line at WARNING: it means a caller was told less than
+            # the truth, which no amount of correct filtering makes fine. And
+            # only here -- a short-but-complete page used to log this too,
+            # which is how a useful warning becomes one people filter out.
+            log.warning(
+                "page starved on %s: wanted %d, admitted %d of %d examined, "
+                "refused %s", self.collection, want, len(kept), examined, tally)
+        return page
+
+    @staticmethod
+    def _next_ask(asked: int, want: int, *, kept: int, examined: int) -> int:
+        """How many candidates to ask for next, from the rate just measured.
+
+        The observed hit rate is the best available estimate of the one
+        further down the ranking, so aim at the size that *would* have filled
+        the page, with headroom. A round that admitted nothing has no rate to
+        extrapolate from, so it falls back to growing hard -- that case is
+        either a wholly forgotten scope (ends on ``rounds``) or a deep run of
+        expired rows (ends when it clears them).
+        """
+        if kept == 0:
+            return asked * 4
+        needed = want / (kept / max(examined, 1))
+        # Never shrink, and always ask for strictly more than last time, or
+        # the loop re-issues an identical query and calls it progress.
+        return max(asked + want, int(needed * 1.5) + 1)
 
     # ---- reads: refusal is the default ---------------------------------
 
@@ -507,6 +1023,44 @@ class Admission:
         ``including_refused()``, for cases where you must prove *when* a fact
         stopped being reachable. The default erases as soon as the reaper runs.
         """
+        n, _ = await self._revoke(filters, reason=reason,
+                                  erase_after=erase_after)
+        return n
+
+    async def witness(self, filters: dict, *, reason: str,
+                      erase_after: timedelta | None = None) -> dict:
+        """``revoke()``, returning the chain entry instead of the count.
+
+        The entry is the receipt, and handing it to whoever asked for the
+        erasure is the point: their copy of the hash was taken before any
+        dispute existed, so a chain that later does not contain it is
+        falsified by a record this database's operator never held. Without
+        that, a hash chain is only evidence against people who cannot edit
+        it.
+        """
+        n, receipt = await self._revoke(filters, reason=reason,
+                                        erase_after=erase_after)
+        out = dict(receipt or {})
+        out.setdefault("count", n)
+        return out
+
+    async def _revoke(self, filters: dict, *, reason: str,
+                      erase_after: timedelta | None) -> tuple[int, dict | None]:
+        """The revocation, returning both of the things callers want from it.
+
+        Both results come back from one call rather than the count coming
+        back and the receipt being stashed on the handle for a second method
+        to collect. That is not tidiness: handles are deduplicated per
+        collection, so ``_last_receipt`` was shared mutable state on an
+        object every request holds, and two concurrent revocations could hand
+        each caller the other's hash. Which is the same defect ``for_caller``
+        returning a clone exists to prevent, reintroduced two hundred lines
+        below the comment explaining it.
+        """
+        # Checked deliberately before anything else: on a write, the caller
+        # check has to happen before the collection handle is even touched,
+        # or the failure mode depends on which line raises first.
+        self._require_caller()
         stamp = now()
         mark = {"at": stamp, "reason": reason}
         result = await self.db[self.collection].update_many(
@@ -519,7 +1073,39 @@ class Admission:
             log.info("revoked %d fact(s) in %s (%s); unreachable as of %s",
                      result.modified_count, self.collection, reason,
                      stamp.isoformat())
-        return result.modified_count
+        receipt = await self._witness(filters, reason=reason,
+                                      count=result.modified_count, at=stamp)
+        return result.modified_count, receipt
+
+    async def _witness(self, filters: dict, *, reason: str, count: int,
+                       at: datetime) -> dict | None:
+        """Append to the chain, and never fail the revocation over it.
+
+        Order matters and this is the unintuitive half: the rows are already
+        unreachable before this runs. If appending fails, the *safe* outcome
+        is the one that already happened -- the fact is refused -- and the
+        loud thing to do is log it, not raise and let a caller conclude the
+        revocation did not take and retry it. An unrecorded refusal is an
+        audit gap; an un-refused fact is a breach. They are not the same
+        size, so they do not get the same handling.
+
+        The subject is the filter, canonicalised -- ids and a reason, never
+        document text. An audit record that quotes the secret it was asked to
+        forget is a fresh copy of it, exempt from every deadline here.
+        """
+        if self.ledger is None:
+            return None
+        try:
+            return await self.ledger.append(
+                "revoked", tenant=self.tenant and filters.get(self.tenant),
+                reason=reason, subject=filters, count=count, at=at)
+        except Exception:  # noqa: BLE001 - see docstring: the fact is
+            # already unreachable, and this must not undo that.
+            log.exception(
+                "revoked %d fact(s) in %s but could not record it on the "
+                "chain -- the facts ARE unreachable; the audit trail has a "
+                "gap at %s", count, self.collection, at.isoformat())
+            return None
 
     async def pin(self, filters: dict) -> int:
         """Remove a deadline. Pinning is the absence of one, not a flag."""
