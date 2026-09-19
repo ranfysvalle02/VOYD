@@ -85,6 +85,25 @@ class Model:
             self.collection, at_field=at_field, mark_field=mark_field,
             tenant=self.tenant)
 
+    def admitting(self, *rules, at_field: str = "expire_at") -> Forgetting:
+        """A read handle with an explicit list of reasons to refuse.
+
+        ``forgettable()`` is this with the two defaults. Naming the rules is
+        for when a collection has more:
+
+            notes.admitting(Deadline(), revoked(), quarantined())
+
+        Each rule is asked on every read, in order, and the *first* refusal
+        is what gets reported -- an operator needs to know a document was
+        quarantined rather than merely expired, because the responses
+        differ. The TTL is still declared, because a deadline refused on
+        read and never collected is a storage leak.
+        """
+        self.expiring(at_field=at_field)
+        return self.engine.forgetting(
+            self.collection, at_field=at_field, tenant=self.tenant,
+            rules=tuple(rules))
+
     def memory(self, **kw) -> Memory:
         """Recall with decay: search plus TTL, one collection."""
         spec_kw = dict(kw)

@@ -47,8 +47,9 @@ from .errors import (
     ScopeRequired,
 )
 from .expiry import Expiry, ExpirySpec
-from .forgetting import (DEADLINE, REVOKED, UNREADABLE, Forgetting,
-                         ForgettingSpec, why_unreachable)
+from .forgetting import (DEADLINE, QUARANTINED, REVOKED, UNREADABLE, Deadline,
+                         Forgetting, ForgettingSpec, Marked, Rule,
+                         quarantined, revoked, why_unreachable)
 from .jobs import JobQueue, PermanentFailure, backoff
 from .memory import Memory, MemorySpec
 from .model import Model
@@ -172,7 +173,8 @@ class Engine:
 
     def forgetting(self, collection: str, *, at_field: str = "expire_at",
                    mark_field: str = "forgotten",
-                   tenant: str | None = None) -> Forgetting:
+                   tenant: str | None = None,
+                   rules: tuple = ()) -> Forgetting:
         """A read handle for ``collection`` that refuses forgotten facts.
 
         Installed as a trait, so ``ensure()`` indexes the mark field and
@@ -184,8 +186,12 @@ class Engine:
         which is the one thing this primitive exists to prevent. A caller
         asking twice gets the same object.
         """
+        # Normalised before comparison: the handle fills in the default
+        # rules, so an un-defaulted spec would never equal a live one and
+        # every second declaration would look like a conflict.
         spec = ForgettingSpec(collection, at_field=at_field,
-                              mark_field=mark_field, tenant=tenant)
+                              mark_field=mark_field, tenant=tenant,
+                              rules=tuple(rules or ())).with_defaults()
         existing = self._installed.get("forgetting", {}).get(collection)
         if existing is not None:
             if existing.spec != spec:
@@ -246,7 +252,8 @@ __all__ = [
     "SearchEngine", "SearchSpec", "cosine",
     "Expiry", "ExpirySpec",
     "Forgetting", "ForgettingSpec", "why_unreachable",
-    "DEADLINE", "REVOKED", "UNREADABLE",
+    "Rule", "Deadline", "Marked", "revoked", "quarantined",
+    "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED",
     "Memory", "MemorySpec",
     "Model",
     "JobQueue", "PermanentFailure", "backoff",

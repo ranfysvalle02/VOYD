@@ -66,9 +66,9 @@ mean issuing every read twice. A signal, not a ledger.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
 
 from .errors import require_tenant
 from .time import aware, living, now
@@ -80,6 +80,103 @@ log = logging.getLogger("engine.forgetting")
 DEADLINE = "deadline"
 REVOKED = "revoked"
 UNREADABLE = "unreadable"
+QUARANTINED = "quarantined"
+
+
+# ---- rules -------------------------------------------------------------
+#
+# A rule answers one question about one document: is there a reason this may
+# not reach a prompt? The handle owns *that* there is an answer on every
+# read; a rule owns *what* the answer is. Adding a reason is therefore a new
+# rule rather than a new branch in a predicate that keeps growing.
+#
+# Two halves, and both are optional to get right in the same way:
+#
+#   refuses(doc)  the authoritative check, per document, on the way out.
+#                 Must never raise: an exception inside a filter is how the
+#                 filter gets skipped.
+#   clause()      the same rule as a query fragment, or None when it cannot
+#                 be expressed server-side. An optimisation, never the
+#                 guarantee -- search hits never went through a query.
+
+
+class Rule(Protocol):
+    """One reason a document may not reach a prompt."""
+
+    reason: str
+
+    def refuses(self, doc: dict, *, when: datetime | None = None) -> bool: ...
+
+    def clause(self) -> dict | None: ...
+
+
+@dataclass(frozen=True)
+class Deadline:
+    """Expired, or carrying a deadline that cannot be read.
+
+    Fails closed on an unreadable one: a fact whose lifetime cannot be
+    established has no business in a prompt. Reported separately from an
+    ordinary expiry, because a climbing ``unreadable`` count means something
+    is writing deadlines it should not.
+    """
+
+    at_field: str = "expire_at"
+    reason: str = DEADLINE
+
+    def refuses(self, doc: dict, *, when: datetime | None = None) -> bool:
+        return self.why(doc, when=when) is not None
+
+    def why(self, doc: dict, *, when: datetime | None = None) -> str | None:
+        exp = doc.get(self.at_field)
+        if exp is None:
+            return None                  # pinned: the absence of a deadline
+        if not isinstance(exp, datetime):
+            return UNREADABLE
+        try:
+            return None if aware(exp) > (when or now()) else DEADLINE
+        except (TypeError, ValueError, OverflowError):
+            return UNREADABLE
+
+    def clause(self) -> dict | None:
+        return living(self.at_field)
+
+
+@dataclass(frozen=True)
+class Marked:
+    """Refused because somebody said so, and said why.
+
+    The general form of "a field whose presence means no". ``revoked`` is an
+    erasure request; ``quarantined`` is a document held back from models
+    while kept for forensics. Same mechanics, different verb and different
+    operational meaning, which is exactly why they are two rules and not one
+    boolean.
+    """
+
+    field: str
+    reason: str
+
+    def refuses(self, doc: dict, *, when: datetime | None = None) -> bool:
+        return doc.get(self.field) is not None
+
+    def clause(self) -> dict | None:
+        return {"$or": [{self.field: None}, {self.field: {"$exists": False}}]}
+
+
+def revoked(field: str = "forgotten") -> Marked:
+    """Forgotten on request: unreachable now, erased by the deadline."""
+    return Marked(field=field, reason=REVOKED)
+
+
+def quarantined(field: str = "quarantined") -> Marked:
+    """Held back from models, deliberately still on disk.
+
+    The row is evidence. A document flagged by an injection detector, or by
+    a human, must stop reaching prompts *without* being destroyed -- you
+    cannot investigate what you deleted. Refusal already had exactly this
+    shape, so this is a rule rather than a feature.
+    """
+    return Marked(field=field, reason=QUARANTINED)
+
 
 
 @dataclass(frozen=True)
@@ -100,11 +197,22 @@ class ForgettingSpec:
     # same unscoped object back. Two declarations disagreeing about the
     # boundary must collide loudly, not resolve to whichever ran first.
     tenant: str | None = None
+    # The reasons this collection refuses, in the order they are asked.
+    # Empty means the two defaults -- a deadline and an explicit revocation
+    # -- which is what ``forgettable()`` installs. Anything else is declared
+    # by the application through ``admitting()``.
+    rules: tuple[Rule, ...] = ()
+
+    def with_defaults(self) -> ForgettingSpec:
+        if self.rules:
+            return self
+        return replace(self, rules=(Deadline(self.at_field),
+                                    revoked(self.mark_field)))
 
     def describe(self) -> str:
         scope = f", scoped by {self.tenant}" if self.tenant else ""
-        return (f"{self.collection}: refuses on {self.at_field} (deadline) "
-                f"and {self.mark_field} (revoked){scope}")
+        reasons = ", ".join(r.reason for r in self.rules) or "deadline, revoked"
+        return f"{self.collection}: refuses on [{reasons}]{scope}"
 
 
 @dataclass
@@ -158,24 +266,31 @@ class Receipts:
 
 def why_unreachable(doc: dict, spec: ForgettingSpec,
                     *, when: datetime | None = None) -> str | None:
-    """Why this document may not reach a prompt, or ``None`` if it may.
+    """The first reason this document may not reach a prompt, or ``None``.
 
-    Never raises. A fact whose lifetime cannot be read is refused rather than
-    served, because the alternative -- an exception inside a filter -- is how
-    the filter gets skipped.
+    Asks each declared rule in order and returns the first refusal. Order is
+    the declared order and it is reported, not merged: an operator needs to
+    know a document was *quarantined* rather than merely expired, because
+    the two demand different responses.
+
+    Never raises, whatever a rule does. A rule that throws is treated as a
+    refusal and named, because an exception inside a filter is how the
+    filter gets skipped -- the failure this module exists to prevent, and it
+    must not come back through a third-party rule.
     """
-    if doc.get(spec.mark_field) is not None:
-        return REVOKED
-
-    exp = doc.get(spec.at_field)
-    if exp is None:
-        return None                      # pinned: the absence of a deadline
-    if not isinstance(exp, datetime):
-        return UNREADABLE
-    try:
-        return None if aware(exp) > (when or now()) else DEADLINE
-    except (TypeError, ValueError, OverflowError):
-        return UNREADABLE
+    for rule in spec.with_defaults().rules:
+        try:
+            if isinstance(rule, Deadline):
+                why = rule.why(doc, when=when)
+                if why is not None:
+                    return why
+            elif rule.refuses(doc, when=when):
+                return rule.reason
+        except Exception:  # noqa: BLE001 - a rule must not be able to open
+            # the gate by failing. Refuse, and say which rule did it.
+            log.exception("rule %r raised; refusing the document", rule.reason)
+            return rule.reason
+    return None
 
 
 class Forgetting:
@@ -190,7 +305,9 @@ class Forgetting:
 
     def __init__(self, db, spec: ForgettingSpec):
         self.db = db
-        self.spec = spec
+        self.spec = spec.with_defaults()
+        spec = self.spec
+        self.rules: tuple[Rule, ...] = spec.rules
         self.collection = spec.collection
         self.tenant = spec.tenant
         self.receipts_log = Receipts()
@@ -199,9 +316,19 @@ class Forgetting:
     # ---- schema --------------------------------------------------------
 
     async def ensure(self) -> bool:
-        """Index the mark field. Revocation must be cheap or it gets skipped."""
-        await self.db[self.collection].create_index(self.spec.mark_field,
-                                                    sparse=True)
+        """Index every field a rule filters on.
+
+        One index per marked field, sparse because the mark is the exception.
+        A rule whose field is unindexed still *works* -- it is checked on the
+        way out either way -- but its server-side clause becomes a scan, and
+        a guarantee that gets expensive is a guarantee somebody eventually
+        turns off.
+        """
+        for rule in self.rules:
+            field_name = getattr(rule, "field", None)
+            if field_name:
+                await self.db[self.collection].create_index(field_name,
+                                                            sparse=True)
         return True
 
     # ---- the escape hatch, deliberately named --------------------------
@@ -242,9 +369,12 @@ class Forgetting:
         q = require_tenant(self.collection, self.tenant, filters)
         if self._include:
             return q
-        clauses = [living(self.spec.at_field),
-                   {"$or": [{self.spec.mark_field: None},
-                            {self.spec.mark_field: {"$exists": False}}]}]
+        # Only the rules that *can* be expressed server-side. A rule with no
+        # clause is not skipped -- it is simply enforced on the way out
+        # instead, by _admit, which is the authoritative half anyway.
+        clauses = [c for c in (r.clause() for r in self.rules) if c]
+        if not clauses:
+            return q
         existing = q.pop("$and", [])
         q["$and"] = [*existing, *clauses] if existing else clauses
         return q
