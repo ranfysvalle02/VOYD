@@ -48,6 +48,15 @@ So the copies split three ways, and each gets a different verb:
               query instead of an archaeology project, which is the only
               honest offer.
 
+**On shipped adapters: no, and it is a decision rather than a gap.** A
+Redis adapter here is a Redis adapter somebody has to keep current, for a
+call that is one ``DEL`` in the caller's own code -- and it would arrive
+with an opinion about key naming that is wrong for most deployments. The
+real risk of staying an interface is a perimeter nobody registers anything
+into, so the answer is to make registering nearly free rather than to ship
+vendors: ``sink(name, holds, forget=...)`` takes two lambdas, so the cost
+of being honest about a cache is three lines rather than a class.
+
 ``describe()`` is therefore the most valuable thing in this file. Most
 teams cannot answer "who else holds this fact" at all; being able to print
 the list, with the class of each, is worth more than a propagation
@@ -59,10 +68,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
 
-from .time import now
+from .time import aware, now
 
 log = logging.getLogger("engine.perimeter")
 
@@ -74,6 +83,12 @@ DERIVED = "derived"
 # on purpose: this runs on the erasure path, and an erasure request must
 # not be slower than a caller's patience because a cache is wedged.
 SINK_TIMEOUT_S = 5.0
+
+# How long an unanswered acknowledgement stays worth retrying. A day,
+# because most cache evictions and most outages are shorter than that, and
+# past it a "success" would be the cache having forgotten on its own --
+# which is not the same fact and must not be recorded as if it were.
+DEFAULT_HORIZON = timedelta(days=1)
 
 
 @runtime_checkable
@@ -89,6 +104,16 @@ class Sink(Protocol):
                 claimed about this sink, and getting it wrong is the only
                 way to make this module lie.
     ``forget(ids, *, reason)``  best effort. Return truthy on success.
+
+    And one optional coroutine, which is the difference between a claim
+    and a check:
+
+    ``verify(id)``  given an id whose key has been destroyed, return
+                    truthy if this sink can **still** produce the
+                    plaintext. A sealed sink that answers truthy is
+                    misdeclared, and that misdeclaration is the only way
+                    this module can lie -- it would report an erasure that
+                    did not happen. See ``Perimeter.audit()``.
     """
 
     name: str
@@ -110,6 +135,29 @@ class Acknowledgement:
     def as_dict(self) -> dict:
         return {"sink": self.sink, "holds": self.holds, "acked": self.acked,
                 "at": self.at.isoformat(), "detail": self.detail}
+
+
+def sink(name: str, holds: str, *, forget=None, verify=None):
+    """Build a sink from callables. Registering should cost three lines.
+
+    The alternative to shipping vendor adapters: a deployment that keeps
+    plaintext in Redis should be able to say so without writing a class,
+    because the thing that makes a perimeter worthless is an empty one.
+
+    ``forget`` may be omitted for ``sealed`` (nothing to call) and for
+    ``derived`` (nothing that would work).
+    """
+
+    async def _noop(ids, *, reason):
+        return True
+
+    made = type(f"Sink_{name.replace('-', '_').replace('.', '_')}", (), {
+        "name": name, "holds": holds,
+        "forget": staticmethod(forget or _noop),
+    })()
+    if verify is not None:
+        made.verify = verify
+    return made
 
 
 @dataclass
@@ -196,6 +244,56 @@ class Perimeter:
                 "may still be serving it: %s", len(missed), ", ".join(missed))
         return out
 
+    async def redrive(self, store, *, older_than: timedelta | None = None
+                      ) -> list[Acknowledgement]:
+        """Retry the sinks that did not answer, within a deadline.
+
+        A sink that was down during a revocation stays unacknowledged
+        forever otherwise, which is an open breach sitting in an audit
+        trail with nobody assigned to it.
+
+        **Bounded, and the bound is the design.** A retry that runs a week
+        later against a cache that has since evicted the key achieves
+        nothing and writes a success into the record, and a false success
+        is worse than a gap that is honestly marked. So an outstanding
+        acknowledgement has a horizon: past it, it is not retried and is
+        closed as ``expired`` -- a permanent, visible "this was never
+        confirmed" rather than an optimistic one.
+
+        ``store`` is anything with ``outstanding()`` and ``settle()``;
+        ``PerimeterLog`` below is the one this package ships. Passed in
+        rather than reached for, because whether these records are worth
+        keeping -- and for how long -- is a retention decision, and
+        retention decisions should be typed out.
+        """
+        # ``is None``, not ``or``: ``timedelta(0)`` is falsy, so the
+        # obvious spelling silently turns "expire everything now" -- the
+        # thing an operator reaches for to drain a queue -- into the
+        # default one-day horizon, and the retries they were trying to
+        # stop all run.
+        horizon = DEFAULT_HORIZON if older_than is None else older_than
+        settled: list[Acknowledgement] = []
+        by_name = {s.name: s for s in self.sinks}
+        for row in await store.outstanding():
+            sink = by_name.get(row["sink"])
+            age = now() - aware(row["at"])
+            if sink is None or age > horizon:
+                why = ("sink is no longer registered" if sink is None else
+                       f"never confirmed within {horizon}; a later retry "
+                       f"would be against a cache that has moved on")
+                ack = Acknowledgement(row["sink"], row.get("holds", OWNED),
+                                      False, now(), f"expired: {why}")
+                await store.settle(row, ack, final=True)
+            else:
+                ack = await self._tell(sink, row["ids"], row["reason"])
+                await store.settle(row, ack, final=ack.acked)
+            settled.append(ack)
+        if settled:
+            log.info("perimeter: re-drove %d outstanding acknowledgement(s); "
+                     "%d confirmed", len(settled),
+                     sum(1 for a in settled if a.acked))
+        return settled
+
     async def _tell(self, sink, ids: list, reason: str) -> Acknowledgement:
         try:
             async with asyncio.timeout(SINK_TIMEOUT_S):
@@ -207,6 +305,52 @@ class Perimeter:
                                    f"no answer in {SINK_TIMEOUT_S}s")
         except Exception as exc:  # noqa: BLE001 - see forget(): never raise
             return Acknowledgement(sink.name, OWNED, False, now(), repr(exc))
+
+    async def audit(self, *, shredded_id) -> list[Acknowledgement]:
+        """Turn ``holds=SEALED`` from a claim into a check.
+
+        A sink declaring ``sealed`` is *trusted* about it, and if it
+        actually caches plaintext the perimeter reports an erasure that did
+        not happen. That is the one way this module can lie, and it lies in
+        the direction that matters: quietly, in a compliance answer.
+
+        So hand each sealed sink an id whose key has been destroyed and ask
+        whether it can still produce the plaintext. A sink that can is
+        misdeclared and says so here rather than in an incident.
+
+        A sink with no ``verify`` is reported **unverified rather than
+        passing**, which is the whole point -- a claim nobody checked and a
+        claim that was checked must not look the same, and that is the same
+        argument the falsifier makes about a skipped test.
+        """
+        out = []
+        for sink in self.sinks:
+            if sink.holds != SEALED:
+                continue
+            check = getattr(sink, "verify", None)
+            if check is None:
+                out.append(Acknowledgement(
+                    sink.name, SEALED, False, now(),
+                    "declares it holds ciphertext and offers no verify(); "
+                    "the claim is unchecked, not confirmed"))
+                continue
+            try:
+                async with asyncio.timeout(SINK_TIMEOUT_S):
+                    leaked = await check(shredded_id)
+            except Exception as exc:  # noqa: BLE001 - an audit that raises
+                # is an audit that did not happen, and must not read as one
+                # that passed.
+                out.append(Acknowledgement(sink.name, SEALED, False, now(),
+                                           f"verify() raised: {exc!r}"))
+                continue
+            out.append(Acknowledgement(
+                sink.name, SEALED, not leaked, now(),
+                "" if not leaked else
+                "MISDECLARED: produced plaintext for a shredded key, so "
+                "every erasure this perimeter reported for it was false"))
+        for bad in (a for a in out if not a.acked and "MISDECLARED" in a.detail):
+            log.error("perimeter: %s", bad.detail)
+        return out
 
     def describe(self) -> dict:
         """Who holds copies, and what is honestly claimed about each.
@@ -229,3 +373,74 @@ class Perimeter:
                          "receipt",
             },
         }
+
+
+class PerimeterLog:
+    """Outstanding acknowledgements, as documents. A trait.
+
+    The document *is* the job, like everything else here -- so
+    ``engine.queue(when={"acked": False})`` drives this without a broker,
+    and ``redrive()`` is what a worker calls.
+
+    Two deliberate absences. It stores ids and a reason, never document
+    text: a record of an erasure that quotes the thing being erased is a
+    fresh copy of it, exempt from every deadline in the system -- the same
+    rule ``ledger.py`` follows. And it carries a TTL, unlike the ledger,
+    because this is operational state rather than evidence: the *chain*
+    records that a sink failed to answer, permanently. This is only the
+    queue for doing something about it.
+    """
+
+    kind = "perimeter_log"
+
+    def __init__(self, db, collection: str = "perimeter", *,
+                 retain: timedelta = timedelta(days=30)):
+        self.db = db
+        self.collection = collection
+        self.retain = retain
+
+    async def ensure(self) -> bool:
+        await self.db[self.collection].create_index(
+            [("open", 1), ("at", 1)], name="outstanding")
+        await self.db[self.collection].create_index(
+            "expire_at", expireAfterSeconds=0, sparse=True)
+        return True
+
+    async def record(self, acks, *, ids: list, reason: str) -> int:
+        """Persist the ones that did not answer. An acked sink needs no row."""
+        pending = [a for a in acks if not a.acked and a.holds == OWNED]
+        if not pending:
+            return 0
+        await self.db[self.collection].insert_many([{
+            "sink": a.sink, "holds": a.holds,
+            # Two fields, not one, because they are two questions and
+            # conflating them is how "we stopped retrying" comes to read
+            # as "it was confirmed":
+            #   open       is there still work to do?
+            #   confirmed  did the sink ever actually say yes?
+            "open": True, "confirmed": False,
+            "at": a.at, "attempts": 0, "detail": a.detail,
+            "ids": list(ids), "reason": reason,
+            "expire_at": a.at + self.retain,
+        } for a in pending])
+        return len(pending)
+
+    async def outstanding(self) -> list[dict]:
+        cursor = self.db[self.collection].find({"open": True}).sort("at", 1)
+        return [d async for d in cursor]
+
+    async def settle(self, row: dict, ack, *, final: bool) -> None:
+        """Close a row, or leave it open for another attempt.
+
+        A row closed *unconfirmed* stays readable rather than being
+        deleted: "we never confirmed this" is a finding, and removing it
+        would make the absence of a finding indistinguishable from a
+        success.
+        """
+        await self.db[self.collection].update_one(
+            {"_id": row["_id"]},
+            {"$set": {"open": not (final or ack.acked),
+                      "confirmed": bool(ack.acked),
+                      "detail": ack.detail,
+                      "settled_at": ack.at},
+             "$inc": {"attempts": 1}})

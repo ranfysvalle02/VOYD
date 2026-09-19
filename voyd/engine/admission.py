@@ -97,6 +97,14 @@ NOT_CLEARED = "not_cleared"
 # serve it, unrecoverable says nobody can.
 UNRECOVERABLE = "unrecoverable"
 
+# The three answers ``reachability_at`` can give. ``unknown`` is the one
+# worth having: a row the reaper took leaves nothing to answer from, and
+# reporting that as "not reachable" would let a deployment clear itself
+# by pointing at the absence of the evidence.
+REACHABLE = "reachable"
+REFUSED = "refused"
+UNKNOWN = "unknown"
+
 # Not a reason at all -- the chain event for the inverse of one. Every
 # imposition is recorded under the reason imposed ("revoked", "quarantined"),
 # so a single event name for every removal is what lets an auditor ask the
@@ -213,6 +221,10 @@ class Deadline:
     def clause(self) -> dict | None:
         return living(self.at_field)
 
+    def clause_at(self, when: datetime) -> dict:
+        """The same rule, evaluated at an instant rather than at now."""
+        return living(self.at_field, when=when)
+
 
 @dataclass(frozen=True)
 class Marked:
@@ -244,10 +256,42 @@ class Marked:
     reversible: bool = False
 
     def refuses(self, doc: dict, *, when: datetime | None = None) -> bool:
-        return doc.get(self.field) is not None
+        """Present means no -- *as of* ``when``, not unconditionally.
+
+        The mark has always carried an ``at``, and this always ignored it,
+        which was invisible until ``as_of()`` existed and then wrong in
+        the one direction that matters: a document revoked at 14:05 would
+        have reported as unreachable at 14:02, so a system reconstructing
+        what a model was allowed to see would place the erasure *before*
+        the answer that quoted the fact. That is an exoneration built out
+        of a bug.
+
+        Read defensively, because a mark is operator-written and this runs
+        inside a filter: a mark with no readable ``at`` refuses at every
+        instant, which is the same fail-closed direction ``Deadline``
+        takes for a deadline it cannot parse.
+        """
+        mark = doc.get(self.field)
+        if mark is None:
+            return False
+        if when is None:
+            return True
+        at = mark.get("at") if isinstance(mark, dict) else None
+        if not isinstance(at, datetime):
+            return True
+        try:
+            return aware(at) <= aware(when)
+        except (TypeError, ValueError, OverflowError):
+            return True
 
     def clause(self) -> dict | None:
         return {"$or": [{self.field: None}, {self.field: {"$exists": False}}]}
+
+    def clause_at(self, when: datetime) -> dict:
+        """The same rule, at an instant, as a query fragment."""
+        return {"$or": [{self.field: None},
+                        {self.field: {"$exists": False}},
+                        {f"{self.field}.at": {"$gt": when}}]}
 
 
 def _digest_of(body: dict) -> str:
@@ -766,6 +810,10 @@ class Admission:
         self._include = False
         self.ledger = None
         self.perimeter = None
+        self.perimeter_log = None
+        # The instant reads are answered at. ``None`` is now, which is the
+        # ordinary case and costs a single comparison.
+        self._as_of: datetime | None = None
         self._caller: dict | None = None
         # Set by ``sealed_by()`` when the model declares encrypted fields.
         # ``None`` is the ordinary case and costs nothing: every read below
@@ -779,7 +827,7 @@ class Admission:
 
     # ---- proof ---------------------------------------------------------
 
-    def bounded_by(self, perimeter) -> Admission:
+    def bounded_by(self, perimeter, *, log_to=None) -> Admission:
         """Register who else holds copies. Returns ``self``.
 
         Attached rather than built in, for the same reason the ledger is:
@@ -790,8 +838,15 @@ class Admission:
         acknowledgements ride along on the receipt, so "who was told, and
         who did not answer" is part of the audit trail rather than a log
         line somebody greps for afterwards.
+
+        ``log_to`` is a ``PerimeterLog``, and it is optional because it is
+        a retention decision: keeping a queue of unconfirmed erasures is
+        obviously right for some deployments and obviously unwanted for
+        others, and this package does not get to pick. Without it, a sink
+        that was down is recorded on the chain and never retried.
         """
         self.perimeter = perimeter
+        self.perimeter_log = log_to
         return self
 
     def witnessed_by(self, ledger) -> Admission:
@@ -871,11 +926,68 @@ class Admission:
         clone.receipts_log = self.receipts_log
         clone.ledger = self.ledger
         clone.perimeter = self.perimeter
+        clone.perimeter_log = self.perimeter_log
+        clone._as_of = self._as_of
         clone._include = self._include
         clone._caller = self._caller
         clone._bound = self._bound
         clone.sealing = self.sealing
         return clone
+
+    # ---- what was reachable then ---------------------------------------
+
+    def as_of(self, when: datetime) -> Admission:
+        """A handle that answers as the scope stood at ``when``.
+
+        *"What did the model see when it said that?"* is the question after
+        every AI incident, and until now the only honest answer was a log
+        line held by the party being asked.
+
+        Every rule already takes ``when``; what was missing was a handle
+        that threads one instant through a whole read, and a ``Marked``
+        that actually compared the mark's ``at`` instead of treating any
+        mark as eternal.
+
+        **Read this as a lower bound, not a reconstruction.** It answers
+        from the rows that are still here. A row the reaper has taken is
+        gone, and its absence is indistinguishable from never having
+        existed -- so ``as_of`` under-reports, always in the direction of
+        saying less was reachable. ``reachability_at()`` is the version
+        that will say ``unknown`` rather than let that silence read as a
+        denial.
+        """
+        clone = self._clone()
+        clone._as_of = aware(when)
+        return clone
+
+    async def reachability_at(self, filters: dict,
+                              when: datetime) -> tuple[str, str]:
+        """Was this document reachable at ``when``? ``(verdict, why)``.
+
+        Three answers, and the third is the one the API exists to make
+        unmissable:
+
+        ``reachable``    the row is here and no rule refused it then.
+        ``refused``      the row is here and something did. ``why`` names it.
+        ``unknown``      **the row is gone.** Erased on the deadline, by
+                         the reaper, weeks ago. Nothing survives from
+                         which to answer.
+
+        Returning ``refused`` for a row that has been erased is the
+        confident wrong answer this whole codebase exists to eliminate --
+        it would let a deployment clear itself of having served a fact by
+        pointing at the absence of the evidence. So the verdict is a
+        string rather than a bool, because a bool has nowhere to put
+        ``unknown`` and every caller would default it to the flattering
+        one.
+        """
+        when = aware(when)
+        doc = await self.including_refused().find_one(filters)
+        if doc is None:
+            return UNKNOWN, ("no row survives, so nothing here can say. It "
+                             "may have been reachable and later erased")
+        reason = why_refused(doc, self.spec, when=when, caller=self._caller)
+        return (REFUSED, reason) if reason else (REACHABLE, "")
 
     # ---- the escape hatch, deliberately named --------------------------
 
@@ -954,11 +1066,27 @@ class Admission:
         return q
 
     def _clause_of(self, rule) -> dict | None:
-        """A rule's query fragment, handing over the caller when it wants one."""
+        """A rule's query fragment, at the instant this handle answers for.
+
+        The two halves have to agree, and under ``as_of()`` the naive
+        version does not: the per-document check compares the mark's
+        ``at`` against the instant while the *query* drops every marked
+        row unconditionally, server-side, before anything is examined. So
+        ``as_of`` would return an empty page and look like a scope where
+        nothing was ever reachable -- a confident, wrong, and flattering
+        answer.
+
+        A rule that cannot express itself at an instant contributes no
+        clause under ``as_of`` rather than a wrong one. Losing the
+        optimisation is free; disagreeing with the guarantee is not.
+        """
         if getattr(rule, "needs_caller", False):
             for_caller = getattr(rule, "clause_for", None)
             return for_caller(self._caller) if for_caller else None
-        return rule.clause()
+        if self._as_of is None:
+            return rule.clause()
+        at_instant = getattr(rule, "clause_at", None)
+        return at_instant(self._as_of) if at_instant else None
 
     def _admit(self, doc: dict | None, *, when: datetime | None = None,
                tally: dict[str, int] | None = None):
@@ -976,7 +1104,8 @@ class Admission:
         # everything is forgotten -- and that is the one diagnosis this whole
         # module exists to make impossible to reach by accident.
         self._require_caller()
-        reason = why_refused(doc, self.spec, when=when, caller=self._caller,
+        reason = why_refused(doc, self.spec, when=when or self._as_of,
+                             caller=self._caller,
                              only_unbypassable=self._include)
         if reason is None:
             return doc
@@ -1915,6 +2044,10 @@ class Admission:
             # or be failed by -- a cache. See ``perimeter.py``.
             acks = await self.perimeter.forget(ids, reason=why)
             detail["perimeter"] = [a.as_dict() for a in acks]
+            if self.perimeter_log is not None:
+                # Only the ones that did not answer. An acknowledged sink
+                # is already recorded on the chain and needs no queue row.
+                await self.perimeter_log.record(acks, ids=ids, reason=why)
         receipt = await self._witness(
             filters or {}, event=rule.reason, reason=why, count=n, at=stamp,
             detail=detail or None)

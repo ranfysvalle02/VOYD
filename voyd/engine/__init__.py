@@ -74,8 +74,9 @@ from .errors import (
     UnknownReason,
 )
 from .expiry import Expiry, ExpirySpec
-from .admission import (DEADLINE, LIFTED, NOT_CLEARED, QUARANTINED, REVOKED,
-                        UNREADABLE, UNRECOVERABLE, WRONG_MODEL,
+from .admission import (DEADLINE, LIFTED, NOT_CLEARED, QUARANTINED,
+                        REACHABLE, REFUSED, REVOKED, UNKNOWN, UNREADABLE,
+                        UNRECOVERABLE, WRONG_MODEL,
                         Clearance, Deadline, EmbeddedWith, Page, Restricted,
                          Admission, AdmissionSpec, Marked, Rule, Unrecoverable,
                          quarantined, revoked, why_refused)
@@ -85,8 +86,9 @@ from .custody import (Aws, Azure, Custody, Ephemeral, Gcp, Kmip,
 from .keyring import Keyring, KeyringSpec, Queryable, Sealed
 from .ledger import GENESIS, Ledger, LedgerSpec, canonical, digest
 from .memory import Memory, MemorySpec
+from .policy import Denies, PolicyInvalid, compile_policy
 from .perimeter import (DERIVED, OWNED, SEALED, Acknowledgement,
-                        Perimeter, Sink)
+                        Perimeter, PerimeterLog, Sink, sink)
 from .model import Model
 from .search import SearchEngine, SearchSpec, cosine
 from .time import UTC, aware, bind, deadline, live, living, now
@@ -368,11 +370,14 @@ __all__ = [
     "Rule", "Deadline", "Marked", "revoked", "quarantined",
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
     "LIFTED", "UNRECOVERABLE", "Unrecoverable",
+    "REACHABLE", "REFUSED", "UNKNOWN",
     "Keyring", "KeyringSpec", "Sealed", "Queryable",
     "Custody", "Ephemeral", "LocalFile", "Aws", "Azure", "Gcp", "Kmip",
     "NOT_CLEARED", "EmbeddedWith", "Clearance", "Restricted", "Page",
     "Memory", "MemorySpec",
-    "Perimeter", "Sink", "Acknowledgement", "SEALED", "OWNED", "DERIVED",
+    "Perimeter", "PerimeterLog", "Sink", "sink", "Acknowledgement",
+    "compile_policy", "Denies", "PolicyInvalid",
+    "SEALED", "OWNED", "DERIVED",
     "Model",
     "JobQueue", "PermanentFailure", "backoff",
     "Ledger", "LedgerSpec", "canonical", "digest", "GENESIS",

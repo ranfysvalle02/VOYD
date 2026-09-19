@@ -1300,6 +1300,61 @@ a context to a policy, and the caller binds it to a generation by carrying
 it. And a receipt will not guess which chain it belongs to — one naming the
 wrong chain is worse than one that could not be issued.
 
+### `as_of(t)` — and the answer that has to be "unknown"
+
+```python
+await docs.as_of(when).find({...})                    # the scope as it stood
+await docs.reachability_at({"_id": x}, when)          # ("refused", "revoked")
+```
+
+Building this surfaced the defect that made it necessary. `Marked` — the
+rule behind every revocation — carried an `at` and **ignored it**, so a
+document revoked at 14:05 reported as unreachable at 14:02. A system
+reconstructing what a model was allowed to see would have placed the
+erasure *before* the answer that quoted the fact: an exoneration built out
+of a bug, and an existing test asserted it in a comment that said so out
+loud.
+
+Both halves are time-aware, because the naive version disagrees with
+itself: the per-document check compares the mark's `at` while the query
+drops every marked row unconditionally, server-side — so `as_of` would
+return an empty page and read as a scope where nothing was ever reachable.
+
+`reachability_at()` returns **`reachable` / `refused` / `unknown`**, not a
+bool. A row the reaper has taken leaves nothing to answer from, and
+reporting that as "not reachable" would let a deployment clear itself by
+pointing at the absence of the evidence. A bool has nowhere to put
+`unknown`, and every caller would default it to the flattering one.
+
+### Rules as data
+
+A rule is a Python object, so a per-tenant policy is a deploy — which puts
+the people who get audited on the wrong side of the release process.
+
+```python
+policy = [{"deny": {"field": "classification", "not_in": "$caller.clearances"}}]
+docs = engine.model("docs", tenant="t").admitting(
+    Deadline(), revoked(), *compile_policy(policy))
+```
+
+Compiled into rules indistinguishable from hand-written ones — same
+protocol, same two halves, same tests.
+
+**The compiler's hard rule is negative: both halves or nothing.** A policy
+that compiles to a query clause but not a per-document check is not a
+slower rule, it is a **silent hole** — `$vectorSearch` hits never went
+through a query, so exactly the documents the clause would have dropped
+walk into a prompt. So it raises at compile time, which is boot, which is
+the one moment a policy error is cheap. Not "fall back to per-document
+only" (safe but silent); not "fall back to the clause" (the hole).
+
+Operators are a closed list with hand-written pairs, and nine of them are
+checked against a live server for the two halves returning the same set.
+A `$`-prefixed field name is refused rather than passed through — that is
+the injection surface this package already refuses elsewhere — and a
+value like `"$scope.id"` raises rather than being quietly compared as a
+literal string.
+
 ## This is not a MongoDB argument
 
 "You should use MongoDB" and "retrieval is missing a guarantee" are different
@@ -1512,6 +1567,13 @@ that has nothing to do with either of them.
 | A sink must declare which claim applies | sealed, owned or derived — picking wrong is the only way the perimeter lies |
 | A context receipt recomputes without a secret | over the admitted ids, the rules in force and the ledger head |
 | A receipt will not guess its chain | naming the wrong one is worse than not being issued |
+| A mark refuses from its own timestamp | a revocation stamped today did not apply in 2020 |
+| Both halves agree under `as_of` too | or a replayed scope reads as one where nothing was reachable |
+| Reachability is three-valued | a reaped row is `unknown`, never a flattering "no" |
+| A policy compiles to both halves or neither | half-enforcement is a hole `$vectorSearch` walks through |
+| A compiled policy matches hand-written behaviour | nine operators, query vs per-document, against a live server |
+| A sealed sink is checked, not trusted | `audit()` catches one that still serves plaintext, and reports an unchecked claim as unchecked |
+| A retry has a horizon | past it the row is closed *unconfirmed*, because a false success is worse than an honest gap |
 | A KMS custody carries its provider and master key | hardcoding `"local"` wraps an AWS deployment's keys with a process secret, silently |
 | Custody declares durability and audit | and the weak rungs warn; a lost ephemeral key is indistinguishable from a full shred |
 | A local key file is created once and reused | including base64, because secrets arrive text-shaped; a wrong length refuses rather than guesses |

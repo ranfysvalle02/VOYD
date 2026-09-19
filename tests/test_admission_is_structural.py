@@ -175,14 +175,28 @@ async def test_search_hits_are_refused_one_at_a_time(facts):
 
 
 async def test_reachable_accepts_an_explicit_instant(facts):
-    """So a caller can ask "what was reachable at 09:00?" without a clock."""
+    """So a caller can ask "what was reachable at 09:00?" without a clock.
+
+    This test used to assert that the revoked fact was refused at *any*
+    instant, including one before the revocation happened, and the comment
+    said so out loud: *"revoked still is"*. That was the bug written down
+    as an expectation. A mark carries an ``at``; a revocation stamped this
+    morning did not apply in 2020, and a system reconstructing what a
+    model was allowed to see would otherwise place the erasure before the
+    answer that quoted the fact -- an exoneration built out of a defect.
+    """
     _, db, docs = facts
     raw = [d async for d in db.facts.find({})]
     long_ago = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    # At that instant the "expired" fact had not expired yet; revoked still is.
+
     names = {d["name"] for d in docs.reachable(raw, when=long_ago)}
-    assert "expired" in names
-    assert "revoked" not in names
+    assert "expired" in names, "it had not expired yet at that instant"
+    assert "revoked" in names, "and it had not been revoked yet either"
+
+    # The instant is genuinely honoured in both directions: now, both are
+    # refused, which is what makes the answer above a statement about time
+    # rather than a filter that stopped working.
+    assert {d["name"] for d in docs.reachable(raw)} == {"pinned", "live"}
 
 
 # ---- revocation: unreachable now, erased later ------------------------

@@ -20,54 +20,46 @@ item without that is a wish.
 
 Things that change what the project can *claim*, not just what it can do.
 
-### 1. The perimeter, past enumeration
+### 1. The perimeter, past propagation
 
-The perimeter is defined now -- three classes, three verbs, and a
-`Perimeter` that propagates without ever being able to fail an erasure. The
-embedding hole inside it is closed, and the context receipt gives class C
-(consequences) a way to be *found*.
+Enumerated, propagated, audited and re-driven. `holds=SEALED` is a check
+now rather than a claim, unanswered acknowledgements are retried within a
+horizon and closed *unconfirmed* past it, and registering a sink costs
+three lines — which is what makes "no shipped vendor adapters" a decision
+rather than an excuse.
 
-What is left is the part enumeration does not solve.
+What is left is smaller and sharper than the shape of it was.
 
-**Sinks are still bespoke.** Each one is an integration, so the honest
-question is whether the class ever gets shipped adapters or stays an
-interface. The argument for staying an interface: a Redis adapter here
-would be a Redis adapter somebody has to keep current, for a call that is
-one `DEL` in the caller's own code. The argument against: a perimeter
-nobody registers anything into is a `describe()` that prints an empty dict.
-Worth deciding deliberately rather than by drift.
+**Nothing drives `redrive()`.** It is a method, and `engine.queue()` is
+the thing that would call it on a schedule. Deliberately not wired: a
+worker that retries erasures is a worker with credentials for every
+registered sink, and where that runs is a deployment decision this package
+should not make quietly.
 
-**A sealed sink is claimed, not verified.** A sink declaring `holds=SEALED`
-is trusted about it, and if it actually caches plaintext the perimeter
-reports an erasure that did not happen -- the one way this module can lie.
-A `verify` hook on the protocol (hand it a known-shredded id, assert it
-cannot produce the plaintext) would turn the declaration into a check. That
-is the same move as the falsifier, applied to a claim the caller makes.
+**`audit()` has no home in `voyd verify`.** It needs a genuinely shredded
+id, which the shredding check already produces — so the two belong
+together, and a deployment could then be told "your mirror claims to hold
+ciphertext and caches plaintext" by the same command that proves
+everything else.
 
-**Nothing re-drives the propagation.** A sink that was down during a
-revocation stays unacknowledged forever; there is no retry, and
-`engine.queue()` is sitting right there with the document already being the
-job. The reason to think before building it: a retry that runs a week later
-against a cache that has since evicted the key is noise, and noise in an
-audit trail is worse than a gap that is honestly marked.
+**Class C is findable but not indexed.** See item 2.
 
-### 2. The context receipt, past the read path
+### 2. Context receipts, stored and queryable
 
-Receipts exist and recompute without a secret. Two things would make them
-load-bearing rather than available.
+Receipts exist, recompute without a secret, and now compose with `as_of`:
+a receipt commits to an instant and `as_of` reconstructs the scope at it,
+so *"was this context legitimate at the time it was built?"* is answerable
+in two calls. Neither half answers it alone.
 
-**Nothing consumes them.** There is no `voyd verify` check that a receipt
-from before a revocation fails to validate after it, and no worked example
-of the incident-review flow the feature is named for. A feature nobody
-has walked through end to end is a feature whose ergonomics are unmeasured.
+What is missing is the **reverse index**. The question people actually
+have is *"which answers were built on this fact?"*, and today you can only
+check a receipt you already hold. Storing receipts keyed by admitted id
+turns an archaeology project into a query, and it is the only thing that
+helps with a consequence — the Slack message, the fine-tune — at all.
 
-**They do not index the other way.** The question is *"which answers were
-built on this fact?"* and today you can only check a receipt you already
-have. Storing receipts, keyed by admitted id, turns an archaeology project
-into a query -- and it is the only thing that helps with class C at all.
-The cost is a collection whose retention policy is a genuine question: a
-receipt naming ids is not document text, but it is a record of who saw
-what, and that is its own sensitivity.
+The cost is a retention decision worth making deliberately rather than by
+default: a receipt names ids and not document text, but it is a record of
+*who saw what*, and that has its own sensitivity and its own deadline.
 
 ### 3. A failed KMS call must not look like a shredded key
 
@@ -87,24 +79,25 @@ a climbing count means different things.
 **You would know it worked when** killing the KMS in a test produces a
 different reason string than shredding a key, and both still refuse.
 
-### 4. `as_of(t)` — what could have reached a prompt last Tuesday
+### 4. `as_of(t)` — shipped, and it found the bug it was for
 
-Nearly free and still not done. Every rule already takes `when=`; eleven
-call sites in `admission.py` thread it through. What is missing is a public
-`as_of()` on the handle and one real decision.
+`as_of(t)` and `reachability_at()` exist. Building them surfaced the
+defect that made the feature necessary: `Marked` carried an `at` and
+**ignored it**, so a document revoked at 14:05 reported as unreachable at
+14:02 — a system reconstructing what a model was allowed to see would have
+placed the erasure before the answer that quoted the fact. An exoneration
+built out of a bug, and an existing test asserted it.
 
-**The decision, which is the actual work.** A revoked row's mark carries an
-`at`, so "was this reachable at 14:02" is answerable — *until the reaper
-takes the row*, after which the honest answer is "unknown" and the tempting
-answer is "no". Returning "no" for a row that has been erased is exactly the
-confident wrong answer this codebase exists to eliminate, so `as_of` has to
-be able to say **unknown**, and the API has to make that impossible to
-mistake for a negative.
+`reachability_at()` returns `reachable` / `refused` / `unknown`, because a
+row the reaper took leaves nothing to answer from and a bool has nowhere
+to put that.
 
-**Why it is worth more now than it was.** The context receipt already
-commits to an `at`, so a receipt plus `as_of` is a complete answer to
-*"was this context legitimate at the time it was built?"* — which is the
-question, and neither half answers it alone.
+**What is left.** `as_of` is a lower bound and says so, but nothing
+*measures* the bound: a deployment cannot currently answer "how much of
+last Tuesday is still reconstructible?" The ledger knows what was revoked
+and when, so the gap between "revocations recorded" and "rows still
+present" is computable, and it is the number that tells an auditor whether
+an `as_of` answer is worth anything.
 
 ---
 
@@ -112,22 +105,29 @@ question, and neither half answers it alone.
 
 High value per line. None of these are research.
 
-### 5. Rules as data, not Python
+### 5. Rules as data — the compiler shipped, the product did not
 
-A rule is an object, so a per-tenant policy is a release. The protocol is
-already shaped for it — a rule declares `needs_caller`, `bypassable` and
-`reversible`, and carries its own `clause()` — but the rule is still code.
+`compile_policy()` turns `{"deny": {"field": ..., "not_in":
+"$caller.clearances"}}` into a rule indistinguishable from a hand-written
+one, refuses at boot anything it cannot express on **both** halves, and
+nine operators are checked against a live server for the two halves
+agreeing.
 
-**Why.** It turns clearance from a feature into a product: the people who
-get audited get to change the policy, and the policy is versioned with the
-scope document that owns it. Today a new reason needs a deploy, which caps
-adoption at teams who can ship this service.
+What is missing is the part that makes it a product rather than a
+function:
 
-**Shape.** `{"deny": {"field": "clearance", "lt": "$caller.clearance"}}` on
-the scope, compiled into the same two halves every rule has. The compiler is
-the whole job, and it **must refuse anything it cannot express on both
-halves** — a policy that filters in the query but not per document is a
-silent hole, and `$vectorSearch` is what walks through it.
+- **Nothing loads a policy from anywhere.** A scope document can hold one
+  and nothing reads it. Wiring that means deciding who may *edit* it,
+  which is the same unanswered authorisation question that keeps holds and
+  sealing off the HTTP surface — and it is the third time that question
+  has blocked something, which is a signal about what to build next.
+- **No versioning.** A policy that changes silently makes every receipt
+  issued under the old one unexplainable. The receipt already commits to
+  the rule *reasons*; committing to a policy version would close that.
+- **Only `deny`.** Deliberate — an `allow` would have to mean "and refuse
+  everything else", which no single rule can promise while other rules
+  exist — but somebody will ask, and the answer should be written down
+  before it is argued about.
 
 ### 6. The admission overhead, as a published number
 
