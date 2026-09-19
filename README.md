@@ -1793,6 +1793,14 @@ One name was genuinely deleted: `POLICY`, a constant referenced nowhere but
 its own definition. The only kind of export that costs nothing to remove is
 the one nobody was ever going to type.
 
+## Three ways in
+
+| | |
+|---|---|
+| [`marketing.md`](marketing.md) | the pitch. Short, loud, and every claim in it is backed by shipped code — it ends by telling you not to believe it and to run the falsifier instead |
+| [`pain.md`](pain.md) | the *why*, as eight incidents rather than features. Mostly real ones from this repository |
+| [`blog.md`](blog.md) | the long argument, including what is not done |
+
 ## The pain, in eight stories
 
 [`pain.md`](pain.md) is the *why*, told as incidents rather than features —
