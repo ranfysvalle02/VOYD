@@ -1799,6 +1799,7 @@ the one nobody was ever going to type.
 |---|---|
 | [`marketing.md`](marketing.md) | the pitch. Short, loud, and every claim in it is backed by shipped code — it ends by telling you not to believe it and to run the falsifier instead |
 | [`pain.md`](pain.md) | the *why*, as eight incidents rather than features. Mostly real ones from this repository |
+| [`falsifier.md`](falsifier.md) | what `voyd verify` is, why a test suite was not enough, and who checks the checker |
 | [`blog.md`](blog.md) | the long argument, including what is not done |
 
 ## The pain, in eight stories
