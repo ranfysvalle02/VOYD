@@ -80,19 +80,3 @@ async def create_voyd(request: Request, owner: dict = Depends(require_owner),
 async def list_voyds(request: Request, owner: dict = Depends(require_owner)):
     voyds = await get_engine(request).store.list_voyds(owner["_id"])
     return {"voyds": jsonify(voyds)}
-
-
-@router.delete("/voyds/{slug}")
-async def delete_voyd(request: Request, slug: str, owner: dict = Depends(require_owner)):
-    engine = get_engine(request)
-    voyd = await engine.store.get_voyd_by_slug(slug)
-    if not voyd:
-        raise HTTPException(404, f"voyd '{slug}' not found.")
-    if voyd.get("owner_id") != owner["_id"]:
-        raise HTTPException(403, "You do not own this voyd.")
-    await engine.store.delete_voyd(slug)
-    # Nothing to reclaim elsewhere: the documents and their vectors are rows
-    # in the same database, so deleting the namespace deletes them. This used
-    # to be followed by a best-effort sweep of an object store, which is the
-    # kind of second cleanup call that fails quietly and bills monthly.
-    return {"deleted": slug}

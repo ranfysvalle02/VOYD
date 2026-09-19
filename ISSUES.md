@@ -201,6 +201,27 @@ honest. Whether the *concepts* have outgrown the project's own aesthetic is
 a separate question, and the honest answer is that nobody has yet sat down
 and asked which of the last five features would be missed.
 
+## 9. A purge pass found a destructive endpoint nobody was watching
+
+**Severity: closed, and the shape of it is the lesson.**
+
+`DELETE /v1/voyds/{slug}` was untested, undocumented, referenced by
+nothing, and cascaded through a hardcoded `("voids", "documents")` written
+before `refusals`, `__keys` and `perimeter` existed. It also contradicted
+this project's own *Deliberately not doing* entry, which says "a delete
+tool **or endpoint**" — a sentence CI had only ever enforced for MCP
+tools.
+
+Removed, along with `store.delete_voyd` and `store.forget_documents` (dead:
+its only other mention was a docstring in the method that replaced it), and
+the endpoint half of the principle is now a test.
+
+**What is left.** Owner offboarding has no story: a namespace is created and
+never removed. That is a *product* gap rather than a defect, and the honest
+options are a deadline on the voyd itself — which is what this package
+would argue for — or an operator-level operation that is not an HTTP verb.
+Neither is built.
+
 ## Operational caveats
 
 Not defects — known trades, written down so they are not rediscovered as

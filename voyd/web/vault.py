@@ -45,6 +45,9 @@ from ..ratelimit import RateLimiter, client_ip
 from ..engine.search import MAX_LIMIT as SEARCH_MAX_LIMIT
 from .deps import get_current_voyd, get_engine, jsonify, require_voyd_owner
 
+# How much of a hit's text comes back. One setting, so a constant.
+SNIPPET_CHARS = 2000
+
 router = APIRouter(prefix="/v1")
 
 
@@ -507,8 +510,7 @@ def _admission_of(matches) -> dict:
     return matches.as_dict()
 
 
-def _present_matches(matches: list[dict], *,
-                     snippet_chars: int = 600) -> list[dict]:
+def _present_matches(matches: list[dict]) -> list[dict]:
     """A hit carries its text, not a link to go fetch it.
 
     The caller is usually a model about to put this in a prompt, so making it
@@ -519,7 +521,9 @@ def _present_matches(matches: list[dict], *,
 
     This used to be ``async`` and used to take the engine, because a hit whose
     bytes lived in object storage needed a presigned URL built for it. Both
-    are gone with the byte path.
+    are gone with the byte path -- and so is the ``snippet_chars`` argument,
+    which no caller ever passed. A knob with one setting is a constant that
+    has to be threaded through every call site.
     """
     out = []
     for m in matches:
@@ -532,7 +536,7 @@ def _present_matches(matches: list[dict], *,
         }
         text = m.get("text")
         if text:
-            hit["text"] = text[:snippet_chars]
-            hit["truncated"] = len(text) > snippet_chars
+            hit["text"] = text[:SNIPPET_CHARS]
+            hit["truncated"] = len(text) > SNIPPET_CHARS
         out.append(hit)
     return out

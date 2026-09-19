@@ -242,3 +242,36 @@ def test_examples_are_the_engine_not_the_service():
         assert "Voyd(" not in src, f"{name} pulls the HTTP service"
         assert "Intelligence" not in src, f"{name} names a vendor"
         assert "import fastapi" not in src and "from fastapi" not in src, name
+
+
+# ---- knobs that exist, and therefore should be exercised --------------
+
+def test_backoff_is_capped():
+    """A knob with no test looks exactly like a knob with no purpose, and
+    this one is a safety valve: without the cap, exponential backoff on a
+    long outage schedules a retry for next week."""
+    from voyd.engine.jobs import backoff
+
+    assert backoff(1, 1.0) < backoff(4, 1.0)
+    assert backoff(50, 1.0) == backoff(99, 1.0) == 60.0
+    assert backoff(50, 1.0, cap=5.0) == 5.0
+
+
+async def test_a_parked_job_can_carry_why_it_was_parked(core):
+    """``park_update`` is how a handler leaves a note on the document it
+    gave up on. Untested, it reads as a parameter somebody meant to
+    remove."""
+    engine, db = core
+    from voyd.engine import PermanentFailure
+
+    queue = engine.model("docs").queue(when={"indexed": False})
+    await engine.ensure(search_wait_s=0)
+    await db.docs.insert_one({"doc_id": "d1", "indexed": False})
+
+    job = await queue.claim()
+    assert await queue.fail(job, PermanentFailure("malformed"),
+                            park_update={"parked_because": "not utf-8"})
+
+    row = await db.docs.find_one({"doc_id": "d1"})
+    assert row["parked_because"] == "not utf-8"
+    assert await queue.claim() is None, "a parked job is not re-claimed"

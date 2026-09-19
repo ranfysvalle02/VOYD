@@ -188,3 +188,21 @@ async def test_tool_calls_use_the_same_retry_taxonomy_as_embeddings(agent):
     assert await q.fail(bad, PermanentFailure("args must be an object")) is True
     assert await q.claim() is None, "a malformed call is not retried"
 
+
+
+async def test_a_memory_can_carry_the_callers_own_fields(core):
+    """``meta`` is the escape hatch that keeps this from being a cage.
+
+    Untested it read as a parameter nobody wanted; it is the difference
+    between a memory layer and a memory layer that decides your schema.
+    """
+    engine, db = core
+    mem = engine.model("memories", tenant="session").memory(dimensions=8)
+    await engine.ensure(search_wait_s=0)
+
+    await mem.remember("s1", "the fault code is P0301", [0.1] * 8,
+                       meta={"source": "ticket-7781", "confidence": 0.9})
+
+    row = await db.memories.find_one({"session": "s1"})
+    assert row["source"] == "ticket-7781"
+    assert row["confidence"] == 0.9

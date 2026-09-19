@@ -229,8 +229,13 @@ so the reasoning is not relitigated every six months.
 
 - **A delete tool or endpoint.** A delete hands the caller a cleanup
   obligation, and an agent that has to remember to clean up is the failure
-  this exists to remove. CI asserts no tool is named for reclaiming
-  anything.
+  this exists to remove. CI asserts no MCP tool is named for reclaiming
+  anything — and, since a purge pass found `DELETE /v1/voyds/{slug}` sitting
+  on the HTTP surface the whole time, `tests/test_nothing_reclaims_out_of_band.py`
+  now asserts the *endpoint* half too. The sentence had been half-enforced
+  for months: the destructive path nobody exercised was also the one
+  cascading through a hardcoded list of two collections, written before
+  three more existed.
 - **An undo for `revoke()`.** See `Irreversible` in `voyd/engine/errors.py`.
   Two reasons, either sufficient: the row is already scheduled for the
   reaper, so the undo would work until `ttlMonitorSleepSecs` decided

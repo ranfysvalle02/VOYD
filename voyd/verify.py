@@ -200,9 +200,9 @@ class Verifier:
         await self.engine.ensure(search_wait_s=90)
         return self.docs
 
-    async def plant(self, text: str, *, seed: int = 1, expire_at="pin",
+    async def plant(self, text: str, *, expire_at="pin",
                     scope: str = "s1") -> dict:
-        doc = {"scope": scope, "text": text, "embedding": vec(seed),
+        doc = {"scope": scope, "text": text, "embedding": vec(1),
                "expire_at": None if expire_at == "pin" else expire_at}
         await self.db.verify_docs.insert_one(dict(doc))
         return doc
