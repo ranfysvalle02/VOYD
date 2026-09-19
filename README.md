@@ -1630,6 +1630,8 @@ that has nothing to do with either of them.
 | A policy compiles to both halves or neither | half-enforcement is a hole `$vectorSearch` walks through |
 | A compiled policy matches hand-written behaviour | nine operators, query vs per-document, against a live server |
 | A sealed sink is checked, not trusted | `audit()` catches one that still serves plaintext, and reports an unchecked claim as unchecked |
+| Forgetting is the same verb at every tier | a document, a scope, a namespace — `POST .../forget`, never `DELETE` |
+| A namespace erasure reaches every declared collection | from `engine.expiry.specs`, not a literal that rots |
 | A retry has a horizon | past it the row is closed *unconfirmed*, because a false success is worse than an honest gap |
 | Granting reachability is gated apart from withholding it | a pipeline may quarantine and may not release |
 | An authority with no caller raises | permitting makes it decorative; refusing silently is a no-op on a write |
@@ -1709,6 +1711,58 @@ that has nothing to do with either of them.
 - There is no byte path and no object storage, so there are no presigned URLs
   to leak, no bucket policy to get wrong, and nothing to reclaim out of band
   when a scope expires.
+
+## Forget is the same word at every tier
+
+```
+POST /v1/voids/{token}/forget        one scope's facts
+POST /v1/voyds/{slug}/forget         a whole namespace
+docs.revoke({"_id": x}, ...)         one fact
+```
+
+There are four tiers — owner, voyd, void, document — and for a long time
+only the bottom two obeyed the argument above. A **customer's** erasure
+request was honoured in milliseconds, on a hash chain, with per-subject
+crypto-shredding that reaches backups. The **account holder's** went through
+a `DELETE` endpoint that was untested, undocumented, and cascaded through a
+hardcoded `("voids", "documents")` written before three more collections
+existed.
+
+The guarantee was strongest at the leaf and absent at the root — which is
+backwards, because the root is where all the data is.
+
+### A namespace is not a folder. It is a key.
+
+The fix is not a longer cascade. A cascade enumerates *kinds of thing*, and
+new kinds appear — that is not carelessness, it is what the shape does.
+
+`voyd_id` was already the tenant on every document, so it was already a key
+scope. Destroying that key makes everything sealed under it unreadable in
+**every copy of the data that has ever existed** — this database, its
+replicas, its snapshots, the backup nobody has restored — without visiting a
+row and without knowing which collections exist. The cascade list was not
+incomplete; it was unnecessary.
+
+Metadata cannot be ciphertext (the slug *is* the lookup key), so the rows
+still go on a deadline — taken from `engine.expiry.specs`, the engine's own
+registry of what declared a TTL, so a collection added next year is included
+by having been declared rather than by somebody remembering this method.
+
+```json
+{"slug": "acme", "unreadable": true,
+ "detail": "every copy of the sealed fields is noise now, subject to a key cache",
+ "scoped": {"voyds": 1, "voids": 3, "documents": 412}}
+```
+
+**It reports what it achieved**, because the two halves are not equally
+strong: `unreadable: false` means only this database will forget, and a
+caller reporting an erasure to a regulator should not have to read the
+source to tell those apart.
+
+And it is a `POST`, not a `DELETE` — not a loophole around
+[`test_nothing_reclaims_out_of_band.py`](tests/test_nothing_reclaims_out_of_band.py)
+but the point it protects. A delete hands the caller a cleanup obligation.
+This hands back none.
 
 ## The public surface is a promise
 

@@ -44,6 +44,8 @@ from pymongo.errors import CollectionInvalid, OperationFailure
 from ..config import MongoConfig
 from ..engine import (Deadline, EmbeddedWith, Engine, ExpirySpec, JobQueue,
                       SearchSpec, revoked)
+from ..engine.custody import from_env as custody_from_env
+from ..engine.keyring import KeyringSpec
 from ..engine.search import MAX_LIMIT as SEARCH_MAX_LIMIT
 # The redundant alias is the explicit re-export form: callers and tests import
 # ``cosine`` from here, so this is API surface, not an unused import.
@@ -197,8 +199,24 @@ class MongoStore:
         ))
 
         # Expiry as declaration rather than scattered create_index calls.
-        for coll in ("voids", "documents"):
+        #
+        # ``voyds`` is in this list now, and its absence was the whole bug.
+        # There are four tiers -- owner, voyd, void, document -- and only the
+        # bottom two obeyed this package's own thesis: one deadline,
+        # inherited, refused on read, collected by one TTL index. The
+        # namespace was exempt, so a *customer's* erasure request was honoured
+        # in milliseconds on a hash chain while the *account holder's* had no
+        # mechanism at all. The guarantee was strongest at the leaf and
+        # absent at the root, which is backwards: the root is where all of
+        # the data is.
+        for coll in ("voyds", "voids", "documents"):
             self.engine.expiring(ExpirySpec(collection=coll, at_field="expire_at"))
+
+        # A key per namespace, so forgetting one is a key deletion rather
+        # than a cascade. See ``forget_voyd``.
+        self.keys = self.engine.keyring(
+            KeyringSpec(collection="__keys", pointer_field="voyd_id"),
+            custody=custody_from_env("VOYD_KMS"))
 
     async def _ensure_search_indexes(self, dims: int, *, model: str | None = None,
                                      wait_s: float = 90.0) -> None:
@@ -251,6 +269,90 @@ class MongoStore:
         }
         await self.db.voyds.insert_one(doc)
         return doc
+
+    async def forget_voyd(self, slug: str, *, reason: str,
+                          actor: str | None = None) -> dict:
+        """Forget a whole namespace. The same verb, one tier up.
+
+        ``DELETE /v1/voyds/{slug}`` used to live here, and it was the one
+        operation in this package that contradicted its own argument: a
+        cascade through a hardcoded ``("voids", "documents")`` -- written
+        before three more collections existed -- which is the failure mode
+        a cascade always has. It enumerates *kinds of thing*, and new kinds
+        appear.
+
+        So it is two mechanisms that already exist, and no new one:
+
+        **The key.** A namespace is not a folder, it is a key scope.
+        ``voyd_id`` is already the tenant on every document, so it is
+        already the key scope -- destroying that key makes everything
+        sealed under it unreadable in *every copy of the data that has ever
+        existed*: this database, its replicas, its snapshots, the backup
+        nobody has restored. Without visiting a row, and without knowing
+        which collections exist. The cascade list is not incomplete; it is
+        unnecessary.
+
+        **The deadline.** Metadata cannot be ciphertext -- the slug is the
+        lookup key -- so the rows still have to go, and they go the way
+        everything else here goes: a deadline in the past, collected by the
+        reaper. The collections are taken from ``engine.expiry.specs``,
+        which is the engine's own registry of what declared a TTL, rather
+        than from a literal somebody has to remember to extend.
+
+        **It reports what it actually achieved**, because the two halves are
+        not equally strong and a caller should not have to guess which one
+        they got. Without the encryption extra there is no key to destroy,
+        the plaintext in yesterday's backup stays readable, and
+        ``unreadable`` says ``False`` rather than letting the deadline imply
+        more than it can do.
+        """
+        voyd = await self.get_voyd_by_slug(slug)
+        if not voyd:
+            return {}
+        vid = voyd["_id"]
+        stamp = _utcnow()
+
+        unreadable, detail = False, ""
+        try:
+            unreadable = bool(await self.keys.shred(str(vid)))
+            detail = ("every copy of the sealed fields is noise now, "
+                      "subject to a key cache" if unreadable else
+                      "no key existed for this namespace, so nothing was "
+                      "sealed under it")
+        except Exception as exc:  # noqa: BLE001 - a missing crypto stack is
+            # an answer, not an incident: the deadline below still runs, and
+            # saying so is better than a half-done erasure reported as whole.
+            detail = (f"the key could not be destroyed ({type(exc).__name__}); "
+                      f"this database will forget on the reaper's schedule "
+                      f"and copies elsewhere keep the plaintext")
+            log.warning("forget_voyd %s: %s", slug, detail)
+
+        # Every collection that declared a TTL, which is the engine's own
+        # answer to "where does expiring data live" -- so a collection
+        # added next year is included by having been declared, not by
+        # somebody remembering this method.
+        scoped = {}
+        for spec in self.engine.expiry.specs:
+            key = "_id" if spec.collection == "voyds" else "voyd_id"
+            result = await self.db[spec.collection].update_many(
+                {key: vid}, {"$set": {spec.at_field: stamp}})
+            if result.modified_count:
+                scoped[spec.collection] = result.modified_count
+
+        if self.refusals is not None:
+            try:
+                await self.refusals.append(
+                    "forgotten", tenant=vid, reason=reason, actor=actor,
+                    subject={"slug": slug}, count=sum(scoped.values()),
+                    detail={"unreadable": unreadable, "scoped": scoped})
+            except Exception:  # noqa: BLE001 - the namespace is already
+                # unreachable; an unwritable chain must not undo that.
+                log.exception("forgot %s and could not record it", slug)
+
+        log.info("forgot namespace %s: unreadable=%s, %s", slug, unreadable,
+                 scoped)
+        return {"slug": slug, "unreadable": unreadable, "detail": detail,
+                "scoped": scoped}
 
     # ---- voids ---------------------------------------------------------
 

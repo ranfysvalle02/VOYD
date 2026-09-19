@@ -80,3 +80,36 @@ async def create_voyd(request: Request, owner: dict = Depends(require_owner),
 async def list_voyds(request: Request, owner: dict = Depends(require_owner)):
     voyds = await get_engine(request).store.list_voyds(owner["_id"])
     return {"voyds": jsonify(voyds)}
+
+
+@router.post("/voyds/{slug}/forget")
+async def forget_voyd(request: Request, slug: str,
+                      owner: dict = Depends(require_owner),
+                      payload: dict = Body(default={})):
+    """Forget a namespace. The same word the other two tiers use.
+
+    A ``POST``, not a ``DELETE``, and that is not a loophole around
+    ``tests/test_nothing_reclaims_out_of_band.py`` -- it is the point the
+    test exists to protect. A delete hands the caller a cleanup obligation.
+    This hands back none: nothing is scheduled by the caller, nothing needs
+    a follow-up call, and the deadline that was already the mechanism stays
+    the mechanism.
+
+    What it does hand back is **what it achieved**, because the two halves
+    are not equally strong. ``unreadable`` means the namespace's key was
+    destroyed, so every copy of its sealed fields is noise -- including in
+    backups this service has never seen. ``false`` means only this
+    database will forget, on the reaper's schedule. A caller reporting an
+    erasure to a regulator should be able to tell those apart without
+    reading the source.
+    """
+    engine = get_engine(request)
+    voyd = await engine.store.get_voyd_by_slug(slug)
+    if not voyd:
+        raise HTTPException(404, f"voyd '{slug}' not found.")
+    if voyd.get("owner_id") != owner["_id"]:
+        raise HTTPException(403, "You do not own this voyd.")
+
+    reason = str(payload.get("reason") or "owner request")[:200]
+    return await engine.store.forget_voyd(
+        slug, reason=reason, actor=str(owner.get("email") or owner["_id"]))

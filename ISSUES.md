@@ -216,11 +216,19 @@ Removed, along with `store.delete_voyd` and `store.forget_documents` (dead:
 its only other mention was a docstring in the method that replaced it), and
 the endpoint half of the principle is now a test.
 
-**What is left.** Owner offboarding has no story: a namespace is created and
-never removed. That is a *product* gap rather than a defect, and the honest
-options are a deadline on the voyd itself — which is what this package
-would argue for — or an operator-level operation that is not an HTTP verb.
-Neither is built.
+**Owner offboarding is `POST /v1/voyds/{slug}/forget`** — the same verb the
+other two tiers use, and the reason the gap existed is the interesting part:
+there are four tiers and only the bottom two obeyed this package's own
+thesis. A *customer's* erasure request was honoured in milliseconds on a
+hash chain; the *account holder's* had a hardcoded cascade. The guarantee
+was strongest at the leaf and absent at the root, which is backwards.
+
+A namespace is not a folder, it is a key scope — `voyd_id` was already the
+tenant on every document — so forgetting one destroys a key rather than
+walking a list. The rows still go on the deadline, across the collections
+the *engine declared expiring* rather than a literal somebody maintains.
+It reports `unreadable: true/false` so a caller can tell "noise in every
+backup" from "this database will forget on the reaper's schedule".
 
 ## Operational caveats
 
