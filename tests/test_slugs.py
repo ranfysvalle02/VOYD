@@ -1,5 +1,9 @@
-"""The console derives a slug from a typed business name, so the derivation
-has to be stable and the rules have to match what the JSON API enforces."""
+"""A namespace is chosen by slug, so the derivation has to be stable.
+
+There used to be an HTML form deriving one from a typed business name; the
+rules outlived it, because `POST /v1/voyds` enforces the same ones and a
+slug that changes between releases changes a customer's URL.
+"""
 
 from voyd.slugs import SLUG_RE, is_valid, slug_error, slugify
 

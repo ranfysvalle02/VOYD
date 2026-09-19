@@ -26,12 +26,18 @@ property of the document, not a sidecar.
 
 Five traits ship, all of which chain onto a model: ``searchable``,
 ``expiring``, ``forgettable``, ``memory`` and ``queue``. Each is usable on
-its own if a single one is all you need. ``forgettable`` is the one
-worth knowing about: it returns a read handle that *cannot* return an expired
-or revoked document, because a deadline enforced by convention is enforced
-exactly as reliably as it is remembered. ``model()`` is the main entry point:
-one collection, tenant threaded, traits chained, ``use()`` for anything this
-package does not ship. ``ensure()`` builds what you declared.
+its own if a single one is all you need.
+
+``forgettable`` is the one worth knowing about. It returns a read handle
+with no unfiltered ``find`` on it, so a document that may not reach a prompt
+cannot come back from one -- a rule enforced by convention is enforced
+exactly as reliably as it is remembered. It installs two reasons to refuse,
+a deadline and a revocation; ``admitting(*rules)`` is the same trait with
+the list written out, for a collection that has more of them.
+
+``model()`` is the main entry point: one collection, tenant threaded, traits
+chained, ``use()`` for anything this package does not ship. ``ensure()``
+builds what you declared.
 
 This package is deliberately free of application vocabulary. It knows about
 collections, fields and filters, never about namespaces or voids.
@@ -64,7 +70,7 @@ class Engine:
 
     Operational resiliency is not a sidecar mesh. It is ``connect`` (probe),
     ``ensure`` (wait, never query a building index), ``queue`` (retry the
-    world, not the document), ``forgetting`` (refuse what is over),
+    world, not the document), ``admission`` (refuse what may not reach a prompt),
     ``health`` (say the tier out loud), and the clock (UTC-aware on
     ``engine.db``, never inherited from the caller). Replica set plus these
     policies is the data-plane mesh. The documents never left.

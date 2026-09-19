@@ -212,6 +212,7 @@ name. Forgetting is not the whole idea — it is the first two rules:
 | `Deadline()` | the deadline passed, or cannot be read (fails closed) |
 | `revoked()` | somebody said forget this, now |
 | `quarantined()` | held back from models, deliberately still on disk |
+| `EmbeddedWith(m)` | a different model produced this vector |
 
 `forgettable()` is shorthand for the first two, which is why the name is
 still honest. `admitting(...)` names them yourself:
@@ -224,6 +225,37 @@ notes = engine.model("notes", tenant="t").admitting(
 A flagged document stops reaching prompts and **stays on disk** — you cannot
 investigate what you deleted. Adding that was one entry in a list, which is
 the argument for rules over branches.
+
+### An embedding is a (vector, model) pair
+
+`EmbeddedWith` is the rule that justifies the whole shape, because the bug it
+closes is invisible to every other check. A 512-wide vector in a 1024 index
+fails on width. A vector from a **different model of the same width** passes
+everything — and a whole generation of one vendor's models is 1024
+dimensions, so that is the normal case for anyone who upgrades.
+
+Measured against the real API, same text, both 1024-wide:
+
+| | cosine |
+|---|---|
+| identical text, old model vs new | **−0.053** |
+| unrelated text, both on the new model | **+0.301** |
+
+A model swap does not degrade ranking, it **inverts** it: unrelated text
+outranks the document you were looking for, by five times. Nothing errors,
+`indexed: true` is recorded, and `describe()` reports a healthy scope.
+
+So the model is written in the same `$set` as the vector and cleared with
+it — they are one fact — and a vector whose model is unrecorded is an orphan,
+refused because nothing can say what it may be compared against. A row with
+no vector *yet* stays reachable: that one is pending, not wrong, and refusing
+it would hide the embed queue from `describe()`.
+
+Which collapses the migration too. Change the model and every row is refused,
+so nothing is searchable, so the embed worker re-embeds them and
+`describe()`'s pending count is the progress bar. **A model change is a
+document that needs embedding** — there is no migration subsystem because
+there is nothing left for one to do.
 
 ```python
 docs = engine.model("notes").forgettable()
@@ -625,6 +657,10 @@ They skip, not fail, when MongoDB is unreachable. Point them elsewhere with
 | A read limit cannot be raced | twelve concurrent readers against a limit of three are served three |
 | "Added" is not "searchable" | `describe` reports pending vs indexed separately |
 | A wrong-width vector is not "indexed" | a 512-wide vector in a 1024 index is parked as `failed`, not counted as searchable |
+| A same-width vector from another model is refused | measured: a model swap inverts ranking, and every width check passes |
+| A document awaiting its first vector is pending, not wrong | or the embed queue would vanish from `describe()` |
+| A rule cannot open the gate by raising | a rule that throws is a refusal, named after itself |
+| Quarantine holds without destroying | flagged rows stop reaching prompts and stay on disk for the investigation |
 | The server can own the embedding | verified on Atlas: text in, no vector field stored, text query returns the right row |
 | Asking for it is safe where it is unavailable | Atlas Local refuses, the engine falls back to a client vector index, loudly |
 | Admission survives the server owning the vector | `revoke()` still refuses a row this process never embedded |
