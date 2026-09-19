@@ -747,7 +747,29 @@ tiers is not one.
 
 ## What is not done
 
-Three things, in the order I would do them:
+Four things, in the order I would do them, and the first is the one that
+matters.
+
+**Refusal has a perimeter and does not know where it is.** Refusal governs
+this read path. It does not govern the copies made downstream of it — an
+embedding cache, a rerank cache, a provider-side prompt cache, a vector
+index in another service populated from here, a message a bot posted last
+week. Revoke a fact and every one of those keeps serving it.
+
+Inherited refusal solved exactly this shape one layer in: a summary written
+back into the collection now goes with its source. The same argument applies
+one layer *out*, where I have not made it. Nobody's retrieval stack is one
+database, so this is the question a customer's architecture diagram asks
+immediately, and right now the honest answer is that the guarantee stops at
+the edge of the process.
+
+The shape I would try: downstream holders register as sinks, and a
+revocation must be *acknowledged* — a sink that has not acked makes the fact
+refused everywhere until it does, rather than the revocation optimistically
+reporting success. The hard part is that an unreachable sink must not become
+an outage that blocks erasure requests, and must not become a checkbox
+either. I do not have a clean answer to that yet, which is why this is in
+this section rather than in the repository.
 
 **Rules as data.** A rule is still a Python object, so a per-tenant policy is a
 release. The protocol is ready for it — a rule already declares whether it
