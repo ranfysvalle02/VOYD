@@ -342,6 +342,20 @@ class Verifier:
             if [d for d in result if d.get("text") == secret]:
                 c.fail(f"{path} returned a revoked document")
 
+        # The copy that is not stored as text. A vector is a lossy encoding
+        # of the field it was built from, so an erased document that keeps
+        # its embedding still answers "is there a document about X in
+        # here" -- an attribute-inference oracle over somebody who asked
+        # to be forgotten, needing no inversion model to use.
+        erased = await self.db.verify_docs.find_one({"text": secret})
+        if erased is not None and erased.get("embedding") is not None:
+            c.fail("the revoked document kept its embedding. The vector is "
+                   "a paraphrase of the text in a format nobody reads by "
+                   "eye; erasing one and keeping the other erases nothing")
+        else:
+            c.note("and its embedding went with it -- a vector is a copy of "
+                   "the text in a coat")
+
         still_there = await self.db.verify_docs.count_documents({"text": secret})
         if still_there != 1:
             c.fail("the revoked row was deleted. Unreachable-first is the "

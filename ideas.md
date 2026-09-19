@@ -20,81 +20,56 @@ item without that is a wish.
 
 Things that change what the project can *claim*, not just what it can do.
 
-### 1. Refusal has a perimeter, and right now it does not know where
+### 1. The perimeter, past enumeration
 
-This is the biggest hole in the thesis and nothing in the repo addresses it.
+The perimeter is defined now -- three classes, three verbs, and a
+`Perimeter` that propagates without ever being able to fail an erasure. The
+embedding hole inside it is closed, and the context receipt gives class C
+(consequences) a way to be *found*.
 
-Refusal governs the read path. It does not govern the **copies made
-downstream of it**: an embedding cache, a rerank cache, a provider-side
-prompt cache, a vector index in another service that was populated from
-here, a Slack message a bot posted last week. Revoke a fact and every one of
-those keeps serving it. Inherited refusal solved this *inside* the
-collection — a summary written back into MongoDB now goes with its source —
-and the same argument applies one layer out, where it is currently unmade.
+What is left is the part enumeration does not solve.
 
-**Why it is the frontier.** "Forgetting has to survive summarisation" was
-last quarter's version of this and it turned out to be a real hole in a real
-guarantee. "Forgetting has to survive *export*" is the same sentence with a
-wider radius, and it is the one a customer's architecture diagram will ask
-about immediately, because nobody's retrieval stack is one database.
+**Sinks are still bespoke.** Each one is an integration, so the honest
+question is whether the class ever gets shipped adapters or stays an
+interface. The argument for staying an interface: a Redis adapter here
+would be a Redis adapter somebody has to keep current, for a call that is
+one `DEL` in the caller's own code. The argument against: a perimeter
+nobody registers anything into is a `describe()` that prints an empty dict.
+Worth deciding deliberately rather than by drift.
 
-**Shape.** A `Sink` registry: a downstream holder of copies, registered with
-the engine, that a revocation must **acknowledge**. The fail-closed property
-is the interesting part and it is the same one `CallerRequired` already
-uses — a sink that has not acked makes the fact refused *everywhere* until
-it does, rather than the revocation optimistically reporting success. The
-chain gets an entry per sink, so "who still holds this" is answerable.
+**A sealed sink is claimed, not verified.** A sink declaring `holds=SEALED`
+is trusted about it, and if it actually caches plaintext the perimeter
+reports an erasure that did not happen -- the one way this module can lie.
+A `verify` hook on the protocol (hand it a known-shredded id, assert it
+cannot produce the plaintext) would turn the declaration into a check. That
+is the same move as the falsifier, applied to a claim the caller makes.
 
-**Hard part.** An unreachable sink must not become an outage that blocks
-erasure requests, and must not become a checkbox either. There is a real
-design question about degraded mode here and it does not have an obvious
-right answer.
+**Nothing re-drives the propagation.** A sink that was down during a
+revocation stays unacknowledged forever; there is no retry, and
+`engine.queue()` is sitting right there with the document already being the
+job. The reason to think before building it: a retry that runs a week later
+against a cache that has since evicted the key is noise, and noise in an
+audit trail is worse than a gap that is honestly marked.
 
-**You would know it worked when** `voyd verify` can plant a fact in a fake
-downstream sink, revoke it, and fail if the sink was never told.
+### 2. The context receipt, past the read path
 
-### 2. The context receipt — prove a *generation* respected the policy
+Receipts exist and recompute without a secret. Two things would make them
+load-bearing rather than available.
 
-The ledger proves a revocation happened. It cannot prove that the model call
-which produced a given answer respected one. Those are different claims and
-only the second is the one asked after an incident.
+**Nothing consumes them.** There is no `voyd verify` check that a receipt
+from before a revocation fails to validate after it, and no worked example
+of the incident-review flow the feature is named for. A feature nobody
+has walked through end to end is a feature whose ergonomics are unmeasured.
 
-Today: `Page` carries `refused`, `examined`, `starved`. The chain carries
-revocations. Nothing ties a specific inference to the policy state that
-produced its context.
+**They do not index the other way.** The question is *"which answers were
+built on this fact?"* and today you can only check a receipt you already
+have. Storing receipts, keyed by admitted id, turns an archaeology project
+into a query -- and it is the only thing that helps with class C at all.
+The cost is a collection whose retention policy is a genuine question: a
+receipt naming ids is not document text, but it is a record of who saw
+what, and that is its own sensitivity.
 
-**Shape.** `Page` grows a hash over `(admitted ids, rule-set version, chain
-head, as_of)`. The caller attaches it to the inference. "What did the model
-see when it said that?" becomes a hash you can recompute rather than a log
-you have to be trusted about — and it composes with #3 below, which is what
-makes it checkable after the fact rather than merely recorded.
-
-**Why.** Every other audit artifact here answers a question about *data*.
-This is the first one that answers a question about an *answer*, which is
-the only kind of question an AI incident review actually asks.
-
-**You would know it worked when** you can hand somebody a receipt and a
-database and they can tell you, without your help, whether the context was
-legitimate.
-
-### 3. `as_of(t)` — what could have reached a prompt last Tuesday
-
-Nearly free and still not done. Every rule already takes `when=`; eleven
-call sites in `admission.py` thread it through. What is missing is a public
-`as_of()` on the handle and one real decision.
-
-**The decision, which is the actual work.** A revoked row's mark carries an
-`at`, so "was this reachable at 14:02" is answerable — *until the reaper
-takes the row*, after which the honest answer is "unknown" and the tempting
-answer is "no". Returning "no" for a row that has been erased is the kind of
-confident wrong answer this codebase exists to eliminate, so `as_of` has to
-be able to say **unknown**, and the API has to make that impossible to
-mistake for a negative.
-
-**Why.** It pairs with the chain: the chain says when a fact stopped being
-reachable; `as_of` shows what the scope looked like on either side of that.
-
-### 4. A failed KMS call must not look like a shredded key
+### 3. A failed KMS call must not look like a shredded key
 
 Smaller than the others, and it is a correctness bug in something already
 shipped, which is why it is here rather than in a backlog.
@@ -111,6 +86,25 @@ a climbing count means different things.
 
 **You would know it worked when** killing the KMS in a test produces a
 different reason string than shredding a key, and both still refuse.
+
+### 4. `as_of(t)` — what could have reached a prompt last Tuesday
+
+Nearly free and still not done. Every rule already takes `when=`; eleven
+call sites in `admission.py` thread it through. What is missing is a public
+`as_of()` on the handle and one real decision.
+
+**The decision, which is the actual work.** A revoked row's mark carries an
+`at`, so "was this reachable at 14:02" is answerable — *until the reaper
+takes the row*, after which the honest answer is "unknown" and the tempting
+answer is "no". Returning "no" for a row that has been erased is exactly the
+confident wrong answer this codebase exists to eliminate, so `as_of` has to
+be able to say **unknown**, and the API has to make that impossible to
+mistake for a negative.
+
+**Why it is worth more now than it was.** The context receipt already
+commits to an `at`, so a receipt plus `as_of` is a complete answer to
+*"was this context legitimate at the time it was built?"* — which is the
+question, and neither half answers it alone.
 
 ---
 

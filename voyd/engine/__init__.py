@@ -85,6 +85,8 @@ from .custody import (Aws, Azure, Custody, Ephemeral, Gcp, Kmip,
 from .keyring import Keyring, KeyringSpec, Queryable, Sealed
 from .ledger import GENESIS, Ledger, LedgerSpec, canonical, digest
 from .memory import Memory, MemorySpec
+from .perimeter import (DERIVED, OWNED, SEALED, Acknowledgement,
+                        Perimeter, Sink)
 from .model import Model
 from .search import SearchEngine, SearchSpec, cosine
 from .time import UTC, aware, bind, deadline, live, living, now
@@ -370,6 +372,7 @@ __all__ = [
     "Custody", "Ephemeral", "LocalFile", "Aws", "Azure", "Gcp", "Kmip",
     "NOT_CLEARED", "EmbeddedWith", "Clearance", "Restricted", "Page",
     "Memory", "MemorySpec",
+    "Perimeter", "Sink", "Acknowledgement", "SEALED", "OWNED", "DERIVED",
     "Model",
     "JobQueue", "PermanentFailure", "backoff",
     "Ledger", "LedgerSpec", "canonical", "digest", "GENESIS",

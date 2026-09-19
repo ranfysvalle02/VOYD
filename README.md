@@ -709,7 +709,7 @@ install voyd`: no app extra, no running server, and it only ever touches a
 scratch database it creates and drops.
 
 CI runs it on every commit, and `tests/test_the_falsifier_can_fail.py` breaks
-the guarantee twelve different ways to prove each check bites — one per
+the guarantee thirteen different ways to prove each check bites — one per
 check, and two checks that have more than one way to break. A checker that
 cannot fail is worse than no checker — it turns an unknown into a false
 assurance somebody then makes a promise on.
@@ -1217,6 +1217,89 @@ CI downloads the library and then *asserts it is present* — because a skipped
 correctness test looks exactly like a passing one in a green run. Every other
 guarantee in this package works without any of it.
 
+## Where refusal stops, and what is honestly outside it
+
+Refusal is enforced at one handle. Everything downstream holds copies that
+handle cannot reach — and this is the first question a customer's
+architecture diagram asks, because nobody's retrieval stack is one database.
+
+The answer is three different verbs, kept separate on purpose. Collapsing
+them into one mechanism is how a guarantee starts overstating itself.
+
+| the copy is | example | what actually happens |
+|---|---|---|
+| **ciphertext** | a mirrored index, a cache holding sealed values | **erased.** Shred the key; every copy is noise, with no call to make |
+| **plaintext you own** | Redis, an embedding cache, a second service | **told**, best effort, with the acknowledgement recorded — never enforced |
+| **a consequence** | a Slack message quoting it, a fine-tune, a vendor prompt cache | **found**, not recalled. See the context receipt below |
+
+```python
+docs.bounded_by(Perimeter()
+    .register(mirror)      # holds=SEALED   -> never called; the key erases it
+    .register(cache)       # holds=OWNED    -> told, best effort
+    .register(slack))      # holds=DERIVED  -> listed, because it cannot be recalled
+```
+
+**The obvious design does not work, and it is worth saying why.** Register
+sinks, require an acknowledgement, and make an unacked sink mean the fact is
+"refused everywhere until it acks" — that is theatre. The fact is *already*
+refused locally; marking it refused again changes nothing, and the unacked
+sink is still serving its copy. Worse, if an unreachable cache can block a
+revocation then erasure depends on cache uptime. So:
+
+> You cannot enforce refusal in a system you do not control. You can
+> propagate, observe, and report.
+
+A broken sink therefore **cannot fail an erasure** — every exception and
+timeout becomes an unacknowledged receipt entry and a loud warning, and the
+row was already unreachable before any of it ran. `describe()` enumerating
+who holds what is the most valuable part: most teams cannot answer that
+question at all.
+
+### The copy that is not stored as text
+
+An embedding is a lossy encoding of the field it came from, and it sits
+right next to it — unencrypted, because encrypting it would kill search.
+
+Measured here before it was fixed: after `revoke()`, the surviving vector
+still separated its own topic from another by **0.9988 against 0.7992**
+cosine. That is a working membership oracle over somebody who asked to be
+forgotten, and it needs no inversion model — you ask the index whether a
+document about X is in there and it says yes. (Text reconstruction from
+embeddings is a live research area on top of that; the membership answer is
+just the floor, and the floor is already a breach.)
+
+So an irreversible reason destroys the derived encodings **in the same
+write** as the mark — not on the reaper's schedule, because a guarantee that
+waits for a sweeper is the thing this package exists to argue against. A
+*reversible* one does not: a quarantined document is evidence, and its
+vector is how an investigator finds the others like it. Same `reversible`
+switch that already decides who stamps the deadline. Declare more via
+`AdmissionSpec(derived_fields=("embedding", "gist"))`.
+
+### The context receipt — what the model was allowed to see
+
+The chain proves a *revocation* happened. It cannot prove that the model call
+which produced a given answer respected one, and only the second is the
+question asked after an incident.
+
+```python
+page = await docs.search(vector, text="...")
+receipt = await docs.receipt_for(page)
+# {"admitted": [...], "rules": ["deadline", "revoked"], "chain": "5a69...",
+#  "at": "...", "refused": {...}, "hash": "..."}
+```
+
+A hash over the ids that reached the prompt, the reasons in force, the ledger
+head at read time, and the instant deadlines were evaluated against. Attach
+it to the inference and *"what did the model see when it said that?"* becomes
+a value anyone can recompute — no secret, no cooperation from this database.
+
+It also does not claim the model was *given* that context, or only that
+context; nothing on this side of the wire can establish it. The receipt binds
+a context to a policy, and the caller binds it to a generation by carrying
+it. And a receipt will not guess which chain it belongs to — one naming the
+wrong chain is worse than one that could not be issued.
+
 ## This is not a MongoDB argument
 
 "You should use MongoDB" and "retrieval is missing a guarantee" are different
@@ -1395,7 +1478,7 @@ that has nothing to do with either of them.
 | A chain cannot fork under concurrency | twelve concurrent revocations produce twelve linear links |
 | A hash survives its own round trip | the stored entry hashes to the receipt handed out, field by field |
 | An unrecordable refusal still refuses | a broken ledger cannot turn a completed revocation into an error |
-| The falsifier can fail | twelve ways of breaking the guarantee, each caught by the check that claims it |
+| The falsifier can fail | thirteen ways of breaking the guarantee, each caught by the check that claims it |
 | An erasure cannot be taken back | `lift()` raises on an irreversible reason, and `release()` is not a way around it |
 | A hold can be | imposed, lifted, and counted apart from erasure, because overruling a detector is its own number |
 | A hold does not destroy its own evidence | imposing a reversible reason stamps no erase deadline |
@@ -1424,6 +1507,11 @@ that has nothing to do with either of them.
 | Sealing composes with refusal | a revoked document is refused by its mark before any key is fetched |
 | Sealing without a scope refuses to default | one key for everybody means one erasure request erases everybody |
 | Durable custody survives a restart | a second engine, a new keyring, the same key file, yesterday's ciphertext |
+| An erased document keeps no vector | the embedding went with the text; a held one keeps it, because evidence |
+| A broken sink cannot fail an erasure | a raising or hanging cache is recorded unacknowledged, and the row is still refused |
+| A sink must declare which claim applies | sealed, owned or derived — picking wrong is the only way the perimeter lies |
+| A context receipt recomputes without a secret | over the admitted ids, the rules in force and the ledger head |
+| A receipt will not guess its chain | naming the wrong one is worse than not being issued |
 | A KMS custody carries its provider and master key | hardcoding `"local"` wraps an AWS deployment's keys with a process secret, silently |
 | Custody declares durability and audit | and the weak rungs warn; a lost ephemeral key is indistinguishable from a full shred |
 | A local key file is created once and reused | including base64, because secrets arrive text-shaped; a wrong length refuses rather than guesses |

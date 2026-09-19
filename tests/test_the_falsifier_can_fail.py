@@ -300,6 +300,35 @@ async def test_the_shredding_check_fails_when_plaintext_can_be_written(core):
         f"a plaintext write succeeded and the check passed: {check.notes}")
 
 
+async def test_the_revocation_check_fails_when_the_embedding_survives(core):
+    """The leak that was live until the perimeter work, and that every
+    other check passed straight over.
+
+    Refusal held, the row stayed on disk, the chain verified -- and the
+    vector beside the erased text still separated its own topic from
+    another by 0.9988 against 0.7992 cosine. A working membership oracle
+    over a subject who asked to be forgotten.
+    """
+    engine, db = core
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
+    await v.declare()
+
+    original = v.docs.impose
+
+    async def keep_the_vector(on, filters=None, **kw):
+        n, receipt = await original(on, filters, **kw)
+        await db.verify_docs.update_many(         # the omission, restored
+            filters or {}, {"$set": {"embedding": [0.1] * 8}})
+        return n, receipt
+
+    v.docs.impose = keep_the_vector
+    check = await v.check_revocation()
+
+    assert not check.ok
+    assert any("embedding" in n for n in check.notes), (
+        f"an erased document kept a copy of itself: {check.notes}")
+
+
 async def test_the_starvation_check_fails_when_the_page_is_truncated(core):
     """Restore the old fixed budget; the check must catch the regression.
 

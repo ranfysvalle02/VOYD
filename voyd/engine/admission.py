@@ -65,14 +65,16 @@ mean issuing every read twice. A signal, not a ledger.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Protocol
 
+from .ledger import GENESIS
 from .errors import (BlastRadius, CallerRequired, DerivationBroken,
-                     Irreversible, ScopeRequired, UnboundedForgetting,
-                     UnknownReason, require_tenant)
+                     Irreversible, ScopeInvalid, ScopeRequired,
+                     UnboundedForgetting, UnknownReason, require_tenant)
 from .time import aware, living, now
 
 log = logging.getLogger("engine.admission")
@@ -246,6 +248,18 @@ class Marked:
 
     def clause(self) -> dict | None:
         return {"$or": [{self.field: None}, {self.field: {"$exists": False}}]}
+
+
+def _digest_of(body: dict) -> str:
+    """The hash a context receipt commits to.
+
+    Deliberately the *same* canonical form the ledger uses, rather than a
+    second one that is nearly identical: two hashing schemes in one package
+    is two ways to compute a value that must agree, and they will disagree
+    the first time somebody adds a field to one.
+    """
+    from .ledger import canonical
+    return hashlib.sha256(canonical(body).encode("utf-8")).hexdigest()
 
 
 def _is_ciphertext(value: Any) -> bool:
@@ -503,6 +517,10 @@ class AdmissionSpec:
     # deadline, so an erasure request does not have to wait for a sweeper and
     # does not depend on the TTL index existing at all.
     mark_field: str = "forgotten"
+    # Fields that are lossy encodings of the document's content, and must
+    # be destroyed when it is erased rather than merely refused. An
+    # embedding is the case that matters -- see ``Admission.impose``.
+    derived_fields: tuple[str, ...] = ("embedding",)
     # Where a document records what it was made out of, and ``None`` when
     # this collection does not track derivation at all. Opt-in, because a
     # collection of source facts has no lineage and should not pay a field
@@ -747,6 +765,7 @@ class Admission:
         self.receipts_log = Receipts()
         self._include = False
         self.ledger = None
+        self.perimeter = None
         self._caller: dict | None = None
         # Set by ``sealed_by()`` when the model declares encrypted fields.
         # ``None`` is the ordinary case and costs nothing: every read below
@@ -759,6 +778,21 @@ class Admission:
         self._bound = False
 
     # ---- proof ---------------------------------------------------------
+
+    def bounded_by(self, perimeter) -> Admission:
+        """Register who else holds copies. Returns ``self``.
+
+        Attached rather than built in, for the same reason the ledger is:
+        it is a claim about a deployment's architecture, and a claim about
+        architecture should be typed out where somebody can read it.
+
+        Nothing here can fail a revocation -- see ``perimeter.py``. The
+        acknowledgements ride along on the receipt, so "who was told, and
+        who did not answer" is part of the audit trail rather than a log
+        line somebody greps for afterwards.
+        """
+        self.perimeter = perimeter
+        return self
 
     def witnessed_by(self, ledger) -> Admission:
         """Record every revocation on a hash chain. Returns ``self``.
@@ -836,6 +870,7 @@ class Admission:
         # report nothing on /healthz.
         clone.receipts_log = self.receipts_log
         clone.ledger = self.ledger
+        clone.perimeter = self.perimeter
         clone._include = self._include
         clone._caller = self._caller
         clone._bound = self._bound
@@ -1758,6 +1793,35 @@ class Admission:
 
     # ---- the general forms ---------------------------------------------
 
+    # ---- the copy that is not stored as text ---------------------------
+    #
+    # Refusal and crypto-shredding both act on the *field somebody typed*.
+    # Neither touches the vector sitting beside it, and the vector is a
+    # lossy encoding of exactly that field -- so an erased document that
+    # keeps its embedding has not been erased, it has been paraphrased into
+    # a format nobody reads by eye.
+    #
+    # Measured in this repository rather than asserted from the literature:
+    # after ``revoke()``, the surviving vector still separates its own topic
+    # from another by 0.9988 against 0.7992 cosine. That is a working
+    # attribute-inference oracle over a subject who asked to be forgotten,
+    # and it needs no inversion model to exploit -- you ask the index
+    # whether a document about X is in there, and it says yes.
+    # (Text reconstruction from embeddings is a live and increasingly
+    # effective research area on top of that; the membership answer above
+    # is simply the floor, and the floor is already a breach.)
+    #
+    # So an irreversible reason destroys the derived encodings with the
+    # mark, in the same write, and **not** on the reaper's schedule: the
+    # whole argument of this package is that a guarantee which waits for a
+    # sweeper is not a guarantee.
+    #
+    # A *reversible* reason must not. A quarantined document is evidence,
+    # and its vector is how an investigator finds the other documents like
+    # it -- destroying it is destroying the lead. That distinction is free,
+    # because ``reversible`` already decides who stamps the deadline, and
+    # this is the same question: is this an erasure, or a hold?
+
     async def impose(self, on: str, filters: dict | None = None, *,
                      reason: str | None = None,
                      erase_after: timedelta | None = None,
@@ -1797,6 +1861,7 @@ class Admission:
         # beginning with ``$`` would be read as a field path and silently
         # write something else entirely.
         mark = {"$literal": {"at": stamp, "reason": why}}
+        mark_set: dict = {}
         update: Any = {"$set": {rule.field: mark["$literal"]}}
         if not rule.reversible:
             # An erasure instruction, so the bytes are scheduled to go. A
@@ -1811,6 +1876,11 @@ class Admission:
             # erasure is the opposite of the thing being asked for.
             at = self.spec.at_field
             due = stamp + (erase_after or timedelta(0))
+            # And the derived encodings go now, not on the reaper's
+            # schedule. See ``_destroy_derived`` -- the vector beside an
+            # erased document is a copy of it in a coat.
+            for name in self.spec.derived_fields:
+                mark_set[name] = None
             update = [{"$set": {
                 rule.field: mark,
                 # A missing or null deadline is a *pinned* row, not an
@@ -1819,6 +1889,7 @@ class Admission:
                 # cases are separated rather than folded together.
                 at: {"$cond": [{"$eq": [{"$type": f"${at}"}, "date"]},
                                {"$min": [f"${at}", due]}, due]},
+                **mark_set,
             }}]
 
         # Everything made out of what this matched goes with it. Resolved
@@ -1835,10 +1906,18 @@ class Admission:
                      rule.reason, n, self.collection, why,
                      f", {inherited} inherited" if inherited else "",
                      stamp.isoformat())
+        detail: dict = {}
+        if inherited:
+            detail |= {"direct": len(ids), "inherited": inherited}
+        if self.perimeter is not None and not rule.reversible:
+            # Told after the rows are marked, never before: the fact is
+            # already unreachable here, and an erasure must not wait on --
+            # or be failed by -- a cache. See ``perimeter.py``.
+            acks = await self.perimeter.forget(ids, reason=why)
+            detail["perimeter"] = [a.as_dict() for a in acks]
         receipt = await self._witness(
             filters or {}, event=rule.reason, reason=why, count=n, at=stamp,
-            detail={"direct": len(ids), "inherited": inherited}
-            if inherited else None)
+            detail=detail or None)
         return n, receipt
 
     async def lift(self, off: str, filters: dict | None = None, *,
@@ -1974,6 +2053,70 @@ class Admission:
         """Remove a deadline. Pinning is the absence of one, not a flag."""
         return (await self.db[self.collection].update_many(
             filters, {"$set": {self.spec.at_field: None}})).modified_count
+
+    # ---- what the model was allowed to see -----------------------------
+
+    async def receipt_for(self, page, *, tenant: Any = None,
+                          when: datetime | None = None) -> dict:
+        """A hash over the policy state that produced this context.
+
+        The chain proves a *revocation* happened. It cannot prove that the
+        model call which produced a given answer respected one, and only
+        the second is the question an incident review asks: **what did the
+        model see when it said that?**
+
+        Today the honest answer is a log line, and the party holding the
+        log is the party being asked. So this commits to the four things
+        that decide whether a context was legitimate:
+
+        ``admitted``  the ids that reached the prompt.
+        ``rules``     which reasons were in force, in order. A policy that
+                      changed after the fact is otherwise invisible.
+        ``chain``     the ledger head at read time, which dates the context
+                      relative to every revocation ever recorded.
+        ``at``        the instant the deadlines were evaluated against.
+
+        Attach the hash to the inference. Recomputing it later needs no
+        secret and no cooperation from this database -- which is the same
+        property that makes the chain worth having, applied one layer up.
+
+        **What it does not prove.** That the model was *given* this
+        context, or only this context. Nothing on this side of the wire can
+        establish that; the receipt binds a context to a policy, and the
+        caller binds it to a generation by carrying it. Overstating that
+        boundary would make this the kind of proof `ledger.py` spends forty
+        lines refusing to claim.
+        """
+        head = None
+        if self.ledger is not None:
+            # The chain is per tenant, and the handle knows the tenant
+            # *field* while only the documents know its value -- so it is
+            # read off them rather than asking the caller to repeat
+            # something the page already contains. An empty page with a
+            # scoped ledger is the one case that cannot be resolved, and
+            # it asks rather than guessing: a receipt naming the wrong
+            # chain is worse than one that could not be issued.
+            at_tenant = tenant
+            if at_tenant is None and self.tenant:
+                seen = {d.get(self.tenant) for d in page}
+                seen.discard(None)
+                if len(seen) > 1:
+                    raise ScopeInvalid(self.collection, self.tenant,
+                                       sorted(map(str, seen)))
+                if not seen:
+                    raise ScopeRequired(self.collection, self.tenant)
+                at_tenant = seen.pop()
+            entry = await self.ledger.head_entry(tenant=at_tenant)
+            head = (entry or {}).get("hash", GENESIS)
+        body = {
+            "collection": self.collection,
+            "admitted": sorted((str(d.get("_id")) for d in page), key=str),
+            "rules": [r.reason for r in self.rules],
+            "chain": head,
+            "at": (when or now()).isoformat(),
+            "refused": dict(getattr(page, "refused", {}) or {}),
+        }
+        return {**body, "hash": _digest_of(body)}
 
     # ---- proof ---------------------------------------------------------
 
