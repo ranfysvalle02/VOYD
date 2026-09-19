@@ -332,9 +332,16 @@ async def test_an_entry_never_carries_the_text_it_refused(core):
                         subject={"doc_id": "d1", "token": "k6kC2pJz"}, count=1)
 
     entry = await db.refusals.find_one({"seq": 0})
+    # An allowlist, so a new field cannot arrive without somebody saying
+    # why it is not document text. ``actor`` was the last one to be added
+    # and is the shape that is allowed: an *identity*, supplied by
+    # whatever authenticated the caller, never anything the caller stored.
     assert set(entry) <= {"_id", "tenant", "seq", "prev", "at", "event",
-                          "reason", "subject", "count", "detail", "hash"}, \
+                          "reason", "subject", "actor", "count", "detail",
+                          "hash"}, \
         "an unexpected field on a chain entry -- check it is not document text"
+    assert entry["actor"] is None, \
+        "nothing authenticated this append, so it must not name anybody"
     assert entry["subject"] == {"doc_id": "d1", "token": "k6kC2pJz"}
 
 

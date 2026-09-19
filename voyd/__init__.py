@@ -65,6 +65,14 @@ sufficient alone -- the key cache is a window refusal has already closed, and
 refusal is local in a way the missing key is not. See ``examples/shred.py``,
 which measures both.
 
+**Who may do it** is the third question, and it had no answer for a long
+time: ``Guard`` asks may this caller read the scope, ``Admission`` asks may
+this document reach a prompt, and every verb that *changed* reachability was
+available to anybody holding a handle. ``authorised_by(Grants(...))`` gates
+them, asymmetrically -- withholding a fact and granting one back are not
+equally dangerous -- and the chain records the actor, hashed with the rest
+of the entry so attribution cannot be attached afterwards.
+
 Refusal is **answerable after the fact**, too. ``as_of(t)`` replays the scope
 as it stood at an instant and ``reachability_at()`` answers for one document
 with three verdicts, not two -- a row the reaper took is ``unknown``, because

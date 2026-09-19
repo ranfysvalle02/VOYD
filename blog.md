@@ -780,13 +780,19 @@ keep current, for a call that is one `DEL` in the caller's own code. The
 mitigation is that registering costs three lines, and a `sealed` claim is
 audited rather than believed.
 
-**Who may edit the policy.** This is the one I would do next, and I only
-noticed it because it blocked three separate things in a row: holds are not
-on the HTTP surface, sealing is not on the HTTP surface, and a policy cannot
-be loaded from the scope document that should own it — each time because
-there is no answer to *who may release, who may shred, who may change the
-rule*. The passcode gates a scope; it says nothing about a review workflow.
-Three blocks on one missing abstraction is a message about what to build.
+**The HTTP surface for the verbs.** The *conceptual* blocker is gone —
+there is an `Authority` now, and the chain records who did what — so what
+remains is a service design question: where the claims come from and which
+endpoint maps them. Smaller than it was, and still not done.
+
+The interesting part was how it was found. Three separate features stalled
+in a row — holds off the HTTP surface, sealing off the HTTP surface, a
+policy that could be stored and not loaded — each for what looked like its
+own reason, and all three for the same one: nothing could answer *who may
+release, who may shred, who may change the rule*. The passcode gates a
+scope; it says nothing about a review workflow. Three blocks on one absence
+is a message, and I only heard it because the issues were written down
+somewhere they could be read next to each other.
 
 **The admission overhead as a published number.** p50/p99 per hit. The obvious
 reviewer objection is "so you pay on every read, forever," and the answer
@@ -949,7 +955,7 @@ hold documents of different sensitivity without becoming four boundaries. And
 a reason declares whether it can be taken back, so a hold is an investigation
 rather than a graveyard, and an erasure stays an erasure.
 
-527 tests, six skipped. A falsifier that has failed on purpose thirteen ways and
+547 tests, six skipped. A falsifier that has failed on purpose thirteen ways and
 caught one real bug on its first run. Three bugs found in the proof, one found
 by writing an example, and three silent no-ops found by asking whether a
 refusal should be undoable. Every number in this essay is in `bench/` or

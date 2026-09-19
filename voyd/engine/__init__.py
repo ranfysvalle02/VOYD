@@ -60,6 +60,10 @@ collections, fields and filters, never about namespaces or voids.
 
 from __future__ import annotations
 
+from .authority import (DERIVE, GRANTS_REACHABILITY, POLICY, QUARANTINE,
+                        RELEASE, REVOKE, SHRED, WITHHOLDS, Anyone,
+                        Authority, AuthorityRequired, Grants, NotAuthorised,
+                        Recorded)
 from .capabilities import Capabilities, detect
 from .errors import (
     BlastRadius,
@@ -378,6 +382,10 @@ __all__ = [
     "Memory", "MemorySpec",
     "Perimeter", "PerimeterLog", "Sink", "sink", "Acknowledgement",
     "compile_policy", "Denies", "PolicyInvalid",
+    "Authority", "Grants", "Anyone", "Recorded",
+    "NotAuthorised", "AuthorityRequired",
+    "REVOKE", "QUARANTINE", "RELEASE", "SHRED", "DERIVE", "POLICY",
+    "GRANTS_REACHABILITY", "WITHHOLDS",
     "SEALED", "OWNED", "DERIVED",
     "Model",
     "JobQueue", "PermanentFailure", "backoff",

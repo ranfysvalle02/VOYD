@@ -90,6 +90,16 @@ SINK_TIMEOUT_S = 5.0
 # which is not the same fact and must not be recorded as if it were.
 DEFAULT_HORIZON = timedelta(days=1)
 
+# After this, a sealed sink's last audit is reported as stale. A week,
+# because the claim it checks -- "this cache holds ciphertext" -- changes
+# when somebody deploys, and most things deploy more often than that.
+STALE_AFTER = timedelta(days=7)
+
+# The chain event for an audit. Recorded like any other instruction,
+# because "we checked, on this date, and here is what each sink said" is a
+# fact about the world in exactly the way a revocation is.
+AUDITED = "audited"
+
 
 @runtime_checkable
 class Sink(Protocol):
@@ -170,6 +180,9 @@ class Perimeter:
     """
 
     sinks: list = field(default_factory=list)
+    # sink name -> the last ``audit()`` result. What turns a pre-flight
+    # check into something with a staleness measure; see ``audit``.
+    verified: dict = field(default_factory=dict)
 
     def register(self, sink) -> Perimeter:
         for attr in ("name", "holds"):
@@ -265,6 +278,25 @@ class Perimeter:
         rather than reached for, because whether these records are worth
         keeping -- and for how long -- is a retention decision, and
         retention decisions should be typed out.
+
+        **Nothing in this package calls this on a schedule, on purpose.**
+        A worker that retries erasures is a worker holding credentials for
+        every registered sink, and where that runs is a deployment
+        decision this library should not make quietly. What it should do
+        is make the loop trivial enough that "nobody calls it" is never
+        because it was awkward::
+
+            log = PerimeterLog(engine.db)
+            await log.ensure()
+
+            while True:                       # your worker, your creds
+                await perimeter.redrive(log)
+                await asyncio.sleep(60)
+
+        The one-shot form is also the right thing to put in a cron, and
+        ``settled()`` below is the number to alert on: outstanding
+        acknowledgements that have stopped being retried are open breaches
+        with nobody assigned to them.
         """
         # ``is None``, not ``or``: ``timedelta(0)`` is falsy, so the
         # obvious spelling silently turns "expire everything now" -- the
@@ -306,7 +338,8 @@ class Perimeter:
         except Exception as exc:  # noqa: BLE001 - see forget(): never raise
             return Acknowledgement(sink.name, OWNED, False, now(), repr(exc))
 
-    async def audit(self, *, shredded_id) -> list[Acknowledgement]:
+    async def audit(self, *, shredded_id, ledger=None, tenant=None
+                    ) -> list[Acknowledgement]:
         """Turn ``holds=SEALED`` from a claim into a check.
 
         A sink declaring ``sealed`` is *trusted* about it, and if it
@@ -322,6 +355,19 @@ class Perimeter:
         passing**, which is the whole point -- a claim nobody checked and a
         claim that was checked must not look the same, and that is the same
         argument the falsifier makes about a skipped test.
+
+        **This is a pre-flight check, and on its own that is not enough.**
+        A sink that starts caching plaintext the day after an audit is
+        indistinguishable from one that never did, so the *result* is kept
+        with its timestamp and ``describe()`` reports how stale it is.
+        Staleness is the whole difference between a check somebody ran once
+        and a check a deployment relies on: "verified 400 days ago" and
+        "verified" must not read the same, which is the same complaint this
+        module makes about an unchecked claim in the first place.
+
+        Passing a ``ledger`` puts the result on the chain, so an audit that
+        was run becomes a fact somebody can point at rather than a log line
+        that has rotated away.
         """
         out = []
         for sink in self.sinks:
@@ -348,8 +394,21 @@ class Perimeter:
                 "" if not leaked else
                 "MISDECLARED: produced plaintext for a shredded key, so "
                 "every erasure this perimeter reported for it was false"))
+        for ack in out:
+            self.verified[ack.sink] = ack
         for bad in (a for a in out if not a.acked and "MISDECLARED" in a.detail):
             log.error("perimeter: %s", bad.detail)
+        if ledger is not None and out:
+            try:
+                await ledger.append(
+                    AUDITED, tenant=tenant, reason="perimeter audit",
+                    count=sum(1 for a in out if a.acked),
+                    detail={"sinks": [a.as_dict() for a in out]})
+            except Exception:  # noqa: BLE001 - the audit happened; failing
+                # to record it must not undo that, exactly as a revocation
+                # is not undone by an unwritable chain.
+                log.exception("perimeter: audited %d sealed sink(s) and could "
+                              "not record it", len(out))
         return out
 
     def describe(self) -> dict:
@@ -363,8 +422,25 @@ class Perimeter:
         by_class: dict[str, list[str]] = {}
         for sink in self.sinks:
             by_class.setdefault(sink.holds, []).append(sink.name)
+        sealed_state = {}
+        for sink in self.sinks:
+            if sink.holds != SEALED:
+                continue
+            ack = self.verified.get(sink.name)
+            if ack is None:
+                sealed_state[sink.name] = "never verified"
+                continue
+            age = now() - aware(ack.at)
+            state = "verified" if ack.acked else "FAILED"
+            if age > STALE_AFTER:
+                state = f"{state}, {age.days}d ago (stale)"
+            sealed_state[sink.name] = state
         return {
             "sinks": {k: sorted(v) for k, v in by_class.items()},
+            # Reported even when empty: a deployment with sealed sinks and
+            # no audits has a claim nobody has ever checked, and the
+            # absence of a result is the finding.
+            "sealed_claims": sealed_state,
             "claims": {
                 SEALED: "erased by destroying the key; no call required",
                 OWNED: "told, best effort; acknowledgement recorded, not "
@@ -428,6 +504,23 @@ class PerimeterLog:
     async def outstanding(self) -> list[dict]:
         cursor = self.db[self.collection].find({"open": True}).sort("at", 1)
         return [d async for d in cursor]
+
+    async def settled(self) -> dict:
+        """The two numbers worth alerting on.
+
+        ``open`` is work: sinks that have not answered and are still being
+        retried. ``unconfirmed`` is the one that matters -- propagations
+        that were given up on, which are open breaches with nobody
+        assigned to them. A dashboard that shows only the first will read
+        as healthy precisely when the queue has drained by expiry rather
+        than by success.
+        """
+        coll = self.db[self.collection]
+        return {
+            "open": await coll.count_documents({"open": True}),
+            "unconfirmed": await coll.count_documents(
+                {"open": False, "confirmed": False}),
+        }
 
     async def settle(self, row: dict, ack, *, final: bool) -> None:
         """Close a row, or leave it open for another attempt.

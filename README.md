@@ -657,6 +657,60 @@ claims worth trusting — a handle that believed `{"clearance": "secret"}`
 because a request said so would be an authorisation system whose only input is
 the attacker's. Claims come from whatever already authenticated the caller.
 
+## May this caller *do* this?
+
+There were three questions and only two had an answer:
+
+| | asks | answered by |
+|---|---|---|
+| `Guard` | may this caller read the scope? | a passcode |
+| `Admission` | may this document reach a prompt? | rules, per document |
+| **`Authority`** | **may this caller perform this operation?** | **— nothing** |
+
+The gap was invisible because the first two are carefully separated and
+both are about *reading*. Every verb that changes reachability was
+available to anyone holding a handle — which in practice means anyone
+holding the scope's passcode. So "re-admit a document an injection detector
+flagged" sat behind the same credential as "search this scope", and three
+separate features had to stay off the HTTP surface because of it.
+
+```python
+docs = engine.model("notes", tenant="t").admitting(...)            .authorised_by(Grants.withholding_only())
+
+pipeline = docs.for_caller({"sub": "indexer"})
+await pipeline.quarantine(...)     # fine — at 3am, unattended
+await pipeline.release(...)        # NotAuthorised
+
+reviewer = docs.for_caller({"sub": "alice@acme", "may": ["release"]})
+await reviewer.release(..., reason="reviewed, benign")
+```
+
+**The asymmetry is the design.** *Withholding* (revoke, quarantine, shred)
+and *granting* (release) are not equally dangerous and must not be equally
+available — a mistake in the second direction is the breach the detector
+fired about. `Grants.withholding_only()` is the shape most services want.
+
+Not attached means unchanged: by default the caller of a library *is* the
+application, and demanding an authority from a script would be theatre.
+Once attached, an **unbound caller raises** — same reasoning as
+`CallerRequired`, where permitting makes the authority decorative and
+refusing silently makes a revocation report success having done nothing.
+
+### And the chain learned who
+
+It could say what stopped being reachable, when, and on what instruction —
+and not by whom. The strongest sentence available to an auditor was
+*"somebody released the document the detector flagged."*
+
+```
+seq 0  quarantined  injection detector     by indexer
+seq 1  lifted       reviewed, benign       by alice@acme
+```
+
+`actor` is hashed with the rest of the entry, so it cannot be attached
+afterwards, and it is `None` where nothing knows — an unattributed entry
+says so rather than naming a service account nobody checked.
+
 ## Verify it on your own deployment
 
 Every retrieval system's README makes claims; this one ships the experiment
@@ -1577,6 +1631,12 @@ that has nothing to do with either of them.
 | A compiled policy matches hand-written behaviour | nine operators, query vs per-document, against a live server |
 | A sealed sink is checked, not trusted | `audit()` catches one that still serves plaintext, and reports an unchecked claim as unchecked |
 | A retry has a horizon | past it the row is closed *unconfirmed*, because a false success is worse than an honest gap |
+| Granting reachability is gated apart from withholding it | a pipeline may quarantine and may not release |
+| An authority with no caller raises | permitting makes it decorative; refusing silently is a no-op on a write |
+| An unknown operation is denied | a new verb is not retroactively granted to old tokens |
+| The chain names who | and hashes it, so attribution cannot be attached afterwards |
+| A stale audit does not read as a current one | `never verified` / `verified` / `verified, 400d ago (stale)` |
+| The queue reports what was given up on | `unconfirmed`, because draining by expiry looks healthy otherwise |
 | A KMS custody carries its provider and master key | hardcoding `"local"` wraps an AWS deployment's keys with a process secret, silently |
 | Custody declares durability and audit | and the weak rungs warn; a lost ephemeral key is indistinguishable from a full shred |
 | A local key file is created once and reused | including base64, because secrets arrive text-shaped; a wrong length refuses rather than guesses |

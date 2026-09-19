@@ -447,3 +447,92 @@ def test_registering_a_sink_costs_three_lines():
 
     p = Perimeter().register(sink("redis", OWNED, forget=drop))
     assert p.describe()["sinks"] == {OWNED: ["redis"]}
+
+
+# ---- a check nobody has run lately ------------------------------------
+
+async def test_an_unaudited_sealed_claim_reports_as_never_verified():
+    """The absence of a result is the finding. A deployment with sealed
+    sinks and no audits has a claim nobody has ever checked."""
+    p = Perimeter().register(a_sink("mirror", SEALED, leaks=False))
+    assert p.describe()["sealed_claims"] == {"mirror": "never verified"}
+
+    await p.audit(shredded_id="x")
+    assert p.describe()["sealed_claims"] == {"mirror": "verified"}
+
+
+async def test_a_stale_audit_does_not_read_as_a_current_one():
+    """"Verified 400 days ago" and "verified" must not look the same --
+    the same complaint this module makes about an unchecked claim, turned
+    on its own check."""
+    from datetime import timedelta
+
+    from voyd.engine.time import now
+
+    p = Perimeter().register(a_sink("mirror", SEALED, leaks=False))
+    await p.audit(shredded_id="x")
+    p.verified["mirror"].at = now() - timedelta(days=400)
+
+    state = p.describe()["sealed_claims"]["mirror"]
+    assert "stale" in state and "400d" in state
+
+
+async def test_a_failed_audit_stays_visible_in_describe():
+    p = Perimeter().register(a_sink("liar", SEALED, leaks=True))
+    await p.audit(shredded_id="x")
+    assert p.describe()["sealed_claims"]["liar"] == "FAILED"
+
+
+async def test_an_audit_can_be_put_on_the_chain(core):
+    """So a run becomes a fact somebody can point at, rather than a log
+    line that has rotated away."""
+    engine, db = core
+    chain = engine.ledger("refusals", tenant="t")
+    await chain.ensure()
+    p = Perimeter().register(a_sink("mirror", SEALED, leaks=False))
+
+    await p.audit(shredded_id="x", ledger=chain, tenant="a")
+
+    entry = (await chain.entries(tenant="a"))[-1]
+    assert entry["event"] == "audited" and entry["count"] == 1
+    assert entry["detail"]["sinks"][0]["sink"] == "mirror"
+
+
+async def test_an_unrecordable_audit_still_happened(core):
+    """Failing to write the record must not undo the check, exactly as a
+    revocation is not undone by an unwritable chain."""
+    class Broken:
+        async def append(self, *a, **kw):
+            raise RuntimeError("chain unavailable")
+
+    p = Perimeter().register(a_sink("mirror", SEALED, leaks=False))
+    acks = await p.audit(shredded_id="x", ledger=Broken(), tenant="a")
+
+    assert [a.acked for a in acks] == [True]
+    assert p.describe()["sealed_claims"]["mirror"] == "verified"
+
+
+async def test_the_queue_reports_what_was_given_up_on(core):
+    """The number that matters. A dashboard showing only ``open`` reads as
+    healthy precisely when the queue has drained by expiry rather than by
+    success."""
+    from datetime import timedelta
+
+    from voyd.engine import PerimeterLog
+
+    engine, db = core
+    cache = Cache(fail="raise")
+    log = PerimeterLog(db, "perimeter")
+    await log.ensure()
+    notes = engine.model("notes", tenant="t").forgettable().bounded_by(
+        Perimeter().register(cache), log_to=log)
+    await engine.ensure(search_wait_s=0)
+    await db.notes.insert_one({"t": "a", "doc_id": "d1"})
+    await notes.revoke({"t": "a", "doc_id": "d1"}, reason="erasure")
+
+    assert await log.settled() == {"open": 1, "unconfirmed": 0}
+
+    await notes.perimeter.redrive(log, older_than=timedelta(0))
+
+    assert await log.settled() == {"open": 0, "unconfirmed": 1}, \
+        "drained, and not one of them confirmed"

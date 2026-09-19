@@ -254,6 +254,7 @@ class Ledger:
                      reason: str | None = None,
                      subject: Any = None, count: int | None = None,
                      detail: dict | None = None,
+                     actor: str | None = None,
                      at: datetime | None = None,
                      attempts: int = 5) -> dict:
         """Link one event onto the end of the chain and return it.
@@ -262,21 +263,29 @@ class Ledger:
         refusal. Their copy of ``hash`` is what makes a later rewrite of this
         chain detectable by somebody other than its owner.
 
-        ``detail`` is for identifiers and decisions -- who asked, which
-        ticket, which policy. Not for document text: see the module
-        docstring on why an audit record must not become an exempt copy of
-        the secret.
+        ``detail`` is for identifiers and decisions -- which ticket, which
+        policy. Not for document text: see the module docstring on why an
+        audit record must not become an exempt copy of the secret.
+
+        ``actor`` is *who*, and it took an embarrassingly long time to
+        appear. The chain could say what stopped being reachable, when,
+        and on what instruction -- and not by whom, so the strongest
+        sentence available to an auditor was "somebody released the
+        document the detector flagged". It is hashed with the rest of the
+        entry, so it cannot be attached afterwards, and it is ``None``
+        where nothing knows: an unattributed entry says so rather than
+        naming a service account that was never checked.
         """
         scope = self._scope(tenant)
         lock = self._locks.setdefault(_stamp(tenant), asyncio.Lock())
         async with lock:
             return await self._append_linked(
                 event, scope=scope, tenant=tenant, reason=reason,
-                subject=subject, count=count, detail=detail, at=at,
-                attempts=attempts)
+                subject=subject, count=count, detail=detail, actor=actor,
+                at=at, attempts=attempts)
 
     async def _append_linked(self, event, *, scope, tenant, reason, subject,
-                             count, detail, at, attempts) -> dict:
+                             count, detail, actor, at, attempts) -> dict:
         # Truncated before it is hashed *and* before it is stored, so the
         # document in the database hashes to the value it carries. See
         # ``truncate``.
@@ -291,6 +300,7 @@ class Ledger:
                 "event": event,
                 "reason": reason,
                 "subject": _stamp(subject),
+                "actor": actor,
                 "count": count,
                 "detail": _stamp(detail) if detail else None,
             }
@@ -309,9 +319,9 @@ class Ledger:
                           entry["seq"], attempt)
                 await asyncio.sleep(random.uniform(0, 0.02 * attempt))
                 continue
-            log.info("ledger %s seq=%s event=%s reason=%s subject=%s",
-                     self.collection, entry["seq"], event, reason,
-                     entry["subject"])
+            log.info("ledger %s seq=%s event=%s reason=%s actor=%s "
+                     "subject=%s", self.collection, entry["seq"], event,
+                     reason, actor or "-", entry["subject"])
             entry.pop("_id", None)
             return entry
         raise RuntimeError(

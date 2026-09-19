@@ -72,6 +72,8 @@ from datetime import datetime, timedelta
 from typing import Any, Iterable, Protocol
 
 from .ledger import GENESIS
+from .authority import (DERIVE, QUARANTINE, RELEASE, REVOKE, SHRED,
+                        AuthorityRequired, NotAuthorised)
 from .errors import (BlastRadius, CallerRequired, DerivationBroken,
                      Irreversible, ScopeInvalid, ScopeRequired,
                      UnboundedForgetting, UnknownReason, require_tenant)
@@ -817,6 +819,9 @@ class Admission:
         self.ledger = None
         self.perimeter = None
         self.perimeter_log = None
+        # Who may *do* things here. ``None`` means this handle is not
+        # serving anybody but its own application; see ``authorised_by``.
+        self.authority = None
         # The instant reads are answered at. ``None`` is now, which is the
         # ordinary case and costs a single comparison.
         self._as_of: datetime | None = None
@@ -832,6 +837,52 @@ class Admission:
         self._bound = False
 
     # ---- proof ---------------------------------------------------------
+
+    def authorised_by(self, authority) -> Admission:
+        """Gate the verbs that change reachability. Returns ``self``.
+
+        Attached rather than built in, because by default the caller of a
+        library *is* the application -- it already holds the database, and
+        demanding an authority from a script would be theatre. Installing
+        one says this handle is serving somebody else, and from then on an
+        unbound caller raises rather than passing.
+
+        See ``authority.py`` for why the operations are asymmetric:
+        withholding a fact and granting one back are not equally dangerous
+        and must not be equally available.
+        """
+        self.authority = authority
+        return self
+
+    def _authorise(self, operation: str) -> None:
+        """Check, and raise loudly. Never returns False.
+
+        A boolean here would be a boolean somebody forgets to check, and
+        the thing they would forget to check is whether the caller may put
+        a quarantined document back in front of a model.
+        """
+        if self.authority is None:
+            return
+        if not self._bound:
+            raise AuthorityRequired(operation, self.collection)
+        if self.authority.permits(operation, self._caller,
+                                  collection=self.collection):
+            return
+        held = getattr(self.authority, "held_by", None)
+        # WARNING, not info: a denied write is either a bug in the caller
+        # or somebody probing, and both are worth waking up to. The same
+        # reasoning that counts ``not_cleared`` apart from ``deadline``.
+        log.warning("refused %s on %s for %r", operation, self.collection,
+                    self._actor() or "an unnamed caller")
+        raise NotAuthorised(operation, self.collection,
+                            held(self._caller) if held else None)
+
+    def _actor(self) -> str | None:
+        """Who to write on the chain, when anything knows."""
+        if self.authority is None:
+            return None
+        naming = getattr(self.authority, "actor", None)
+        return naming(self._caller) if naming else None
 
     def bounded_by(self, perimeter, *, log_to=None) -> Admission:
         """Register who else holds copies. Returns ``self``.
@@ -933,6 +984,7 @@ class Admission:
         clone.ledger = self.ledger
         clone.perimeter = self.perimeter
         clone.perimeter_log = self.perimeter_log
+        clone.authority = self.authority
         clone._as_of = self._as_of
         clone._include = self._include
         clone._caller = self._caller
@@ -1641,6 +1693,7 @@ class Admission:
                 f"document made out of nothing is an ordinary insert")
 
         self._require_caller()
+        self._authorise(DERIVE)
         scope = self._scope_of(docs)
         found = [d async for d in self.db[self.collection].find(
             self._query_by_id(parents, scope))]
@@ -1869,6 +1922,7 @@ class Admission:
         already have. An erasure request should not require knowing that a
         key vault exists.
         """
+        self._authorise(SHRED)
         return await self._require_sealing("shred").keyring.shred(scope)
 
     async def _unsealed(self, documents: list[dict]) -> tuple[list, dict]:
@@ -2037,6 +2091,7 @@ class Admission:
         # check has to happen before the collection handle is even touched,
         # or the failure mode depends on which line raises first.
         self._require_caller()
+        self._authorise(QUARANTINE if rule.reversible else REVOKE)
         verb = "quarantine" if rule.reversible else "revoke"
         query = self._write_query(rule, filters, present=False)
         await self._guard(verb, filters, query, expect=expect,
@@ -2158,6 +2213,10 @@ class Admission:
                 self.collection, rule.reason,
                 tuple(r.reason for r in self._imposable() if r.reversible))
         self._require_caller()
+        # The operation that grants reachability, and therefore the one an
+        # authority exists to gate: a mistake here puts a flagged document
+        # back in front of a model.
+        self._authorise(RELEASE)
         query = self._write_query(rule, filters, present=True)
         await self._guard("release", filters, query, expect=expect,
                           everything=everything)
@@ -2235,7 +2294,7 @@ class Admission:
             return await self.ledger.append(
                 event, tenant=self.tenant and filters.get(self.tenant),
                 reason=reason, subject=filters, count=count, at=at,
-                detail=detail)
+                detail=detail, actor=self._actor())
         except Exception:  # noqa: BLE001 - see docstring: the write already
             # happened, and this must not undo it.
             log.exception(

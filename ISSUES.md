@@ -113,48 +113,72 @@ depends on this being understood.
 
 ---
 
-## 5. Three features are blocked on one missing abstraction
+## 5. ~~Three features blocked on one missing abstraction~~ — abstraction shipped
 
-**Severity: medium — and the pattern is the finding.**
+`authority.py`. There were three questions and only two had an answer:
 
-None of these are on the HTTP surface, each for the same reason:
+    Guard       may this caller read the scope?          a passcode
+    Admission   may this document reach a prompt?        rules, per document
+    Authority   may this caller perform this operation?  -- nothing
 
-- **holds** — who may `release()` a document a detector flagged?
-- **sealing** — who may declare a field sensitive, and who may `shred()`?
-- **policy loading** — a scope document can hold a `deny` clause and
-  nothing reads it, because who may *edit* it is unanswered.
+Every verb that changes reachability was available to anyone holding a
+handle, which in practice meant anyone holding the scope's passcode. The
+asymmetry is the design: **withholding** (revoke, quarantine, shred) and
+**granting** (release) are not equally dangerous and must not be equally
+available. `Grants.withholding_only()` is the shape most services want —
+your pipeline may quarantine anything at 3am and may not put a flagged
+document back in front of a model.
 
-The passcode gates a scope. It says nothing about a review workflow, and
-shipping any of the three without that answer would put "re-admit a
-document an injection detector flagged" behind the same credential as
-"read the scope".
+Not attached means unchanged, because by default the caller of a library
+*is* the application. Once attached, an unbound caller **raises** rather
+than passing, for the same reason as `CallerRequired`.
 
-Three separate features blocked on one absence is a message about what to
-build, which is why this is an issue and not three.
+**And the chain learned who.** It could say what stopped being reachable,
+when, and on what instruction — and not by whom, so the strongest sentence
+available to an auditor was *"somebody released the document the detector
+flagged"*. `actor` is hashed with the rest of the entry, so it cannot be
+attached afterwards, and it is `None` where nothing knows rather than
+naming a service account nobody checked.
+
+**Still open:** the HTTP surface. The blocker was conceptual and is now
+mechanical — the endpoints need to map claims onto an `Authority` and
+decide where those claims come from, which is a service design question
+rather than a missing primitive. Policy *loading* is likewise one line
+(`*compile_policy(stored)`); what remains is an editing endpoint, gated on
+the `policy` operation that now exists.
 
 ---
 
-## 6. `redrive()` is a method nobody calls
+## 6. ~~`redrive()` is a method nobody calls~~ — still unwired, deliberately
 
-**Severity: low — deliberate, and worth stating so it is not read as an
-oversight.**
-
-Unacknowledged perimeter propagations are retried by `Perimeter.redrive()`,
-and `engine.queue()` is the thing that would call it on a schedule. It is
-not wired, because a worker that retries erasures is a worker holding
+Unchanged and still correct: a worker that retries erasures holds
 credentials for every registered sink, and where that runs is a deployment
 decision this package should not make quietly.
 
+What changed is that "nobody calls it" can no longer be because it was
+awkward. The loop is four lines, documented in `redrive()` itself, and
+`PerimeterLog.settled()` gives the two numbers to alert on — including the
+one that matters, `unconfirmed`, which counts propagations that were given
+up on. A dashboard showing only `open` reads as healthy precisely when the
+queue has drained by expiry rather than by success.
+
 ---
 
-## 7. A `SEALED` sink is audited only when somebody audits it
+## 7. ~~A `SEALED` sink is audited only when somebody audits it~~ — now with staleness
 
-`Perimeter.audit()` turns `holds=SEALED` from a claim into a check, and
-`voyd verify` runs it during the shredding check when a perimeter is
-attached. Nothing runs it in production, and a sink that starts caching
-plaintext after the audit is indistinguishable from one that never did.
+Still a pre-flight check. The fix is not to pretend otherwise but to make
+the gap *visible*: `audit()` keeps its result, `describe()` reports each
+sealed sink as `never verified` / `verified` / `verified, 400d ago
+(stale)`, and passing a ledger puts the audit on the chain so a run
+becomes a fact rather than a log line that rotated away.
 
-The honest framing is that this is a *pre-flight* check, not a monitor.
+"Verified 400 days ago" and "verified" must not read the same — which is
+the same complaint this module makes about an unchecked claim, applied to
+its own check.
+
+**Still open:** nothing runs it continuously, and a sink that starts
+caching plaintext the day after an audit is undetectable until the next
+one. Staleness bounds the lie; it does not remove it.
 
 ---
 
