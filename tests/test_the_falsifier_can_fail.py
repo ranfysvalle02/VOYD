@@ -235,6 +235,71 @@ async def test_the_inheritance_check_fails_when_a_new_summary_can_be_written(cor
         f"a fact was written out of an erased one: {check.notes}")
 
 
+async def test_the_shredding_check_fails_when_the_key_is_not_destroyed(core):
+    """Eight checks, and this one had no falsifier -- so its bite was
+    assumed rather than known.
+
+    A ``shred()`` that reported success without deleting anything passes
+    every other check in the suite: the ciphertext is still ciphertext, the
+    row is still on disk, the chain still verifies. Only this check notices
+    that the fact is still readable.
+    """
+    from voyd.engine.keyring import available
+
+    if not available()[0]:
+        pytest.skip("no automatic encryption on this machine")
+
+    engine, db = core
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
+    await v.declare()
+
+    original = V.Keyring.shred
+
+    async def reports_success_does_nothing(self, scope, **kw):
+        return 1                                   # the plausible no-op
+
+    V.Keyring.shred = reports_success_does_nothing
+    try:
+        check = await v.check_shredding()
+    finally:
+        V.Keyring.shred = original
+
+    assert not check.ok
+    assert any("shred did not take" in n for n in check.notes), (
+        f"a key that was never destroyed passed the check: {check.notes}")
+
+
+async def test_the_shredding_check_fails_when_plaintext_can_be_written(core):
+    """The structural half, and the failure it closes is the worst one
+    available: a writer that skips the encrypting client stores plaintext
+    and nothing raises. Silent, permanent, in a backup before anybody
+    notices.
+
+    Dropping the validator leaves every other property intact -- the
+    encrypting path still encrypts, shredding still works, the chain still
+    verifies -- so nothing but this assertion would catch it.
+    """
+    from voyd.engine.keyring import Keyring, available
+
+    if not available()[0]:
+        pytest.skip("no automatic encryption on this machine")
+
+    engine, db = core
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
+    await v.declare()
+
+    original = Keyring.validator
+    Keyring.validator = lambda self, collection: None   # the omission
+    try:
+        check = await v.check_shredding()
+    finally:
+        Keyring.validator = original
+
+    assert not check.ok
+    assert any("PLAINTEXT" in n for n in check.notes), (
+        f"a plaintext write succeeded and the check passed: {check.notes}")
+
+
 async def test_the_starvation_check_fails_when_the_page_is_truncated(core):
     """Restore the old fixed budget; the check must catch the regression.
 

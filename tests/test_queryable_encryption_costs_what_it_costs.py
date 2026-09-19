@@ -39,15 +39,13 @@ OTHER = "999-99-9999"
 
 
 async def qe_ring(db, collection="people"):
-    from pymongo import AsyncMongoClient
-
+    """A keyring over a QE collection, and the client it owns."""
     ring = Keyring(db, KeyringSpec(
         collection=f"k_{uuid.uuid4().hex[:6]}",
         protect={collection: Queryable(("ssn",), query_type="equality")}))
     await ring.ensure()
-    client = AsyncMongoClient(TEST_MONGO_URI,
-                              auto_encryption_opts=await ring.client_options())
-    return ring, client
+    await ring.writer(collection)      # opens the encrypting client
+    return ring, ring._writer
 
 
 async def test_the_ciphertext_itself_is_queryable(core):
@@ -55,7 +53,7 @@ async def test_the_ciphertext_itself_is_queryable(core):
     engine, db = core
     ring, client = await qe_ring(db)
     try:
-        await ring.create_queryable(client, "people")
+        await ring.create_queryable("people")
         await client[db.name].people.insert_many([
             {"name": "alice", "ssn": SSN}, {"name": "bob", "ssn": OTHER}])
 
@@ -66,7 +64,7 @@ async def test_the_ciphertext_itself_is_queryable(core):
         assert raw["ssn"].subtype == ENCRYPTED
         assert SSN.encode() not in bytes(raw["ssn"])
     finally:
-        await client.close()
+        await ring.aclose()
 
 
 async def test_queryable_encryption_needs_its_metadata_collections(core):
@@ -76,11 +74,11 @@ async def test_queryable_encryption_needs_its_metadata_collections(core):
     engine, db = core
     ring, client = await qe_ring(db)
     try:
-        await ring.create_queryable(client, "people")
+        await ring.create_queryable("people")
         names = await db.list_collection_names()
         assert {"enxcol_.people.esc", "enxcol_.people.ecoc"} <= set(names)
     finally:
-        await client.close()
+        await ring.aclose()
 
 
 async def test_creating_an_undeclared_collection_as_queryable_raises(core):
@@ -88,9 +86,9 @@ async def test_creating_an_undeclared_collection_as_queryable_raises(core):
     ring, client = await qe_ring(db)
     try:
         with pytest.raises(ValueError, match="not declared Queryable"):
-            await ring.create_queryable(client, "somewhere_else")
+            await ring.create_queryable("somewhere_else")
     finally:
-        await client.close()
+        await ring.aclose()
 
 
 async def test_a_queryable_key_is_per_field_not_per_scope(core):
@@ -116,7 +114,7 @@ async def test_a_queryable_key_is_per_field_not_per_scope(core):
             {"keyAltNames": "people.ssn"})
         assert named is not None and named["_id"] == spec["keyId"]
     finally:
-        await client.close()
+        await ring.aclose()
 
 
 async def test_shredding_a_queryable_key_takes_the_whole_collection(core):
@@ -133,7 +131,7 @@ async def test_shredding_a_queryable_key_takes_the_whole_collection(core):
     ring, client = await qe_ring(db)
     cold = None
     try:
-        await ring.create_queryable(client, "people")
+        await ring.create_queryable("people")
         await client[db.name].people.insert_many([
             {"name": "alice", "ssn": SSN}, {"name": "bob", "ssn": OTHER}])
 
@@ -146,7 +144,7 @@ async def test_shredding_a_queryable_key_takes_the_whole_collection(core):
             with pytest.raises(Exception):
                 await cold[db.name].people.find_one({"name": who})
     finally:
-        await client.close()
+        await ring.aclose()
         if cold is not None:
             await cold.close()
 

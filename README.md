@@ -692,9 +692,13 @@ degraded to.
          and a new derivation from an erased parent is refused
   [ok  ] shredding: destroying a scope's key makes its ciphertext unreadable
          everywhere, not just here
+         custody: a file at ./master.key (durable=True, audited=False)
          ciphertext at rest: a client with no key sees subtype 6
+         a plaintext write is refused by the server, so bypassing the
+         encrypting client fails loudly
          key destroyed; a cold client can no longer read it, and no restored
          backup ever will either
+         and the master key rotated without rewriting a single document
   [ok  ] chain: the refusal ledger recomputes intact
 ```
 
@@ -705,7 +709,8 @@ install voyd`: no app extra, no running server, and it only ever touches a
 scratch database it creates and drops.
 
 CI runs it on every commit, and `tests/test_the_falsifier_can_fail.py` breaks
-the guarantee ten different ways to prove each check bites. A checker that
+the guarantee twelve different ways to prove each check bites — one per
+check, and two checks that have more than one way to break. A checker that
 cannot fail is worse than no checker — it turns an unknown into a false
 assurance somebody then makes a promise on.
 
@@ -1390,7 +1395,7 @@ that has nothing to do with either of them.
 | A chain cannot fork under concurrency | twelve concurrent revocations produce twelve linear links |
 | A hash survives its own round trip | the stored entry hashes to the receipt handed out, field by field |
 | An unrecordable refusal still refuses | a broken ledger cannot turn a completed revocation into an error |
-| The falsifier can fail | ten ways of breaking the guarantee, each caught by the check that claims it |
+| The falsifier can fail | twelve ways of breaking the guarantee, each caught by the check that claims it |
 | An erasure cannot be taken back | `lift()` raises on an irreversible reason, and `release()` is not a way around it |
 | A hold can be | imposed, lifted, and counted apart from erasure, because overruling a detector is its own number |
 | A hold does not destroy its own evidence | imposing a reversible reason stamps no erase deadline |

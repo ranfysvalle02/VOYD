@@ -1721,6 +1721,12 @@ class Admission:
         """
         ce = encryption or await keyring.encryption()
         fields = tuple(fields)
+        # Materialised once. ``documents`` is an Iterable, and the count
+        # below used to re-walk it -- which is 0 for a generator, so
+        # ``examined`` silently under-reported on exactly the callers that
+        # stream. A cost figure that reads 0 under load is worse than no
+        # cost figure.
+        documents = list(documents)
         kept, tally = [], {}
         for doc in documents:
             out = dict(doc)
@@ -1748,7 +1754,7 @@ class Admission:
             log.info("%s: %d document(s) are unrecoverable -- their key was "
                      "destroyed, so no read path anywhere can produce the "
                      "plaintext", self.collection, tally[UNRECOVERABLE])
-        return Page(kept, refused=tally, examined=len(list(documents)))
+        return Page(kept, refused=tally, examined=len(documents))
 
     # ---- the general forms ---------------------------------------------
 

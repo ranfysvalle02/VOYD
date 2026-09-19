@@ -202,12 +202,9 @@ class Sealing:
     the exact shape of rule this package exists to make structural.
     """
 
-    keyring: Any
+    keyring: Keyring
     fields: tuple[str, ...]
     scope_field: str
-
-    async def close(self) -> None:
-        pass
 
 
 @dataclass(frozen=True)
@@ -290,7 +287,6 @@ class Keyring:
         # real interface and wrapping it completely would just be a second
         # thing to keep current. It arrives as unknown custody, and
         # ``describe()`` says so rather than guessing.
-        self._raw = kms_providers
         self.custody = custody or (_Declared(kms_providers) if kms_providers
                                    else Ephemeral())
         self.kms_providers = self.custody.providers()
@@ -591,7 +587,7 @@ class Keyring:
             await self._writer.close()
             self._writer = None
 
-    async def create_queryable(self, client, collection: str, *,
+    async def create_queryable(self, collection: str, *, client=None,
                                encryption=None):
         """Create a QE collection, which cannot be created by inserting.
 
@@ -607,6 +603,11 @@ class Keyring:
             raise ValueError(
                 f"{collection} is not declared Queryable in this keyring; "
                 f"declared: {sorted(self.spec.protect)}")
+        if client is None:
+            # The ring already owns an encrypting client; asking the caller
+            # for a second one is asking them to get it wrong.
+            await self.writer(collection)
+            client = self._writer
         ce, owned = await self._encryption(encryption)
         try:
             fields = (await self.encrypted_fields_map(encryption=ce))[

@@ -651,11 +651,13 @@ class Verifier:
                    "word. Set VOYD_KMS_PROVIDER to change that.")
         await ring.key_for("s5")
         await ring.key_for("s6")
-        writer = AsyncMongoClient(self.uri,
-                                  auto_encryption_opts=await ring.client_options())
         cold = None
         try:
-            await writer[self.db.name].verify_sealed.insert_many([
+            # Through the keyring's own client, which is the path an
+            # application takes. A check that hand-built its writer would
+            # be verifying a shape nobody ships.
+            writer = await ring.writer("verify_sealed")
+            await writer.insert_many([
                 {"key_scope": "s5", "text": "verify-sealed-secret"},
                 {"key_scope": "s6", "text": "verify-sealed-kept"},
             ])
@@ -667,6 +669,25 @@ class Verifier:
             if b"verify-sealed-secret" in bytes(raw["text"]):
                 c.fail("the plaintext is recoverable from the stored bytes")
             c.note("ciphertext at rest: a client with no key sees subtype 6")
+
+            # The structural half. Automatic encryption protects writers
+            # that go through the encrypting client and does nothing about
+            # one that does not -- a migration, a shell, another service --
+            # and that write stores plaintext without raising. The
+            # collection carries a binData validator so the *server*
+            # refuses it. Attacked here because it is the difference
+            # between encryption as a convention and as a guarantee.
+            try:
+                await self.db.verify_sealed.insert_one(
+                    {"key_scope": "s5", "text": "verify-plaintext"})
+            except Exception:  # noqa: BLE001 - refusing is the pass
+                c.note("a plaintext write is refused by the server, so "
+                       "bypassing the encrypting client fails loudly")
+            else:
+                c.fail("a writer that skipped the encrypting client stored "
+                       "PLAINTEXT and nothing raised. This is the silent, "
+                       "permanent failure sealing exists to prevent -- the "
+                       "binData validator is missing from this collection")
 
             await ring.shred("s5")
             cold = AsyncMongoClient(
@@ -708,7 +729,7 @@ class Verifier:
                     c.note("and the master key rotated without rewriting a "
                            "single document")
         finally:
-            await writer.close()
+            await ring.aclose()
             if cold is not None:
                 await cold.close()
         return c

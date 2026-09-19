@@ -614,7 +614,7 @@ accept as a pass:
   after somebody removed the thing it tests.
 
 CI runs it on every commit. And `tests/test_the_falsifier_can_fail.py` breaks
-the guarantee ten different ways to prove each check bites — because a checker
+the guarantee twelve different ways to prove each check bites — because a checker
 that cannot fail is worse than no checker. It converts an unknown into a false
 assurance, and then somebody makes a promise on it.
 
@@ -938,7 +938,7 @@ hold documents of different sensitivity without becoming four boundaries. And
 a reason declares whether it can be taken back, so a hold is an investigation
 rather than a graveyard, and an erasure stays an erasure.
 
-413 tests, six skipped. A falsifier that has failed on purpose ten ways and
+466 tests, six skipped. A falsifier that has failed on purpose twelve ways and
 caught one real bug on its first run. Three bugs found in the proof, one found
 by writing an example, and three silent no-ops found by asking whether a
 refusal should be undoable. Every number in this essay is in `bench/` or

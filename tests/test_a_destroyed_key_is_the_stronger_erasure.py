@@ -45,17 +45,19 @@ OTHER = "the fault code is P0301"
 
 
 async def sealed(core, *, collection="notes"):
-    """A keyring, and a client that encrypts ``text`` on the way in."""
-    from pymongo import AsyncMongoClient
+    """A keyring, and the encrypting collection it owns.
 
+    Through ``ring.writer()`` rather than a hand-built client, so these
+    tests exercise the path an application actually takes. A test that
+    constructs its own encrypting client is verifying a shape nobody
+    ships.
+    """
     engine, db = core
     ring = Keyring(db, KeyringSpec(protect={collection: Sealed(("text",))}))
     await ring.ensure()
     await ring.key_for("scope-a")
     await ring.key_for("scope-b")
-    writer = AsyncMongoClient(TEST_MONGO_URI,
-                              auto_encryption_opts=await ring.client_options())
-    return ring, writer[db.name][collection]
+    return ring, await ring.writer(collection)
 
 
 async def test_the_plaintext_never_reaches_the_disk(core):
@@ -75,7 +77,7 @@ async def test_the_plaintext_never_reaches_the_disk(core):
         back = await writer.find_one({"key_scope": "scope-a"})
         assert back["text"] == SECRET, "and the encrypting client reads it"
     finally:
-        await writer.database.client.close()
+        await ring.aclose()
 
 
 async def test_destroying_a_key_erases_one_scope_and_only_one(core):
@@ -114,7 +116,7 @@ async def test_destroying_a_key_erases_one_scope_and_only_one(core):
         assert row is not None and row["text"].subtype == ENCRYPTED, \
             "the row is still on disk -- and now it is noise, everywhere"
     finally:
-        await writer.database.client.close()
+        await ring.aclose()
 
 
 async def test_an_unrecoverable_document_is_refused_not_an_exception(core):
@@ -148,7 +150,7 @@ async def test_an_unrecoverable_document_is_refused_not_an_exception(core):
         assert page.refused == {UNRECOVERABLE: 1}
         assert notes.receipts()["refused_by_reason"][UNRECOVERABLE] == 1
     finally:
-        await writer.database.client.close()
+        await ring.aclose()
 
 
 async def test_the_key_carries_the_same_deadline_the_documents_do(core):
@@ -252,7 +254,7 @@ async def test_rotating_the_master_key_leaves_every_document_readable(core):
         # a *different* master is an explicit argument, not a default.
         assert await ring.rotate(scope="scope-a", custody=Ephemeral()) == 1
     finally:
-        await writer.database.client.close()
+        await ring.aclose()
 
 
 async def test_a_keyring_refuses_two_answers_about_who_holds_the_key(core):
