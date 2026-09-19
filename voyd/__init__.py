@@ -55,6 +55,16 @@ answered -- a ``Clearance`` rule compares what a document is classified
 against what its reader is cleared for, per hit. There is one door: gating
 queries and leaving another way in would make search the way around the lock.
 
+Refusal answers *may this reach a prompt*, which is not the same question as
+*and your backups?* -- refusal binds this application's read path, and a
+restored snapshot does not run it. ``engine.keyring`` closes that: a key per
+scope, ciphertext at rest, and the scope's deadline destroying the key, so
+every copy becomes unreadable at once. The key vault is a collection, so the
+key expires by the same TTL index the documents do. Neither mechanism is
+sufficient alone -- the key cache is a window refusal has already closed, and
+refusal is local in a way the missing key is not. See ``examples/shred.py``,
+which measures both.
+
 Refusal is also **provable**. Every revocation is a link in an append-only
 hash chain, so "this fact stopped being reachable at 14:02" is a claim
 somebody can check rather than one they have to take -- and the receipt handed

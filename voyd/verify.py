@@ -14,7 +14,7 @@ The tests in ``tests/`` prove it on the author's machine against the author's
 schema; this proves it on yours, against your indexes, your MongoDB version,
 your tier, and whatever your deployment actually degraded to.
 
-Seven checks, each mapped to a way this has really gone wrong:
+Eight checks, each mapped to a way this has really gone wrong:
 
 ``deadline``    An expired document, with the TTL monitor deliberately parked
                 so the row is *provably* still on disk, must be unreachable
@@ -54,6 +54,13 @@ Seven checks, each mapped to a way this has really gone wrong:
                 using the guarantee's own storage, and leaves every receipt
                 in the system saying it worked.
 
+``shredding``   The question refusal cannot answer: *and the backups?* A
+                sealed field must be ciphertext at rest, destroying its key
+                must make it unreadable to a cold client, and it must take
+                exactly one scope with it. Skipped, loudly, where the
+                encryption stack is absent -- a silent skip and a pass must
+                not look the same.
+
 ``chain``       The refusal ledger, recomputed from entry zero. Needs no key.
 
 Exit status is the point, so this belongs in CI:
@@ -79,7 +86,10 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 from .engine import (REVOKED, Clearance, Deadline, DerivationBroken,
-                     Engine, Irreversible, now, quarantined, revoked)
+                     Engine, Irreversible, Keyring, KeyringSpec,
+                     now, quarantined, revoked)
+from .engine.keyring import ENCRYPTED
+from .engine.keyring import available as keyring_available
 
 DIMS = 8
 PARKED = 86_400          # seconds: the TTL monitor, effectively stopped
@@ -107,12 +117,18 @@ class Check:
 
 
 class Verifier:
-    """The seven checks, and the parked-sweeper scaffolding they need."""
+    """The eight checks, and the parked-sweeper scaffolding they need."""
 
-    def __init__(self, client, db, *, quiet: bool = False):
+    def __init__(self, client, db, *, quiet: bool = False,
+                 uri: str | None = None):
         self.client = client
         self.engine = Engine(client, db)
         self.db = self.engine.db
+        # Automatic encryption needs its own client, which cannot be
+        # retrofitted onto one that exists -- so the shredding check has to
+        # be able to dial the deployment itself. Falls back to the local
+        # default, which is what the test suite hands it.
+        self.uri = uri or "mongodb://localhost:27017/?directConnection=true"
         self.quiet = quiet
         self.checks: list[Check] = []
         self._ttl_was: int | None = None
@@ -595,6 +611,77 @@ class Verifier:
                    "defeated by a fact written after it")
         return c
 
+    async def check_shredding(self) -> Check:
+        """Refusal answers "may this reach a prompt". This answers "and the
+        backups?", which is the question refusal cannot.
+
+        Skipped rather than failed where the encryption stack is absent,
+        and the skip says what is missing -- "silently did not test the
+        encryption" and "tested the encryption" must not look the same in
+        a CI log, which is this command's entire reason for existing.
+        """
+        c = Check("shredding",
+                  "destroying a scope's key makes its ciphertext unreadable "
+                  "everywhere, not just here")
+        ok, why = keyring_available()
+        if not ok:
+            c.note(f"SKIPPED -- {why}")
+            c.note("refusal was checked above and holds; this deployment "
+                   "cannot demonstrate the erasure that survives a backup")
+            return c
+
+        from pymongo import AsyncMongoClient
+
+        ring = Keyring(self.db, KeyringSpec(sealed={"verify_sealed": ("text",)}))
+        await ring.ensure()
+        await ring.key_for("s5")
+        await ring.key_for("s6")
+        writer = AsyncMongoClient(self.uri,
+                                  auto_encryption_opts=ring.client_options())
+        cold = None
+        try:
+            await writer[self.db.name].verify_sealed.insert_many([
+                {"key_scope": "s5", "text": "verify-sealed-secret"},
+                {"key_scope": "s6", "text": "verify-sealed-kept"},
+            ])
+            raw = await self.db.verify_sealed.find_one({"key_scope": "s5"})
+            if getattr(raw.get("text"), "subtype", None) != ENCRYPTED:
+                c.fail("the field is not ciphertext at rest, so a backup, a "
+                       "replica and a DBA all still hold the plaintext")
+                return c
+            if b"verify-sealed-secret" in bytes(raw["text"]):
+                c.fail("the plaintext is recoverable from the stored bytes")
+            c.note("ciphertext at rest: a client with no key sees subtype 6")
+
+            await ring.shred("s5")
+            cold = AsyncMongoClient(
+                self.uri, auto_encryption_opts=ring.client_options())
+            try:
+                await cold[self.db.name].verify_sealed.find_one(
+                    {"key_scope": "s5"})
+                c.fail("a cold client decrypted a document whose key was "
+                       "destroyed -- the shred did not take")
+            except Exception:  # noqa: BLE001 - refusing is the pass
+                c.note("key destroyed; a cold client can no longer read it, "
+                       "and no restored backup ever will either")
+            kept = await cold[self.db.name].verify_sealed.find_one(
+                {"key_scope": "s6"})
+            if not kept or kept.get("text") != "verify-sealed-kept":
+                c.fail("shredding one scope took another with it. A key per "
+                       "collection makes one subject's erasure everybody's")
+
+            if await self.db.verify_sealed.count_documents(
+                    {"key_scope": "s5"}) != 1:
+                c.fail("the row was deleted; the claim is that it survives "
+                       "and is noise")
+            c.note("and the row is still on disk -- which is now a fact "
+                   "about ciphertext, not about plaintext")
+        finally:
+            await writer.close()
+            if cold is not None:
+                await cold.close()
+        return c
+
     # ---- driver --------------------------------------------------------
 
     async def run(self) -> bool:
@@ -621,6 +708,7 @@ class Verifier:
                          self.check_clearance(),
                          self.check_reversal(),
                          self.check_inheritance(),
+                         self.check_shredding(),
                          self.check_chain()):
                 check = await coro
                 self.checks.append(check)
@@ -640,7 +728,7 @@ async def verify(uri: str, *, quiet: bool = False, keep: bool = False) -> bool:
 
     client = AsyncMongoClient(uri)
     name = f"voyd_verify_{uuid.uuid4().hex[:8]}"
-    v = Verifier(client, client[name], quiet=quiet)
+    v = Verifier(client, client[name], quiet=quiet, uri=uri)
     v.say(f"voyd verify -- against {uri.split('@')[-1]}")
     v.say(f"  scratch database: {name} (dropped on the way out)")
     v.say()

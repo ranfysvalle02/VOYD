@@ -47,9 +47,20 @@ mcp = [
     "mcp>=2.0",           # 2.x: FastMCP was renamed MCPServer
     "httpx>=0.27",
 ]
-# Everything: the HTTP service + embeddings + the MCP server.
+# Cryptographic erasure. The deadline destroys the key, so the ciphertext is
+# unreadable in every copy -- replicas, snapshots, the backup nobody has
+# restored yet -- which is the one question refusal cannot answer.
+#
+# Note what pip cannot give you: *automatic* encryption also needs
+# `crypt_shared` (or mongocryptd), which is a MongoDB Enterprise download and
+# not on PyPI. `voyd.engine.keyring.available()` says which half is missing,
+# and every read path works without either -- refusal does not depend on this.
+crypto = [
+    "pymongo[encryption]>=4.9",
+]
+# Everything: the HTTP service + embeddings + the MCP server + crypto.
 all = [
-    "voyd[app,voyage,mcp]",
+    "voyd[app,voyage,mcp,crypto]",
 ]
 # The drift exhibit only: the four-owners stack it argues against. Not
 # needed to run VOYD, and deliberately not in `all` -- nothing VOYD ships

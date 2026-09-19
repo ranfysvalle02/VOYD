@@ -75,11 +75,12 @@ from .errors import (
 )
 from .expiry import Expiry, ExpirySpec
 from .admission import (DEADLINE, LIFTED, NOT_CLEARED, QUARANTINED, REVOKED,
-                        UNREADABLE, WRONG_MODEL,
+                        UNREADABLE, UNRECOVERABLE, WRONG_MODEL,
                         Clearance, Deadline, EmbeddedWith, Page, Restricted,
-                         Admission, AdmissionSpec, Marked, Rule,
+                         Admission, AdmissionSpec, Marked, Rule, Unrecoverable,
                          quarantined, revoked, why_refused)
 from .jobs import JobQueue, PermanentFailure, backoff
+from .keyring import Keyring, KeyringSpec
 from .ledger import GENESIS, Ledger, LedgerSpec, canonical, digest
 from .memory import Memory, MemorySpec
 from .model import Model
@@ -325,7 +326,8 @@ __all__ = [
     "Admission", "AdmissionSpec", "why_refused",
     "Rule", "Deadline", "Marked", "revoked", "quarantined",
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
-    "LIFTED",
+    "LIFTED", "UNRECOVERABLE", "Unrecoverable",
+    "Keyring", "KeyringSpec",
     "NOT_CLEARED", "EmbeddedWith", "Clearance", "Restricted", "Page",
     "Memory", "MemorySpec",
     "Model",

@@ -88,6 +88,12 @@ WRONG_MODEL = "wrong_model"
 # Counted separately for that reason: a climbing `not_cleared` is somebody
 # probing, while a climbing `deadline` is the system working.
 NOT_CLEARED = "not_cleared"
+# The key that encrypted this document was destroyed, so there is no read
+# path anywhere -- here, in a replica, or in a backup restored next year --
+# that can produce the plaintext. Reported apart from ``revoked`` because it
+# is a strictly stronger statement: revoked says this application will not
+# serve it, unrecoverable says nobody can.
+UNRECOVERABLE = "unrecoverable"
 
 # Not a reason at all -- the chain event for the inverse of one. Every
 # imposition is recorded under the reason imposed ("revoked", "quarantined"),
@@ -240,6 +246,42 @@ class Marked:
 
     def clause(self) -> dict | None:
         return {"$or": [{self.field: None}, {self.field: {"$exists": False}}]}
+
+
+def _is_ciphertext(value: Any) -> bool:
+    """A BSON Binary with subtype 6 is an encrypted value.
+
+    Checked by shape rather than by asking whether encryption is configured:
+    a document written while sealing was on and read after somebody turned
+    it off is exactly the case that must not come back as a blob of bytes
+    pretending to be a string.
+    """
+    from bson.binary import Binary
+    return isinstance(value, Binary) and value.subtype == 6
+
+
+@dataclass(frozen=True)
+class Unrecoverable:
+    """Refused because the field is still ciphertext at the point of use.
+
+    A safety net rather than the mechanism: ``unseal()`` is what decrypts
+    and what refuses a destroyed key. This rule catches the case where a
+    sealed document reaches a read path that never called it -- so the
+    failure is a refusal with a name, rather than a ``Binary`` serialised
+    into a prompt as if it were text.
+    """
+
+    field: str = "text"
+    reason: str = UNRECOVERABLE
+
+    def refuses(self, doc: dict, *, when: datetime | None = None) -> bool:
+        return _is_ciphertext(doc.get(self.field))
+
+    def clause(self) -> dict | None:
+        # Not expressible: "is this value encrypted" is a BSON subtype
+        # question, and ``$type: "binData"`` cannot distinguish subtype 6
+        # from a thumbnail. The per-document check is the guarantee anyway.
+        return None
 
 
 @dataclass(frozen=True)
@@ -1532,6 +1574,50 @@ class Admission:
         reach = {"$or": [{"_id": {"$in": ids}}, {field: {"$in": ids}}]}
         guard["$and"] = [*guard.pop("$and", []), reach]
         return guard
+
+    # ---- ciphertext on the way out -------------------------------------
+
+    async def unseal(self, documents, *, fields: Iterable[str],
+                     keyring, encryption=None) -> Page:
+        """Decrypt sealed fields, and refuse the documents whose key is gone.
+
+        The read half of ``keyring.py``, and it is explicit for a reason
+        that is stated at length there and worth one line here: automatic
+        decryption raises ``EncryptionError`` for the whole batch when a
+        single key is missing, so one crypto-erased document would turn a
+        page of fifty into a 500. "Fewer rows, or an error" is the shape
+        this codebase refuses everywhere else, and a crypto-erased document
+        is a *normal, expected* state -- it is the feature working.
+
+        So a missing key is a refusal, counted under ``unrecoverable``,
+        beside the deadline and the revocation. Three reasons a fact may
+        not reach a prompt, one question, one place that answers it.
+        """
+        ce = encryption or await keyring.encryption()
+        fields = tuple(fields)
+        kept, tally = [], {}
+        for doc in documents:
+            out = dict(doc)
+            for name in fields:
+                value = out.get(name)
+                if not _is_ciphertext(value):
+                    continue
+                try:
+                    out[name] = await ce.decrypt(value)
+                except Exception:  # noqa: BLE001 - the whole point: a key
+                    # that is gone is an answer, not an incident.
+                    out = None
+                    break
+            if out is None:
+                tally[UNRECOVERABLE] = tally.get(UNRECOVERABLE, 0) + 1
+                continue
+            kept.append(out)
+        self.receipts_log.record_many(tally)
+        if tally:
+            log.info("%s: %d document(s) are unrecoverable -- their key was "
+                     "destroyed, so no read path anywhere can produce the "
+                     "plaintext", self.collection, tally[UNRECOVERABLE])
+        return Page(kept, refused=tally, examined=len(list(documents)))
 
     # ---- the general forms ---------------------------------------------
 

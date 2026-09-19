@@ -690,6 +690,11 @@ degraded to.
   [ok  ] inheritance: forgetting a fact forgets what was written out of it
          the source, its summary and the summary's summary all went, in one query
          and a new derivation from an erased parent is refused
+  [ok  ] shredding: destroying a scope's key makes its ciphertext unreadable
+         everywhere, not just here
+         ciphertext at rest: a client with no key sees subtype 6
+         key destroyed; a cold client can no longer read it, and no restored
+         backup ever will either
   [ok  ] chain: the refusal ledger recomputes intact
 ```
 
@@ -801,6 +806,7 @@ purpose: the point being demonstrated is the database, not the model.
 | `examples/agent.py` | Memory that forgets: hybrid recall + TTL, pinning as the absence of a deadline. What an agent backend actually needs. |
 | `examples/hold.py` | The asymmetry, end to end: a detector flags a document, it is held without a deadline, reviewed and released — then a second one is held, escalated to an erasure, and refuses to be taken back. Both directions on the chain, three counters that mean different things, and a reason this package has never seen behaving identically. |
 | `examples/lineage.py` | Forgetting that survives summarisation. An agent reads a fact, writes a summary, then a briefing off the summary — one erasure request takes all three, at depth, in one query. And the write side: deriving from an already-erased source raises rather than laundering it. |
+| `examples/shred.py` | The question refusal cannot answer. A key per scope, ciphertext at rest read back by a client with no key, one scope shredded and the other untouched — then it *measures* the key-cache window in which a crypto-erased fact is still readable, and the reaper takes the row while it waits. All three layers in one run. |
 | `examples/clearance.py` | The same query, three callers, one scope. What a document is classified plus what a caller is cleared for, compared per hit — and the audit handle that can waive a revocation but not a clearance. |
 | `examples/scope.py` | The HTTP product end to end, through the same client the MCP server wraps. Needs a running server and an API key. |
 
@@ -1010,6 +1016,93 @@ are counted under their own name, can decline to be waived by the audit
 handle, and cannot open the gate by throwing. If that interface were not
 enough to write `Clearance`, those tests could not exist.
 
+## And the backups? Cryptographic erasure
+
+The question a security reviewer asks four minutes in, and the one refusal
+cannot answer. "The row is deliberately still on disk" is proof to an engineer
+and a **finding** to a reviewer, and the reviewer is right: refusal is a
+property of *this application's read path*, and a restored snapshot does not
+run this application's read path.
+
+So a key per scope, sensitive fields as ciphertext at rest, and destroying the
+key makes every copy unreadable at once — the row, the replica, the snapshot,
+the export somebody took in March — without any of them being visited.
+
+```python
+ring = Keyring(engine.db, KeyringSpec(sealed={"notes": ("text",)}))
+await ring.ensure()
+await ring.key_for("alice", expire_at=deadline)   # the key expires WITH the scope
+
+writer = AsyncMongoClient(uri, auto_encryption_opts=ring.client_options())
+await writer[db].notes.insert_one({"key_scope": "alice", "text": secret})
+
+await ring.shred("alice")    # every copy of that ciphertext is now noise
+```
+
+Four decisions carry this, and each one had an easier wrong answer:
+
+- **`keyId` is a JSON pointer (`/key_scope`), not a key id.** A literal id in
+  the schema binds one key to the whole collection, so a single erasure
+  request would crypto-shred every other tenant. Per-document key resolution
+  is what makes the blast radius one scope.
+- **The key vault is a MongoDB collection, so the key carries the same
+  `expire_at` and is collected by the same TTL index.** One owner — the
+  repo's first claim, applied to the thing that enforces the second. And a
+  key's deadline moves earlier or not at all, for the reason a document's
+  does: renewing a key extends the readability of everything it protects.
+- **Automatic on write, explicit on read.** Forgetting to encrypt is silent,
+  permanent and unrecoverable — the plaintext is in a backup no later fix
+  reaches — so the driver does it below the application, for every writer,
+  including next year's. Forgetting to *decrypt* hands you an obviously-wrong
+  `Binary`: loud, harmless, self-correcting. And automatic decryption raises
+  `EncryptionError` for the **whole batch** when one key is missing, so one
+  crypto-erased document would turn a page of fifty into a 500 — the "fewer
+  rows, or an error" shape refused everywhere else here.
+- **A destroyed key is therefore a refusal, not an exception.** `unseal()`
+  decrypts per document and refuses what it cannot, under `unrecoverable`,
+  beside `deadline` and `revoked`. A crypto-erased document is a normal,
+  expected state: it is the feature working.
+
+### It is eventually consistent too, and we measured it
+
+```bash
+uv run --extra crypto python examples/shred.py     # ~2 minutes
+```
+
+libmongocrypt caches data keys, so a client that decrypted a document before
+the shred keeps decrypting it afterwards. Measured here at **~60s in one
+shape and past 120s in another** — the turnover is not a contract and not a
+constant. Anybody who tells you crypto erasure is instant has not measured it.
+
+Which is the argument for having all three rather than picking one:
+
+| | when | where | result |
+|---|---|---|---|
+| **refusal** | immediate | this read path only | unreachable *now* |
+| **crypto erasure** | eventual (key cache) | every copy, everywhere | unreadable *soon* |
+| **the TTL reaper** | ~60s | this deployment only | gone *eventually* |
+
+The key cache is a window in which the ciphertext is still readable — and
+refusal already refused the document, on the first read after the request,
+with no window at all. Refusal in turn binds only this application — and the
+key is gone from all of them, including the backup nobody has restored yet.
+Neither is the answer. Both is. (`examples/shred.py` shows all three firing in
+one run: the reaper takes the row while step 4 is still waiting on the cache.)
+
+**Key custody, stated plainly**, because a crypto claim that is vague here is
+marketing. With the `local` provider the master key is in this process, so it
+shares a fate with the ciphertext: demonstration-grade, and `ensure()` logs a
+warning saying so. A real deployment points `kms_providers` at AWS/Azure/GCP
+KMS, where destroying the CMK is somebody else's audited operation. The code
+path is identical; only the provider dict changes.
+
+**Automatic encryption also needs `crypt_shared` or `mongocryptd`**, which is
+a MongoDB Enterprise download and not on PyPI. `voyd.engine.keyring.available()`
+reports which half is missing, the tests skip with that reason attached, and
+CI downloads the library and then *asserts it is present* — because a skipped
+correctness test looks exactly like a passing one in a green run. Every other
+guarantee in this package works without any of it.
+
 ## This is not a MongoDB argument
 
 "You should use MongoDB" and "retrieval is missing a guarantee" are different
@@ -1207,6 +1300,12 @@ that has nothing to do with either of them.
 | A derived fact cannot outlive its source | the earliest parent deadline is inherited, and a shorter one set deliberately stands |
 | Propagation does not cross the tenant | the boundary and every unbypassable rule are rebuilt on the way down the edge |
 | The thesis is not MongoDB-shaped | the whole argument re-executed on pgvector, with what is harder there stated |
+| The plaintext never reaches the disk | checked by reading with a client that holds no key, which is the only check that means anything |
+| Shredding a key erases one scope | `keyId` is a JSON pointer, so one subject's erasure is not everybody's |
+| The key expires with the documents | a TTL index on the key vault, and a key's deadline moves earlier or not at all |
+| A destroyed key is a refusal, not a 500 | one crypto-erased document must not fail a page of fifty |
+| Ciphertext cannot be served as text | `Unrecoverable` refuses a `Binary` that reached a read path unsealed |
+| A missing crypto stack is loud | the probe says which half is absent, and CI asserts it is present |
 | No module reaches past the handle | the AST of every module in the package, not a review comment |
 | A caller with no clearance claim gets nothing | absence is the lowest level, asserted for four shapes of missing |
 | An unrecognised classification is refused, not ranked low | a renamed level cannot become world-readable |

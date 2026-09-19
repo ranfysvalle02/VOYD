@@ -17,6 +17,7 @@ from dataclasses import replace
 
 import pytest
 
+from tests.conftest import TEST_MONGO_URI
 from voyd.engine import DerivationBroken
 
 from voyd import verify as V
@@ -60,12 +61,13 @@ def test_a_check_that_fails_reports_the_reason_and_the_exit_code():
 async def test_the_whole_run_passes_against_a_healthy_deployment(core):
     """The baseline. If this is red, nothing below means anything."""
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     assert await v.run() is True, [
         (c.name, c.notes) for c in v.checks if not c.ok]
     assert [c.name for c in v.checks] == ["deadline", "revocation",
                                           "starvation", "clearance",
-                                          "reversal", "inheritance", "chain"]
+                                          "reversal", "inheritance",
+                                          "shredding", "chain"]
 
 
 async def test_the_deadline_check_fails_when_the_read_path_stops_refusing(core):
@@ -77,7 +79,7 @@ async def test_the_deadline_check_fails_when_the_read_path_stops_refusing(core):
     name, so it is the honest way to simulate it.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     parked = await v.park_sweeper()
     try:
         await v.declare()
@@ -101,7 +103,7 @@ async def test_the_revocation_check_fails_when_the_row_is_deleted(core):
     check asserts the row survives, and this proves the assertion bites.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     await v.declare()
 
     original = v.docs.revoke
@@ -130,7 +132,7 @@ async def test_the_reversal_check_fails_when_an_erasure_can_be_undone(core):
     which is a record that is intact and false.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     await v.declare()
 
     async def helpful_undo(off, filters=None, **kw):     # the 3am patch
@@ -155,7 +157,7 @@ async def test_the_reversal_check_fails_when_a_hold_erases_its_evidence(core):
     the chain is correct, and the evidence is gone in a minute.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     await v.declare()
 
     original = v.held.quarantine
@@ -182,7 +184,7 @@ async def test_the_inheritance_check_fails_when_the_mark_does_not_travel(core):
     quoting it is still being served.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     await v.declare()
 
     original = v.held.impose
@@ -211,7 +213,7 @@ async def test_the_inheritance_check_fails_when_a_new_summary_can_be_written(cor
     it does not.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     await v.declare()
 
     original = v.held.derive
@@ -241,7 +243,7 @@ async def test_the_starvation_check_fails_when_the_page_is_truncated(core):
     that the refill loop looks like over-engineering.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     await v.declare()
 
     async def fixed_budget(vector, *, limit, text=None, filters=None, **kw):
@@ -267,7 +269,7 @@ async def test_the_clearance_check_fails_when_a_missing_claim_is_a_pass(core):
     an unclaimed caller gets nothing, and this proves that assertion bites.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     await v.declare()
 
     # The mistake, stated directly: a missing claim reads as the top level.
@@ -304,7 +306,7 @@ async def test_the_clearance_check_fails_when_the_audit_handle_leaks(core):
     turns "let me see the deleted rows" into a privilege escalation.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     await v.declare()
 
     from voyd.engine.admission import Admission
@@ -339,7 +341,7 @@ async def test_the_chain_check_fails_when_nothing_was_recorded(core):
     That is the one way this check could have been useless.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     await v.declare()
 
     check = await v.check_chain()      # no revocation has happened yet
@@ -356,7 +358,7 @@ async def test_the_sweeper_setting_is_restored(core):
     database, because a check exited early.
     """
     engine, db = core
-    v = V.Verifier(db.client, db, quiet=True)
+    v = V.Verifier(db.client, db, quiet=True, uri=TEST_MONGO_URI)
     if not await v.park_sweeper():
         pytest.skip("this deployment does not allow setParameter")
 

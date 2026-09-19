@@ -11,12 +11,28 @@ and the order.
 
 ## Ranked
 
-### 1. Cryptographic erasure — the one honest gap
+### 1. Cryptographic erasure — SHIPPED
 
-*(Inherited refusal was ahead of this and shipped: see
-`voyd/engine/admission.py` under "what a fact was made out of". It mattered
-more because it was not a gap in the pitch, it was a gap in the guarantee —
-an erasure request honoured against a source and defeated by the summary.)*
+*(So was inherited refusal, which was ahead of it: see
+`voyd/engine/admission.py` under "what a fact was made out of".)*
+
+`voyd/engine/keyring.py`. A key per scope via a JSON-pointer `keyId`,
+ciphertext at rest, the key carrying the scope's own `expire_at` on a TTL
+index, and `shred()` for now. `unrecoverable` is a refusal reason beside
+`deadline` and `revoked`.
+
+**What is left on this**, and it is the part that matters for adoption:
+
+- **KMS custody.** The local provider is demonstration-grade and says so.
+  Nothing has been run against AWS/Azure/GCP KMS, and the interesting work
+  is not the provider dict — it is what `voyd verify` can honestly assert
+  when the CMK is somebody else's to destroy.
+- **The key cache is not a contract.** Measured at ~60s and at >120s in two
+  shapes. Worth pinning down per driver version, or at least documenting
+  the variance in `bench/`.
+- **Rotation and `rewrap_many_data_key`.** Untouched. A key that cannot be
+  rotated is a key that eventually cannot be destroyed either, because
+  somebody will have copied the data under it.
 
 Per-scope data key, text encrypted at rest with it, the deadline destroys the
 key. The row stays on disk and the plaintext is gone the instant the key is.

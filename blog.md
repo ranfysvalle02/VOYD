@@ -571,6 +571,8 @@ actually degraded to.
   [ok  ] starvation: a page of refusals is refilled, not truncated
          filled 5 of 5 after examining 46 candidates, refusing 40
   [ok  ] clearance: a document above the caller's clearance is absent, not ranked
+  [ok  ] shredding: destroying a scope's key makes its ciphertext unreadable
+         everywhere, not just here
   [ok  ] inheritance: forgetting a fact forgets what was written out of it
          the source, its summary and the summary's summary all went, in one
          query, at any depth
@@ -581,7 +583,7 @@ actually degraded to.
   [ok  ] chain: the refusal ledger recomputes intact
 ```
 
-Six of the seven checks are worth reading closely for what they refuse to
+Six of the eight checks are worth reading closely for what they refuse to
 accept as a pass:
 
 - **revocation** asserts the row is *still there* afterwards. A version that
@@ -745,19 +747,13 @@ tiers is not one.
 
 ## What is not done
 
-Four things, in the order I would do them:
+Three things, in the order I would do them:
 
 **Rules as data.** A rule is still a Python object, so a per-tenant policy is a
 release. The protocol is ready for it — a rule already declares whether it
 needs the caller, whether it can be waived, and whether it can be taken back,
 and carries its own query fragment — but the policy itself should live on the
 scope document, versioned with it, editable by the people who get audited.
-
-**Cryptographic erasure.** This is the one honest gap in the pitch. "The row is
-still on disk" is proof to an engineer and a *finding* to a security reviewer.
-A per-scope data key, text encrypted with it, and the deadline destroying the
-key would make refusal unreachable *and* unrecoverable, with no sweeper
-involved either way.
 
 **The admission overhead as a published number.** p50/p99 per hit. The obvious
 reviewer objection is "so you pay on every read, forever," and the answer
@@ -767,6 +763,72 @@ should be a figure.
 per-replica — the honest trade for not needing Redis, and the first thing to
 fix on more than one process. CORS is wildcard-open on `/v1`, which is the whole
 public surface.
+
+## "And your backups?"
+
+That is the question four minutes into any conversation with a security
+reviewer, and refusal has nothing to say to it. Refusal is a property of
+*this application's read path*, and a restored snapshot does not run this
+application's read path. "The row is deliberately still on disk" is proof to
+an engineer and a finding to a reviewer, and the reviewer is right.
+
+So: a key per scope, the sensitive field as ciphertext at rest, and
+destroying the key makes every copy unreadable at once — the row, the
+replica, the snapshot, the export somebody took in March — without any of
+them being visited. That is the one operation in this package where deleting
+is the right verb, and it is worth being precise about why, since the rest of
+the argument says the opposite. Deleting a *document* is a storage event:
+eventual, local, unprovable. Deleting a *key* is a storage event whose effect
+is total.
+
+The enabling detail is smaller than it sounds. Under MongoDB's automatic
+encryption the schema's `keyId` can be a **JSON pointer** — `/key_scope` —
+rather than a literal key id, so the driver resolves a different key per
+document. A literal id binds one key to the whole collection, and then one
+subject's erasure request crypto-shreds every other tenant. That is not a
+tradeoff, it is a different product.
+
+Two more decisions that had easier wrong answers. The key vault is an
+ordinary MongoDB collection, so the key carries the same `expire_at` its
+documents carry and dies by the same TTL index — one owner, which is this
+essay's first claim applied to the mechanism that enforces its second. And
+encryption is automatic on *write* but explicit on *read*, because the two
+mistakes are not the same size: forgetting to encrypt is silent, permanent
+and already in a backup, while forgetting to decrypt hands you an obviously
+wrong `Binary`. Automatic decryption also raises for the entire batch when
+one key is missing — so a single crypto-erased document would turn a page of
+fifty into a 500, which is the "fewer rows, or an error" shape this whole
+system refuses. A destroyed key is a refusal with a name, `unrecoverable`,
+sitting beside the deadline and the revocation.
+
+### And it is eventually consistent too
+
+This is the part everybody overstates, including me until I measured it.
+libmongocrypt caches data keys. A client that decrypted a document before the
+shred keeps decrypting it afterwards — **~60s in one shape, past 120s in
+another**. The turnover is not a contract and it is not a constant.
+
+Which turns out to be the best argument for the whole design, because the
+three mechanisms cover each other's gaps exactly:
+
+| | when | where | result |
+|---|---|---|---|
+| refusal | immediate | this read path only | unreachable *now* |
+| crypto erasure | eventual | every copy, everywhere | unreadable *soon* |
+| the TTL reaper | ~60s | this deployment only | gone *eventually* |
+
+The key cache is a window in which the ciphertext is still readable — and
+refusal already refused the document, on the first read after the request,
+with no window at all. Refusal binds only this application — and the key is
+gone from all of them. `examples/shred.py` runs all three in one go, and the
+reaper takes the row while the program is still waiting on the key cache,
+which was not staged.
+
+On custody, plainly, because a crypto claim that is vague here is marketing:
+with a local master key it lives in the process and shares a fate with the
+ciphertext. Demonstration-grade, and the code logs a warning saying so. Point
+`kms_providers` at a real KMS and destroying the CMK becomes somebody else's
+audited operation; the code path does not change.
 
 ## Is this just a MongoDB argument?
 

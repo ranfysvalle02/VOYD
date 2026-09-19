@@ -41,8 +41,35 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: crypt_shared, for the automatic-encryption path
+        # pip cannot supply this: automatic encryption needs MongoDB's
+        # query-analysis library, which is an Enterprise download. Without it
+        # `tests/test_a_destroyed_key_is_the_stronger_erasure.py` skips and
+        # `voyd verify`'s shredding check reports SKIPPED -- both loudly, but
+        # a skip that is always a skip is a test nobody has ever run.
+        #
+        # Version-pinned rather than `latest`: this is a download, and a
+        # silently-moving binary under a correctness test is how a CI run
+        # starts meaning something different without anybody deciding.
+        run: |
+          curl -fsSL -o /tmp/crypt.tgz \
+            "https://downloads.mongodb.com/linux/mongo_crypt_shared_v1-linux-x86_64-enterprise-ubuntu2204-8.0.13.tgz"
+          mkdir -p /opt/mongo_crypt && tar -xzf /tmp/crypt.tgz -C /opt/mongo_crypt
+          echo "CRYPT_SHARED_LIB_PATH=$(find /opt/mongo_crypt -name 'mongo_crypt_v1.so' | head -1)" >> "$GITHUB_ENV"
+
       - name: Sync (Engine + all extras + dev)
         run: uv sync --all-extras
+
+      - name: The encryption stack is actually present
+        # Asserted rather than assumed, because the failure mode of the step
+        # above is a skip, and a skipped correctness test looks exactly like
+        # a passing one in a green run.
+        run: |
+          uv run --no-sync python -c "
+          from voyd.engine.keyring import available
+          ok, why = available()
+          assert ok, f'automatic encryption unavailable in CI: {why}'
+          print('crypto:', why)"
 
       - name: Lint
         # [tool.ruff] was configured for a long time and ruff was not a
