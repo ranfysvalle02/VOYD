@@ -71,12 +71,15 @@ class MongoStore:
     def __init__(self, config: MongoConfig):
         self.config = config
         self.client: AsyncMongoClient | None = None
-        self.db = None
         self.engine: Engine | None = None
+        # The UTC-aware handle off the engine. Not `AsyncDatabase`: the engine
+        # rebinds it with its own codecs, and typing it as the raw driver's
+        # class would quietly re-admit the tz-naive one this exists to avoid.
+        self.db: Any = None
         # Built in _declare(), once the engine exists.
-        self.admission_documents = None
-        self.admission_voids = None
-        self.refusals = None
+        self.admission_documents: Any = None
+        self.admission_voids: Any = None
+        self.refusals: Any = None
 
     async def connect(self) -> None:
         self.client = AsyncMongoClient(self.config.uri, tz_aware=True)
@@ -112,6 +115,29 @@ class MongoStore:
     @property
     def search_tier(self) -> str:
         return self.engine.search_tier if self.engine else "cosine"
+
+    # ---- the four handles that only exist after connect() --------------
+    #
+    # `MongoStore` is two-phase: `__init__` cannot open a socket, so the
+    # engine and everything hanging off it are None until `connect()` runs.
+    # Every method below the schema section assumes that already happened,
+    # which was true and unstated -- so a type checker read thirty-one of
+    # them as attribute access on None, and a caller who skipped `connect()`
+    # got `AttributeError: 'NoneType' object has no attribute 'documents'`
+    # from somewhere deep in a query.
+    #
+    # This is the assumption, written once. It is not a null check scattered
+    # through the file: it is the same check the file was already making by
+    # hand in `_detect_capabilities` and `ensure_schema`, given a name and a
+    # sentence, so the failure says what went wrong instead of where.
+
+    @property
+    def _engine(self) -> Engine:
+        if self.engine is None:
+            raise RuntimeError(
+                "this MongoStore has no engine: connect() has not run, so "
+                "there is nothing to declare traits on or query through")
+        return self.engine
 
     # ---- schema --------------------------------------------------------
 
@@ -173,9 +199,9 @@ class MongoStore:
         doc_rules = [Deadline(), revoked()]
         if model:
             doc_rules.append(EmbeddedWith(model))
-        self.admission_documents = self.engine.admission(
+        self.admission_documents = self._engine.admission(
             "documents", tenant="voyd_id", rules=tuple(doc_rules))
-        self.admission_voids = self.engine.admission("voids", tenant="voyd_id")
+        self.admission_voids = self._engine.admission("voids", tenant="voyd_id")
 
         # Every revocation is witnessed on a per-namespace hash chain, so
         # "this fact stopped being reachable at 14:02" is a claim somebody can
@@ -183,11 +209,11 @@ class MongoStore:
         # a void's own expiry is a deadline passing, not an instruction
         # anybody gave, and a ledger of clock ticks is noise that makes the
         # entries that matter harder to find.
-        self.refusals = self.engine.ledger("refusals", tenant="voyd_id",
+        self.refusals = self._engine.ledger("refusals", tenant="voyd_id",
                                            key=self.config.ledger_key)
         self.admission_documents.witnessed_by(self.refusals)
 
-        self.engine.searchable(SearchSpec(
+        self._engine.searchable(SearchSpec(
             collection="documents",
             vector_path="embedding",
             dimensions=dims,
@@ -210,11 +236,11 @@ class MongoStore:
         # absent at the root, which is backwards: the root is where all of
         # the data is.
         for coll in ("voyds", "voids", "documents"):
-            self.engine.expiring(ExpirySpec(collection=coll, at_field="expire_at"))
+            self._engine.expiring(ExpirySpec(collection=coll, at_field="expire_at"))
 
         # A key per namespace, so forgetting one is a key deletion rather
         # than a cascade. See ``forget_voyd``.
-        self.keys = self.engine.keyring(
+        self.keys = self._engine.keyring(
             KeyringSpec(collection="__keys", pointer_field="voyd_id"),
             custody=custody_from_env("VOYD_KMS"))
 
@@ -222,7 +248,7 @@ class MongoStore:
                                      wait_s: float = 90.0) -> None:
         """Declare what should be searchable; the engine owns the lifecycle."""
         self._declare(dims, model)
-        await self.engine.ensure(search_wait_s=wait_s)
+        await self._engine.ensure(search_wait_s=wait_s)
 
     # ---- owners --------------------------------------------------------
 
@@ -332,7 +358,7 @@ class MongoStore:
         # added next year is included by having been declared, not by
         # somebody remembering this method.
         scoped = {}
-        for spec in self.engine.expiry.specs:
+        for spec in self._engine.expiry.specs:
             key = "_id" if spec.collection == "voyds" else "voyd_id"
             result = await self.db[spec.collection].update_many(
                 {key: vid}, {"$set": {spec.at_field: stamp}})

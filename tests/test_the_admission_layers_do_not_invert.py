@@ -15,6 +15,7 @@ docstring and hoped for:
     spec        where a collection keeps its deadline and its mark.
     receipts    what a read cost, and what a handle has refused.
     core        the state, and the two enforcement points.
+    composition the contracts the mixins are type-checked against.
     <mixins>    reads, marks, lineage, sealing, attestation.
     handle      the one object a caller holds.
 
@@ -31,6 +32,21 @@ Two rules, and the second is the interesting one:
    the split is that the guarantee lives in the core and every capability
    goes through it; two mixins wired directly together is that argument
    quietly stopping being true.
+
+   What this rule cannot see, and it took a type checker to notice: sibling
+   coupling in a mixin does not need an import. ``ReadPath`` reads
+   ``self.seals`` and awaits ``self._unsealed``; ``MarkWrites`` awaits
+   ``self._descendants``. Those resolve through ``Admission``'s MRO onto
+   ``Sealing`` and ``Lineage`` at runtime, and no ``import`` statement ever
+   records it -- so rule 2 has been passing over two real sibling edges since
+   the split. They are legitimate (a read must know what is ciphertext; a
+   cascading mark must reach downstream), but they were invisible.
+
+   ``composition.py`` is where they stop being invisible. Each mixin names
+   the contracts it composes against, so a *third* sibling edge means editing
+   that file -- which is the same "say it out loud" mechanism rule 2 was
+   reaching for, applied to the coupling that rule 2 structurally cannot see.
+   It is layer 3: it depends on the vocabulary below it and on nothing above.
 
 The test reads the import statements rather than the runtime module graph
 deliberately: a ``TYPE_CHECKING`` import is still a coupling a reader has to
@@ -55,6 +71,10 @@ LAYERS = {
     "spec": 2,
     "receipts": 2,
     "core": 3,
+    # Same layer as core and imports none of it: the protocols restate the
+    # core's surface structurally rather than inheriting it, which is what
+    # keeps `Admission`'s MRO -- and so the runtime -- exactly as it was.
+    "composition": 3,
     "reads": 4,
     "marks": 4,
     "lineage": 4,

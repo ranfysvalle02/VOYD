@@ -27,6 +27,8 @@ Read them in this order -- each depends on the one above it:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .attestation import Attestation
 from .core import AdmissionCore
 from .lineage import Lineage
@@ -46,3 +48,25 @@ class Admission(AdmissionCore, ReadPath, MarkWrites, Lineage, Sealing,
     The body is in the six modules above. This class exists to say that they
     are one thing, because to a caller they are.
     """
+
+
+if TYPE_CHECKING:
+    from .composition import CoreState, LineageState, SealingState
+
+    # The contracts in composition.py are what the mixins were type-checked
+    # against. These three lines are what stops them from being fiction: if
+    # ``AdmissionCore`` loses an attribute a mixin was promised, or changes a
+    # signature under it, the assignment below stops type-checking here --
+    # at the composition point, naming both halves -- rather than somewhere
+    # downstream at runtime.
+    #
+    # A protocol nothing is checked against is a comment with syntax
+    # highlighting, which is the failure this file exists to avoid.
+    def _core_keeps_its_end(core: AdmissionCore) -> CoreState:
+        return core
+
+    def _sealing_keeps_its_end(sealing: Sealing) -> SealingState:
+        return sealing
+
+    def _lineage_keeps_its_end(lineage: Lineage) -> LineageState:
+        return lineage

@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
 
-from .rules import CumulativeRule, Deadline, Rule, revoked
+from .rules import Deadline, Rule, revoked
 
 log = logging.getLogger("engine.admission")
 
@@ -99,8 +99,9 @@ class AdmissionSpec:
     policy_revision: str | None = None
 
     def with_defaults(self) -> AdmissionSpec:
-        spec = self if self.rules else replace(
-            self, rules=(Deadline(self.at_field), revoked(self.mark_field)))
+        default_rules: tuple[Rule, ...] = (
+            Deadline(self.at_field), revoked(self.mark_field))
+        spec = self if self.rules else replace(self, rules=default_rules)
         cumulative = [r for r in spec.rules
                       if getattr(r, "needs_tab", False)]
         if len(cumulative) > 1:
@@ -129,8 +130,12 @@ class AdmissionSpec:
                 f"path. Only one level of embedded subjects is supported -- "
                 f"nest deeper and neither the redaction nor its accounting "
                 f"can be stated in one number")
-        cumulative_rule: CumulativeRule | None = (
-            cumulative[0] if cumulative else None)
+        # `Rule`, not `CumulativeRule`: `needs_tab` is what selected it above,
+        # and the very next line is the check for whether it is actually one.
+        # Typing it as the narrower thing before that check would be asserting
+        # the conclusion -- and it is a duck-typed protocol, so nothing would
+        # have caught it being wrong.
+        cumulative_rule: Rule | None = cumulative[0] if cumulative else None
         if (cumulative_rule is not None
                 and not callable(getattr(cumulative_rule, "new_tab", None))):
             raise TypeError(

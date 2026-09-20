@@ -86,6 +86,12 @@ dev = [
     # managed service -- KMIP is the open standard the category runs on,
     # and unlike any hosted KMS it can be started in a subprocess.
     "pykmip>=0.10",
+    # The package ships `py.typed`, which tells every downstream type checker
+    # that these annotations are load-bearing. That promise was made in the
+    # wheel and checked nowhere -- the same failure the ruff comment above
+    # describes, one level worse: an undeclared linter is advisory, but an
+    # unchecked `py.typed` is a claim other people's builds act on.
+    "mypy>=1.11",
 ]
 
 [project.urls]
@@ -127,6 +133,47 @@ select = ["E4", "E7", "E9", "F"]
 # the test instead of failing collection. That ordering is the point, and it is
 # E402 by construction.
 "tests/*" = ["E402"]
+
+[tool.mypy]
+files = ["voyd"]
+# No `python_version` pin, deliberately. Pinning it to the 3.11 floor makes
+# mypy read every installed stub under 3.11 syntax, and a dependency resolved
+# for the 3.12 interpreter in this venv (numpy, via `voyageai`) then fails to
+# *parse* -- which is fatal, so the run dies before checking a line of `voyd`.
+# Letting mypy follow the interpreter means CI, which installs 3.11, checks
+# the floor against a 3.11 dependency set, and a 3.12 laptop checks 3.12.
+# Both are real configurations; the pinned pair was not.
+# Deliberately not `strict`. Strict on a codebase this size produces a number
+# nobody acts on, and a check nobody acts on is the thing this repository
+# complains about everywhere else. These are the rules that catch the errors
+# `py.typed` makes downstream users trust us about: a signature that lies, a
+# None that is not declared, an annotation that silently means `Any`.
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
+check_untyped_defs = true
+
+# Third parties without stubs. Listed one by one rather than with a blanket
+# `ignore_missing_imports = true`, so adding a dependency that *does* ship
+# types cannot quietly land untyped.
+[[tool.mypy.overrides]]
+# `kmip`/`pykmip` are not here: they are a *test* dependency (a real KMIP
+# server in a subprocess), `voyd` never imports them, and `warn_unused_configs`
+# above reports an override that matches nothing rather than letting the list
+# accumulate entries nobody can justify.
+module = ["voyageai.*", "mcp.*", "argon2.*", "pymongocrypt.*"]
+ignore_missing_imports = true
+
+# `voyd` imports no numpy; it arrives because `voyageai` ships `py.typed`, so
+# mypy walks into it and on into numpy's stubs -- which use 3.12 `type`
+# statements and are a syntax error under the 3.11 floor pinned above, killing
+# the run before any of our own code is checked. Stopping at the extra's edge
+# keeps the floor honest, which is the point of pinning it.
+[[tool.mypy.overrides]]
+module = ["voyageai.*", "numpy.*"]
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

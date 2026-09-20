@@ -94,8 +94,8 @@ class Ops:
     async def _embed_document(self, doc: dict) -> None:
         """Embed one document. The text is on the row; there is nowhere else
         it could be."""
-        text = doc.get("text")
-        if not (text or "").strip():
+        text = doc.get("text") or ""
+        if not text.strip():
             # Nothing to embed is a property of the document: permanent.
             await self.store.set_embedding(doc["_id"], None)
             return

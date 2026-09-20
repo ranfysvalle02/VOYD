@@ -29,6 +29,7 @@ how you index a location in the ocean. Time is how you leak a memory.
 from __future__ import annotations
 
 import logging
+from typing import overload
 from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger("engine.time")
@@ -41,6 +42,18 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+# The overloads are the "``None`` stays ``None``" sentence below, in a form a
+# type checker can use. Without them every caller that has already proved it
+# holds a datetime -- and they all do, via ``isinstance`` -- gets a
+# ``datetime | None`` back and cannot compare it to anything, which is where
+# eight of this package's type errors came from. Not one of them was a real
+# bug; they were all this function under-describing itself.
+@overload
+def aware(dt: datetime) -> datetime: ...
+@overload
+def aware(dt: None) -> None: ...
+
+
 def aware(dt: datetime | None) -> datetime | None:
     """Coerce to UTC-aware. Naive is UTC, because that is what BSON stored.
 
@@ -51,6 +64,12 @@ def aware(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
+
+
+@overload
+def deadline(ttl: timedelta) -> datetime: ...
+@overload
+def deadline(ttl: None) -> None: ...
 
 
 def deadline(ttl: timedelta | None) -> datetime | None:

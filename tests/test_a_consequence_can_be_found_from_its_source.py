@@ -34,8 +34,8 @@ from datetime import timedelta
 
 import pytest
 
-from voyd.engine import (DIRECT, SOURCE, ContextIncomplete, ContextIndex,
-                         ContextIndexSpec, ContextUse, ScopeRequired)
+from voyd.engine import (DIRECT, SOURCE, ContextIncomplete, ContextIndexSpec,
+                         ContextUse, ScopeRequired)
 from voyd.engine.context import ContextRef
 from voyd.engine.time import now
 

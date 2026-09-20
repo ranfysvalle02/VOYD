@@ -213,7 +213,7 @@ class Model:
         if isinstance(make, type) or (
             callable(make) and not hasattr(make, "ensure")
         ):
-            trait = make(self.engine.db, self.collection, **kw)  # type: ignore[operator]
+            trait = make(self.engine.db, self.collection, **kw)
         else:
-            trait = make  # type: ignore[assignment]
+            trait = make
         return self.engine.use(trait)

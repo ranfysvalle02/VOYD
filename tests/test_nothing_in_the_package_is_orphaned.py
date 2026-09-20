@@ -41,6 +41,20 @@ FRAMEWORK_INVOKED = {
     "_query_is_required", "_accept_the_single_document_shorthand",
 }
 
+# Called by mypy, not by Python. The three functions in handle.py exist so
+# that the protocols in composition.py are checked against the classes they
+# claim to describe -- assigning an `AdmissionCore` to a `CoreState` is the
+# assertion, and a return statement is how you write it. Running them would
+# prove nothing; type-checking them is the entire point, and CI does.
+#
+# This is a third bucket rather than an entry in FRAMEWORK_INVOKED because
+# "a framework calls it" and "nothing calls it and that is correct" are
+# different claims, and collapsing them would make the allowlist above less
+# true -- which is the one thing this file's docstring asks of it.
+TYPE_CHECKED = {
+    "_core_keeps_its_end", "_sealing_keeps_its_end", "_lineage_keeps_its_end",
+}
+
 # Public API with no in-package caller, and a stated reason it stays.
 PUBLIC_API = {
     # The reader's half of Ledger.sign(). It cannot be called here: verifying
@@ -98,7 +112,8 @@ def test_every_symbol_has_at_least_one_caller():
     orphans = {
         name: defs[name] for name, n in counts.items()
         # One reference is the definition line itself.
-        if n <= 1 and name not in FRAMEWORK_INVOKED and name not in PUBLIC_API
+        if n <= 1 and name not in FRAMEWORK_INVOKED
+        and name not in PUBLIC_API and name not in TYPE_CHECKED
     }
     assert not orphans, (
         "these are defined in voyd/ and referenced nowhere: "

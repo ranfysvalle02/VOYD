@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from ..errors import require_tenant
 from .reasons import REACHABLE, REFUSED, UNKNOWN
@@ -26,7 +26,22 @@ from ..time import aware, now
 log = logging.getLogger("engine.admission")
 
 
-class ReadPath:
+# What this mixin assumes ``Admission`` already provides. Declared so a
+# type checker reads the composition contract that handle.py states in
+# prose; see composition.py. A read also has to know what is sealed, hence ``SealingState``.
+#
+# Runtime base is ``object``: the protocols are never imported when the
+# module actually runs, so ``Admission``'s MRO is unchanged.
+if TYPE_CHECKING:
+    from .composition import CoreState, SealingState
+
+    class _Composed(CoreState, SealingState):
+        pass
+else:
+    _Composed = object
+
+
+class ReadPath(_Composed):
     """Every way out of this handle, and all of them end at ``_admit``.
 
     There is deliberately no unfiltered read here. ``including_refused()``

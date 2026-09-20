@@ -22,10 +22,10 @@ skip cleanly when no MongoDB is reachable. Point them elsewhere with
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
-
-import asyncio
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -126,6 +126,68 @@ async def _sweep():
     finally:
         await client.close()
 
+
+
+@asynccontextmanager
+async def ttl_reaper_paused(uri: str = TEST_MONGO_URI):
+    """Hold MongoDB's TTL monitor still, so "expired" and "deleted" can differ.
+
+    Several tests here assert the pair that is the product's entire thesis: a
+    document is **past its deadline** and **still physically on disk**, and the
+    read path refuses it anyway. Both halves have to be true at the same
+    instant or the test proves nothing -- if the row is gone, the refusal might
+    just be an empty collection, which is the ordinary behaviour of every
+    database and not a claim worth shipping.
+
+    The reaper is what breaks the pair. It sweeps every 60s by default, and a
+    test that waits on anything slow (mongot building an index, say) can cross
+    a sweep boundary and lose the row mid-test. That is not a flaky assertion;
+    it is the fixture and the server racing over the same document, and the
+    loser is decided by how warm the machine is.
+
+    Pausing it is not cheating in the direction of the product. It removes
+    MongoDB's cleanup from the experiment entirely, which makes the refusal
+    unambiguously the *query's* doing -- the stronger version of the claim, and
+    the one the module docstring in ``test_an_expired_void_is_gone.py`` says it
+    is making. Nothing here touches ``ttlMonitorSleepSecs``: speeding the
+    reaper up would be the opposite mistake, a test passing because deletion
+    happened to be quick.
+    """
+    from pymongo import AsyncMongoClient
+
+    client = AsyncMongoClient(uri)
+    try:
+        try:
+            await client.admin.command(
+                {"setParameter": 1, "ttlMonitorEnabled": False})
+        except Exception as exc:
+            pytest.skip(f"cannot pause the TTL monitor on this deployment "
+                        f"({type(exc).__name__}: {exc}); a test that needs an "
+                        f"expired row to stay on disk would be racing it")
+
+        # A pause that silently did not take would turn every test below into
+        # the race this fixture exists to remove, and they would still look
+        # green most of the time -- which is worse than the race, because
+        # nobody would go looking.
+        read_back = await client.admin.command(
+            {"getParameter": 1, "ttlMonitorEnabled": 1})
+        assert read_back["ttlMonitorEnabled"] is False, (
+            "setParameter reported success but the TTL monitor is still "
+            "enabled; the rows these tests need on disk are not safe")
+        try:
+            yield
+        finally:
+            await client.admin.command(
+                {"setParameter": 1, "ttlMonitorEnabled": True})
+    finally:
+        await client.close()
+
+
+@pytest.fixture
+async def reaper_paused():
+    """``ttl_reaper_paused`` as a fixture, for modules that want it autouse."""
+    async with ttl_reaper_paused():
+        yield
 
 @pytest.fixture
 async def core():

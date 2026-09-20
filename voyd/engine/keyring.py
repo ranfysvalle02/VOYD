@@ -106,6 +106,11 @@ one.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pymongo import AsyncMongoClient
+
 import logging
 import os
 from dataclasses import dataclass, field
@@ -296,7 +301,8 @@ class Keyring:
         # -- which is a failure that would look like "the keys are missing"
         # rather than like a misconfiguration.
         self._uri = uri or _uri_of(db.client)
-        self._writer = None
+        # Built lazily in `_encrypting`; see there for why not in __init__.
+        self._writer: AsyncMongoClient | None = None
 
     @property
     def namespace(self) -> str:

@@ -488,7 +488,11 @@ class SearchEngine:
                 log.error(
                     "Atlas search failed (%s); degrading to in-process cosine. "
                     "This scales linearly with collection size -- investigate "
-                    "rather than ignore.", exc.details.get("codeName", exc))
+                    # `or {}`: OperationFailure.details is Optional, and an
+                    # AttributeError raised *here* would replace a degraded
+                    # search with a crash in the code that reports it.
+                    "rather than ignore.",
+                    (exc.details or {}).get("codeName", exc))
 
         return await self._cosine(spec, vector, flt, limit)
 

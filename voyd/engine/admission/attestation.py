@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from ..context import DIRECT, SOURCE, ContextRef, ContextUse
 from ..errors import ContextIncomplete, ScopeInvalid, ScopeRequired
@@ -33,7 +33,22 @@ def _digest_of(body: dict) -> str:
     return hashlib.sha256(canonical(body).encode("utf-8")).hexdigest()
 
 
-class Attestation:
+# What this mixin assumes ``Admission`` already provides. Declared so a
+# type checker reads the composition contract that handle.py states in
+# prose; see composition.py. Only the core.
+#
+# Runtime base is ``object``: the protocols are never imported when the
+# module actually runs, so ``Admission``'s MRO is unchanged.
+if TYPE_CHECKING:
+    from .composition import CoreState
+
+    class _Composed(CoreState):
+        pass
+else:
+    _Composed = object
+
+
+class Attestation(_Composed):
     """What the model was allowed to see, and what this handle has refused.
 
     Both methods are careful about what they do *not* prove, and those
@@ -196,6 +211,12 @@ class Attestation:
             missing.append("a named consequence")
         if missing:
             raise ContextIncomplete(self.collection, tuple(missing))
+        # Restating what the raise above already guarantees, because the
+        # guarantee is spread across four `missing.append` calls and nothing
+        # reading this function -- person or type checker -- can see it in
+        # one place. If a future edit drops one of those appends, this is
+        # what fails, at the point the value is actually required.
+        assert kind and subject and revision
 
         at_tenant = tenant
         if self.context.tenant and at_tenant is None:

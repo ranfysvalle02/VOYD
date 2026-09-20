@@ -60,8 +60,16 @@ collections, fields and filters, never about namespaces or voids.
 
 from __future__ import annotations
 
+from typing import Any
+
 from .authority import AuthorityRequired, Anyone, Grants, NotAuthorised
-from .assumptions import WORLD, Assumption, report_assumptions
+# Only ``report_assumptions`` -- it is called in ``describe()`` below. ``WORLD``
+# and ``Assumption`` are deliberately not re-exported here: they are the
+# vocabulary of the assumptions registry, and per
+# ``tests/test_the_public_surface_is_deliberate.py`` a name that is not a
+# promise should be imported from the module that owns it
+# (``.assumptions``), which is what every caller already does.
+from .assumptions import report_assumptions
 from .capabilities import Capabilities, detect
 from .errors import (
     BlastRadius,
@@ -123,7 +131,13 @@ class Engine:
         self.search_engine = SearchEngine(db=self.db, capabilities=self.capabilities)
         self.expiry = Expiry(self.db)
         # kind -> collection -> trait. Builtins and third-party share this.
-        self._installed: dict[str, dict[str, object]] = {}
+        # Heterogeneous by construction: one sub-dict per trait kind, and an
+        # Admission, a Ledger and a Keyring have almost nothing in common.
+        # `object` was the strict-looking choice and the useless one -- it
+        # made every read out of this registry an error at the point of use,
+        # while proving nothing at the point of write. The type is re-
+        # established by the accessor that knows which kind it asked for.
+        self._installed: dict[str, dict[str, Any]] = {}
         self._memory: dict[str, Memory] = {}
         self._models: dict[str, Model] = {}
 

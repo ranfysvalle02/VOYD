@@ -14,7 +14,7 @@ a crypto-erased document is a *normal* state, not an incident.
 from __future__ import annotations
 
 import logging
-from typing import Self, Iterable
+from typing import Any, Iterable, Self, TYPE_CHECKING
 
 from ..authority import SHRED
 from ..errors import ScopeRequired, UnknownReason
@@ -25,7 +25,22 @@ from .rules import _is_ciphertext
 log = logging.getLogger("engine.admission")
 
 
-class Sealing:
+# What this mixin assumes ``Admission`` already provides. Declared so a
+# type checker reads the composition contract that handle.py states in
+# prose; see composition.py. Only the core.
+#
+# Runtime base is ``object``: the protocols are never imported when the
+# module actually runs, so ``Admission``'s MRO is unchanged.
+if TYPE_CHECKING:
+    from .composition import CoreState
+
+    class _Composed(CoreState):
+        pass
+else:
+    _Composed = object
+
+
+class Sealing(_Composed):
     """Encrypt on write, decrypt on read, and destroy the key on request.
 
     The erasure refusal cannot perform: refusal binds this application's
@@ -174,7 +189,9 @@ class Sealing:
         # cost figure.
         documents = list(documents)
         scope_field = getattr(self.sealing, "scope_field", None)
-        kept, tally, verdicts = [], {}, {}
+        kept: list[dict] = []
+        tally: dict[str, int] = {}
+        verdicts: dict[Any, str] = {}
         for doc in documents:
             out = dict(doc)
             for name in fields:
@@ -190,9 +207,15 @@ class Sealing:
                         keyring, doc.get(scope_field) if scope_field else None,
                         verdicts)
                     tally[reason] = tally.get(reason, 0) + 1
-                    out = None
+                    # Refused: this document does not survive the loop. A
+                    # sentinel rather than a flag because the `for fields`
+                    # loop has to stop as well -- one undecryptable field is
+                    # the whole document's answer.
+                    refused = True
                     break
-            if out is not None:
+            else:
+                refused = False
+            if not refused:
                 kept.append(out)
         if count:
             # A caller that folds this into a page commits the tally once,

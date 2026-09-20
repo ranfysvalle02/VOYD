@@ -112,7 +112,17 @@ class Rule(Protocol):
     third-party rules.
     """
 
-    reason: str
+    # Read-only, and it has to be written this way. As a bare ``reason: str``
+    # a Protocol member is *settable*, and every rule in this file is a frozen
+    # dataclass -- so the protocol rejected all of them, and any third-party
+    # rule that did the sensible immutable thing. Nothing failed at runtime,
+    # because structural typing is only ever checked by a type checker and
+    # nobody was running one; the contract had simply been wrong since it was
+    # written. A rule's reason is its identity, so read-only is also what it
+    # should have said.
+    @property
+    def reason(self) -> str: ...
+
     def refuses(self, doc: dict, *, when: datetime | None = None) -> bool: ...
 
     def clause(self) -> dict | None: ...

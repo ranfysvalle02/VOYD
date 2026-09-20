@@ -11,6 +11,22 @@ They open a void with a *negative* TTL, which is expired the moment it exists,
 then assert the row is still physically present and the API refuses it anyway.
 That separation is the whole point: if a test passed only because the reaper
 happened to run, it would prove nothing about the query.
+
+They also **stop** the reaper, which they did not used to, and the reason is
+worth keeping. The claim being made is a pair -- *past its deadline* and
+*still on disk* -- and both halves have to hold at the same instant. Not
+waiting for the reaper is not the same as the reaper not running: the monitor
+sweeps on its own 60s clock, and ``indexed_namespace`` below waits up to 60s
+for mongot to build an index. On a cold index those two windows overlap, the
+sweep takes the expired row out from under the fixture, and the final
+assertion -- that it really was still there to be found -- fails. Nothing
+about VOYD was wrong on those runs; the test was racing the server for the
+document it was about to make a claim about, and the winner was decided by how
+warm the machine happened to be.
+
+So ``reaper_paused`` below removes MongoDB's cleanup from the experiment. That
+makes the claim stronger rather than weaker: with nothing deleting anything,
+a document that does not come back came back from nowhere except the filter.
 """
 
 from __future__ import annotations
@@ -41,6 +57,22 @@ async def owner_on(app, slug: str, email: str) -> dict:
     owner_id = await app.store.create_owner(email, hash_api_key(key))
     await app.store.create_voyd(slug, owner_id, {}, name=slug)
     return {"X-Voyd": slug, "Authorization": f"Bearer {key}"}
+
+
+@pytest.fixture(autouse=True)
+async def _the_row_must_stay_on_disk(reaper_paused):
+    """Every test in this module needs an expired row to stay on disk.
+
+    Autouse rather than named per test, because the requirement is a property
+    of the whole file: each test here opens something already past its
+    deadline and then asserts the row survived long enough to be refused. One
+    that forgot to ask for this would not fail -- it would pass until the
+    machine got slow, which is the failure mode this module is about.
+
+    The body is ``reaper_paused`` in conftest.py; this exists only to make it
+    unconditional here.
+    """
+    yield
 
 
 @pytest.fixture

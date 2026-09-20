@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pymongo import ReturnDocument
 
@@ -54,7 +54,10 @@ class JobQueue:
     the job until someone notices.
     """
 
-    db: object
+    # `Any`, as in every other trait (see search.py): this is the engine's
+    # UTC-bound database handle, and `object` made all five uses of it
+    # below unindexable without describing anything true about it.
+    db: Any
     collection: str
     when: dict
     status_field: str = "indexed"

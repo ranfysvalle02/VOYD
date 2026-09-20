@@ -30,6 +30,11 @@ cage wearing a convenience label.
 
 from __future__ import annotations
 
+# `...` is the "caller said nothing" sentinel for `ttl`, which is
+# distinct from `ttl=None` meaning "keep this forever". Naming its
+# type is what lets a checker tell those two apart.
+from types import EllipsisType
+
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
@@ -101,7 +106,7 @@ class Memory:
                                             tenant=spec.scope_field)
 
     async def remember(self, scope: Any, text: str, vector: list[float], *,
-                       kind: str = "note", ttl: timedelta | None = ...,
+                       kind: str = "note", ttl: timedelta | None | EllipsisType = ...,
                        pinned: bool = False, meta: dict | None = None) -> dict:
         """Store one memory.
 

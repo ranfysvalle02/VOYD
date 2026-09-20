@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from ..authority import QUARANTINE, RELEASE, REVOKE
 from ..errors import (BlastRadius, Irreversible, UnboundedForgetting,
@@ -26,7 +26,22 @@ from .reasons import LIFTED, LIFT_BATCH, QUARANTINED, REVOKED
 log = logging.getLogger("engine.admission")
 
 
-class MarkWrites:
+# What this mixin assumes ``Admission`` already provides. Declared so a
+# type checker reads the composition contract that handle.py states in
+# prose; see composition.py. A cascading mark has to reach downstream, hence ``LineageState``.
+#
+# Runtime base is ``object``: the protocols are never imported when the
+# module actually runs, so ``Admission``'s MRO is unchanged.
+if TYPE_CHECKING:
+    from .composition import CoreState, LineageState
+
+    class _Composed(CoreState, LineageState):
+        pass
+else:
+    _Composed = object
+
+
+class MarkWrites(_Composed):
     """Imposing a reason, and lifting one where the reason has an inverse.
 
     ``impose`` and ``lift`` are the engine; ``revoke``, ``witness``,

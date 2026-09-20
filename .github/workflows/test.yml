@@ -90,6 +90,26 @@ jobs:
         # last.
         run: uv run --no-sync ruff check voyd/ tests/ examples/ bench/ drift/
 
+      - name: Types, because the wheel ships py.typed
+        # `voyd/py.typed` tells every downstream type checker that these
+        # annotations are load-bearing -- a promise made in the artifact and,
+        # until this step, verified nowhere. mypy was not even a declared
+        # dependency, so the honest state was that nobody had run it.
+        #
+        # The first run that did found 268 errors. Two causes accounted for
+        # 220 of them and neither was a bug: the six admission mixins are
+        # composed onto one class, so each one read in isolation appeared to
+        # use attributes it does not define (now stated in
+        # `admission/composition.py`), and `MongoStore` is two-phase, so
+        # everything hanging off `connect()` was typed `None` (now behind
+        # `_engine`). The rest were real if small, including a protocol no
+        # rule in the package satisfied and an `AttributeError` waiting in a
+        # search-degradation log line.
+        #
+        # It is clean now, and this step is what stops it drifting back --
+        # the same argument the ruff step above makes about itself.
+        run: uv run --no-sync mypy
+
       - name: Engine installs on its own
         # Move #1 of this repo is "Engine is what you install." Prove the import
         # graph in the built package: Engine, no FastAPI. This does not need Mongo.

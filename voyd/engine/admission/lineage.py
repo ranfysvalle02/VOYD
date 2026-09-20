@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING
 
 from ..authority import DERIVE
 from ..errors import DerivationBroken, ScopeRequired, UnknownReason
@@ -24,7 +24,22 @@ from .spec import why_refused
 log = logging.getLogger("engine.admission")
 
 
-class Lineage:
+# What this mixin assumes ``Admission`` already provides. Declared so a
+# type checker reads the composition contract that handle.py states in
+# prose; see composition.py. Only the core.
+#
+# Runtime base is ``object``: the protocols are never imported when the
+# module actually runs, so ``Admission``'s MRO is unchanged.
+if TYPE_CHECKING:
+    from .composition import CoreState
+
+    class _Composed(CoreState):
+        pass
+else:
+    _Composed = object
+
+
+class Lineage(_Composed):
     """Derivation, so that a refusal reaches what was made out of the fact.
 
     Opt-in per collection: a store of source facts has no lineage and
