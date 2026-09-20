@@ -273,11 +273,11 @@ not ship.
 the ceiling as the default outcome if it goes first. 2 is the
 structural fix and needs 1's object to be worth pointing at.
 
-The current README is 3's first sentence, then 1's handle. That pairing
-is the copy change this file asked for. Do not "fix" the rest by writing
-1 as a memory product. That is a different crowded room. The remaining
-work for 1 is evidence: a retained integration, which
-[`PILOT.md`](PILOT.md) is for.
+The current README opens on direction 1 — "ranking is not permission" and
+the handle — with direction 3's auditor sentence following, not leading. That
+copy change is made. Do not "fix" the rest by writing 1 as a memory product.
+That is a different crowded room. The remaining work for 1 is evidence: a
+retained integration, which [`PILOT.md`](PILOT.md) is for.
 
 ---
 
@@ -299,9 +299,11 @@ quarter.** `EmbeddedWith` — a model swap inverts ranking (identical text
 cosine −0.053, unrelated +0.301) and width checks catch nothing.
 `Clearance` / `for_caller` — authZ for embeddings, a category security
 engineering is already buying, with the egress re-check that a metadata
-filter is not. A context-token budget as a refusal reason — proof the
-protocol is a primitive. Erasure is the rule they adopt second, without
-noticing. That is how PCI arrived.
+filter is not. A context-token budget as a refusal reason — shipped as
+`Budget`, and the proof the protocol is a primitive rather than a compliance
+feature: a reason with nothing to do with erasure, in the same shape as one
+that is. Erasure is the rule they adopt second, without noticing. That is how
+PCI arrived.
 
 **IR and the detector companies need a sink.** Faster deletion destroys
 the investigation. Refusal keeps the row as the proof and as the
@@ -318,9 +320,10 @@ synthetic one: four clocks, score 1.0000, the deleted document answers,
 ten minutes, no production credentials. The AST walker in
 `test_no_module_reaches_past_the_handle.py`, turned outward, is Snyk:
 "you have fourteen unfiltered reads against collections with
-`expire_at`." Read the repo, not prod. The live Pinecone+Postgres
-scanner in `ideas.md` is the same family with a worse permission
-story. Code scan first.
+`expire_at`." That one is now built — `tools/leak_scan.py`, one stdlib
+file, reads the repo not prod, and reports the reader's own floor. The
+live Pinecone+Postgres scanner in `ideas.md` is the same family with a
+worse permission story, and stays deferred. Code scan first.
 
 **Postgres as the ten-line on-ramp.** `drift/refusal_on_postgres.py`
 already has the structural version: revoke the table, grant only a
@@ -339,7 +342,7 @@ the missing `find`, then the exhibit. MCP stays a surface, not the
 identity. Smallest adoption is one collection in under ten lines —
 shipped as `examples/quickstart.py` and pinned by a test — though it
 still constructs `Engine`. The admission overhead is measured and
-published (`bench/admission.py`, ~0.5 µs p50 per candidate). What is
+published (`bench/admission.py`, ~1 µs p50 per candidate). What is
 left is a retained pilot, not another sentence.
 
 If **2**: finish the authorisation story on the HTTP surface (the

@@ -1,6 +1,6 @@
 # Admission overhead (measured)
 
-- generated: 2026-09-19 23:21:22 -0400
+- generated: 2026-09-20 08:20:39 -0400
 - machine: Darwin arm64, Python 3.12.11, pymongo 4.18.1
 - laptop numbers: relative and order-of-magnitude, not a capacity plan.
 
@@ -10,12 +10,12 @@ Refusal rate 50%, 2000 repeats. Microseconds per candidate.
 
 | rule set | page | p50 us | p95 us | p99 us |
 |---|---|---|---|---|
-| deadline+revoked | 1 | 0.46 | 0.50 | 0.54 |
-| deadline+revoked | 10 | 0.49 | 0.53 | 0.66 |
-| deadline+revoked | 100 | 0.48 | 0.57 | 0.70 |
-| deadline+revoked+quarantined | 1 | 0.54 | 0.71 | 0.79 |
-| deadline+revoked+quarantined | 10 | 0.54 | 0.57 | 0.75 |
-| deadline+revoked+quarantined | 100 | 0.52 | 0.62 | 0.77 |
+| deadline+revoked | 1 | 1.17 | 1.25 | 1.33 |
+| deadline+revoked | 10 | 0.93 | 1.10 | 1.66 |
+| deadline+revoked | 100 | 0.91 | 1.05 | 1.37 |
+| deadline+revoked+quarantined | 1 | 1.46 | 1.58 | 1.92 |
+| deadline+revoked+quarantined | 10 | 1.10 | 1.40 | 1.90 |
+| deadline+revoked+quarantined | 100 | 1.07 | 1.23 | 1.54 |
 
 ## 2. Over-fetch factor (saturate, no database)
 
@@ -36,7 +36,4 @@ limit=10, corpus=500, trials=400, rounds cap=4. `worst` ranks every refused row 
 
 ## 3. End-to-end on Atlas autoEmbed
 
-model voyage-4, corpus 120, limit 10, requested refusal ~40%.
-
-- examined/admitted: **2.00** (admitted 10, starved False)
-- wall-clock p50/p99 **including cloud round-trips**: 176 / 211 ms -- this is network to a cloud cluster, not the admission cost; see scenario 1 for that.
+Not run (pass `--atlas` with `VOYD_ATLAS_URI` set).

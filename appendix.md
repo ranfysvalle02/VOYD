@@ -92,7 +92,7 @@ The thing to lead with here is not the philosophy. It is:
 
 ```python
 await docs.find({})                       # cannot return a forgotten fact
-await docs.including_refused().find({})   # the unsafe thing, named out loud
+await docs.including_refused().find({})   # break-glass: gated, and counted
 ```
 
 Two lines. They make the argument without making it. The correct demo order
@@ -136,11 +136,11 @@ that. Compliance buys the sentence; engineering gets handed the library.
 
 Strategy (a) is better and slower. Strategy (b) is faster and produces
 resentful adopters. The repo is built for (a) — the traits, the ergonomics,
-the one-connection-string argument. The README's first sentence is still
-(b)'s verb; the first code is now (a)'s handle. That pairing is the copy
-change this file asked for. The highest-value change left is not another
-pass at the first screen — it is a retained integration, which
-[`PILOT.md`](PILOT.md) is for.
+the one-connection-string argument. The README now opens on (a)'s frame —
+"ranking is not permission" and the two-line handle — with (b)'s auditor
+sentence following rather than leading. That copy change is made. The
+highest-value change left is not another pass at the first screen — it is a
+retained integration, which [`PILOT.md`](PILOT.md) is for.
 
 ### 1.5 What makes this sell *unusually* hard, specifically
 
@@ -249,27 +249,32 @@ repo's own instinct — `ledger.py` spending forty lines on what the chain does
 not prove, including that the database operator could rewrite it from entry
 zero — is exactly right and should be the house style everywhere.
 
-### 2.4 The ceiling nobody mentions: `including_refused()` is a real hole
+### 2.4 The one hole in the escape hatch — since closed
 
-It has to exist — audit and administration need unfiltered reads. It is named
-well. But it is still a method that turns the guarantee off, and in a codebase
-under deadline pressure someone will use it to fix a bug at 2am.
+`including_refused()` has to exist — audit and administration need unfiltered
+reads — and it is named well. But naming a hole is not closing it: it still
+turns the guarantee off, and for a long time it did so ungated and uncounted,
+so the 2am bug-fix use needed no permission and left no trace.
 
-Worth considering, in rough order of cost:
+All three mitigations once listed here as future work have shipped:
 
-- make it require an `Authority` grant, not merely a handle — the machinery
-  already exists in `authority.py`, and this is exactly the granting/withholding
-  asymmetry that file is built around
-- have it emit a ledger entry, or at minimum a counter in `receipts()`, so the
-  2am use is *visible* afterward even if it is not prevented
-- a lint/CI rule that fails the build on new call sites outside a designated
-  audit module
+- **Gated.** Disclosing a forgotten fact is the *granting* direction, so it
+  asks an `Authority` for an `AUDIT` grant — the same asymmetry `release` sits
+  behind, `AUDIT` alongside `RELEASE` in `authority.py`. With no authority
+  attached (the library default, where the caller is the application) it stays
+  a no-op; a withholding-only pipeline is refused.
+- **Counted and re-authorised.** Every terminal read asks again for `AUDIT`,
+  increments `including_refused_total`, and records the actor/time in
+  `receipts()`. A cached handle cannot turn one old grant into unlimited
+  invisible reads; constructing one and never using it records nothing.
+- **Fenced.** `tests/test_break_glass_is_named.py` walks the AST and fails the
+  build if any module outside `admission/core.py` reaches for the public name.
+  The engine's own writes use a private `_unfiltered()` hatch, because a
+  `revoke` is a `REVOKE`, not an `AUDIT`, and routing it through the gate would
+  break `Grants.withholding_only()`.
 
-The third is cheapest and probably most effective. Note that the repo already
-has the instinct — `test_the_public_surface_is_deliberate.py` and
-`test_no_module_reaches_past_the_handle.py` are precisely this kind of
-structural test. Extending that pattern to police `including_refused()` call
-sites is a small, natural addition.
+What is *not* fixed, and is not this package's to fix: a call site in
+application code. The CI fence covers `voyd/`; a deployment polices its own.
 
 ---
 
@@ -383,7 +388,7 @@ weaker version of the argument, which is just gesturing at GDPR.
 Not criticisms — questions the repo has earned the right to be asked.
 
 1. **What is the p50/p99 cost of the egress re-check** — answered.
-   `bench/admission.py` measures it: ~0.5 µs p50 and under 0.8 µs p99 per
+   `bench/admission.py` measures it: ~1 µs p50 and under 2 µs p99 per
    candidate, flat from a 1-hit page to a 100-hit page, and over-fetch that
    stays near 2× up to a 50% refusal rate. Reproducible, written to
    `bench/results/admission.md`. The 60.0s TTL measurement was doing enormous
@@ -403,8 +408,10 @@ Not criticisms — questions the repo has earned the right to be asked.
    reader will assume in-memory state and assume wrong. This is a strength
    currently going unclaimed.
 
-4. **Is `including_refused()` counted?** §2.4. If it is not in `receipts()`, it
-   probably should be.
+4. **Is `including_refused()` counted and gated?** Both, now — see §2.4: it
+   asks `AUDIT` again on every terminal read, increments
+   `including_refused_total`, and records actor/time in `receipts()`. The
+   entry stays as the question to ask of any system making the same claim.
 
 5. **Which of the three erasures do people actually turn on?** If crypto
    erasure requires `crypt_shared` (Enterprise, off-PyPI), what fraction of

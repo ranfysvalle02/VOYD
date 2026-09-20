@@ -1,9 +1,23 @@
 # The drift exhibit, and the portability argument
 
-Two files here, answering the two objections a reader is entitled to raise.
+Three files here, answering the objections a reader is entitled to raise.
 
 `exhibit.py` runs the **four owners** claim against real services. Read on for
 that one.
+
+`refusal_on_qdrant.py` answers a sharper portability question than Postgres
+does: on a vector database with **no rows**, is refusal *enforceable* or only
+*conventional*? Run against the stock Qdrant image, it finds the answer is
+conventional — the payload filter works in the read path (Act II is clean),
+but there is no row, no view and no GRANT to make the *unfiltered* read fail,
+so nothing forces the next caller to supply it. That is a finding worth
+publishing on its own: a whole class of vector databases can express this
+guarantee only politely.
+
+```bash
+docker compose -f drift/docker-compose.drift.yml up -d --wait drift-qdrant
+uv run --extra drift python drift/refusal_on_qdrant.py   # 0 = every claim held
+```
 
 `refusal_on_postgres.py` answers the other: *is this just MongoDB advocacy?*
 It ports the thesis in full to pgvector, with no MongoDB anywhere in the file

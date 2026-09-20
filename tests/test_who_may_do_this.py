@@ -22,7 +22,7 @@ import pytest
 from voyd.engine import (Anyone, AuthorityRequired, Deadline, Grants,
                          NotAuthorised, quarantined, revoked)
 # Vocabulary for the Authority extension point: present, not promised.
-from voyd.engine.authority import (GRANTS_REACHABILITY, RELEASE, REVOKE,
+from voyd.engine.authority import (AUDIT, GRANTS_REACHABILITY, RELEASE, REVOKE,
                                    WITHHOLDS, Recorded)
 
 
@@ -65,8 +65,113 @@ async def test_a_pipeline_may_withhold_and_may_not_grant(core):
 def test_granting_and_withholding_are_named_sets():
     """Named rather than left for each deployment to rediscover."""
     assert RELEASE in GRANTS_REACHABILITY
+    assert AUDIT in GRANTS_REACHABILITY   # disclosing a forgotten fact grants it
     assert REVOKE in WITHHOLDS
     assert not (GRANTS_REACHABILITY & WITHHOLDS)
+
+
+# ---- break-glass is a verb, not a default with a longer name -----------
+
+async def test_break_glass_works_without_an_authority_and_is_counted(core):
+    """The library default -- no authority -- leaves ``including_refused()``
+    working, because the caller of a library *is* the application. But it is
+    *counted*, so the 2am use to fix a bug is visible afterward even though it
+    was not prevented. Counted once per terminal read, not per row seen.
+    """
+    engine, db = core
+    docs = engine.model("notes", tenant="t").admitting(Deadline(), revoked())
+    await engine.ensure(search_wait_s=0)
+    await db.notes.insert_one({"t": "a", "doc_id": "d1"})
+    await docs.revoke({"t": "a", "doc_id": "d1"}, reason="erasure")
+
+    assert docs.authority is None
+    assert len(await docs.find({"t": "a"})) == 0                 # refused now
+    assert docs.receipts()["including_refused_total"] == 0
+
+    audit = docs.including_refused()
+    assert docs.receipts()["including_refused_total"] == 0, (
+        "constructing an unused break-glass handle is not an audit event")
+    seen = await audit.find({"t": "a"})
+    assert len(seen) == 1, "break-glass returns the forgotten row"
+    assert docs.receipts()["including_refused_total"] == 1
+    await audit.find({"t": "a"})
+    assert docs.receipts()["including_refused_total"] == 2, (
+        "a cached handle is counted once per use, not once forever")
+
+
+async def test_break_glass_is_the_granting_direction_a_pipeline_cannot_take(core):
+    """Disclosing a forgotten fact is granting, not withholding. A
+    withholding-only pipeline may quarantine all night and may not pry the
+    guarantee open to read what it hid."""
+    docs, _ = await guarded(core, Grants.withholding_only())
+    bot = docs.for_caller({"sub": "indexer"})
+
+    audit = bot.including_refused()
+    with pytest.raises(NotAuthorised) as caught:
+        await audit.find({"t": "a"})
+    assert AUDIT in str(caught.value)
+    assert "granting direction" in str(caught.value), \
+        "the error should say why disclosure is the dangerous direction"
+
+    # A caller granted the verb explicitly gets the handle.
+    auditor = docs.for_caller({"sub": "alice", "may": ["audit"]})
+    audit = auditor.including_refused()
+    assert audit is not auditor                                # a new handle
+    assert len(await audit.find({"t": "a"})) == 1
+    receipts = docs.receipts()
+    assert receipts["last_including_refused_actor"] == "alice"
+    assert receipts["last_including_refused_at"] is not None
+
+
+async def test_a_withholding_pipeline_can_still_revoke(core):
+    """The engine's own write paths use the *ungated* hatch: revoke has to
+    see the row it marks, and it must not need an AUDIT grant to do so -- or
+    ``Grants.withholding_only()`` could quarantine but not erase, which is
+    backwards."""
+    docs, _ = await guarded(core, Grants.withholding_only())
+    bot = docs.for_caller({"sub": "indexer"})
+    assert await bot.revoke({"t": "a", "doc_id": "d1"}, reason="erasure") == 1
+
+
+async def test_break_glass_asks_who_when_an_authority_is_attached_but_unbound(core):
+    """Same fail-closed shape as the write verbs: an authority is installed
+    and nobody said who is asking, so it raises rather than picking an
+    answer."""
+    docs, _ = await guarded(core, Grants())
+    audit = docs.including_refused()
+    with pytest.raises(AuthorityRequired, match="who is asking"):
+        await audit.find({"t": "a"})
+
+
+async def test_a_cached_break_glass_handle_is_reauthorised_on_every_read(core):
+    """Revoking permission must revoke a cached handle too. Authorizing only
+    at construction turns one old clone into a permanent bypass."""
+    class Dynamic:
+        allowed = True
+
+        def permits(self, operation, caller, *, collection):
+            return self.allowed and operation == AUDIT
+
+        def actor(self, caller):
+            return (caller or {}).get("sub")
+
+    authority = Dynamic()
+    docs, _ = await guarded(core, authority)
+    audit = docs.for_caller({"sub": "alice"}).including_refused()
+    assert len(await audit.find({"t": "a"})) == 1
+
+    authority.allowed = False
+    with pytest.raises(NotAuthorised):
+        await audit.find({"t": "a"})
+
+
+async def test_break_glass_cannot_export_a_reusable_match_clause(core):
+    """A query fragment can be executed later and repeatedly, outside the
+    handle, so authorizing when it is created would not gate the reads."""
+    docs, _ = await guarded(core, Anyone())
+    audit = docs.for_caller({"sub": "ops"}).including_refused()
+    with pytest.raises(RuntimeError, match="cannot be gated per pipeline"):
+        audit.match({"t": "a"})
 
 
 @pytest.mark.parametrize("verb, kwargs", [

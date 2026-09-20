@@ -12,14 +12,42 @@ handle, not a collection. Everything below follows from that.
 
 ---
 
+## Run it yourself first
+
+Before piloting on your own data, run the pilot on synthetic data. It needs
+only a local MongoDB — no cloud, no API key, no vector index:
+
+```bash
+docker compose up -d mongo
+uv run python bench/pilot.py
+```
+
+It stands up a support-notes scope, leaks a credential into it, has an agent
+summarise that credential back into the collection, then honours an erasure
+request — and shows, with assertions rather than prose, that the revoked fact
+still reaches a prompt through the raw read a teammate writes *and* through the
+unfiltered candidate batch handed directly to `reachable()`, while the handle
+refuses it on both paths and the summary written out of it goes too. No vector
+index runs in this scenario: the direct call isolates the same egress boundary
+the `$vectorSearch` path uses, rather than pretending to have measured ranking.
+It writes
+[`bench/results/pilot.md`](bench/results/pilot.md): every line of the report
+template below, filled from that run — except the only one that decides
+adoption, **kept after two weeks**, which a self-run structurally cannot answer
+and leaves blank on purpose. That blank line is why the trial below is still
+the point: a proof of the mechanism is not evidence of demand.
+
+---
+
 ## Before you start
 
 - A MongoDB you can point a throwaway database at (Atlas or Atlas Local).
 - One collection whose reads feed a model — a RAG corpus, a retrieval scope,
   a memory store. Pick the one where serving a deleted or revoked fact would
   be an incident, not a shrug.
-- `pip install voyd` (the base package is `Engine` plus a MongoDB driver;
-  nothing else is pulled in).
+- The repo cloned and `uv sync` run — the base is `Engine` plus a MongoDB
+  driver, nothing else pulled in. (`voyd` is not on an index yet; see the
+  README's Install note.)
 - Read [`examples/quickstart.py`](examples/quickstart.py) once. It is the
   whole integration, runnable.
 
@@ -108,7 +136,7 @@ the AST rather than the text. It is the outward version of the in-package gate
 Measured, reproducible, and yours to re-run in your environment with
 `uv run python bench/admission.py` (writes
 [`bench/results/admission.md`](bench/results/admission.md)): the per-candidate
-egress check is about 0.5 microseconds p50 on a laptop, and over-fetch under a
+egress check is about 1 microsecond p50 on a laptop, and over-fetch under a
 realistic refusal rate stays near 2x up to 50% refused. If "you pay on every
 read, forever" is the objection, this is the number.
 

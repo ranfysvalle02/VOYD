@@ -1,5 +1,13 @@
 # Copy: the words that already fit
 
+> **Internal, not landing-page copy.** This is a mnemonic for the team -- the
+> family-court register that makes the API legible in a meeting. It is *not*
+> the public sell and does not belong on a landing page: the mechanism needs no
+> metaphor, and an engineer who meets "right of first refusal" before they meet
+> `docs.find({})` leaves. The public first sentence is "ranking is not
+> permission" ([README.md](README.md)). This file is frozen as an internal aid
+> until a pilot keeps the handle ([PILOT.md](PILOT.md)).
+
 The engine is deliberately free of application vocabulary. This file is
 not. It is the sell, and the sell is allowed to be memorable.
 
@@ -155,11 +163,13 @@ property of the handle, not a memory of the caller.
 
 ## What this does to the first sentence
 
-Current README:
+Former opener (before the reframe; superseded):
 
 > Every database can delete. None of them can refuse.
 
-Keep it. It is the verb. Pair it, do not replace it:
+The public opener is now **Ranking is not permission.** Keep the old verb for
+a room that already cares about erasure; pair it with the new frame rather
+than putting it back on page one:
 
 > Delete is last refusal, on a sweeper's clock.
 > Admission is first refusal, on the next read.

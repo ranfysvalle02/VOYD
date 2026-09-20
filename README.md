@@ -1,40 +1,66 @@
 # VOYD
 
-**Every database can delete. None of them can refuse.**
+**Ranking is not permission.**
 
-Deletion is a *storage* event, and storage events are eventually consistent.
-A TTL monitor sweeps about once a minute (measured here: 60.0s). An S3
-lifecycle rule runs about once a day. So between the moment you delete
-something and the moment it is gone, your vector index keeps returning it —
-as a normal, well-scored result, with nothing logged and nothing to page on.
+Your retrieval answers with a confident score and no idea whether that hit was
+allowed to be there — an expired row the sweeper has not reached, a fact
+somebody revoked, a vector from the embedding model you swapped last quarter, a
+document a detector just flagged. An index decides what is *relevant*. Nothing
+in the ordinary read path was asked the other question:
 
-Retrieval doesn't need a faster sweeper. It needs a different guarantee:
-
-> **this fact may not reach a prompt** — answered on every read, immediately,
+> **may this fact reach a prompt?** — answered on every read, immediately,
 > whatever the sweeper is doing.
 
-That's *refusal*. Most stacks offer a filter you must remember; this makes the
-filter structural. **Delete is a wish. Refuse is a contract.**
+That question is the product. VOYD answers it at the one place every retrieval
+path passes through on the way out: a read handle with no unfiltered read on it.
 
 ```python
 docs = engine.model("notes").forgettable()
 
 await docs.find({})                        # cannot return a forgotten fact
 await docs.search(vector, text="P0301")    # nor can the search path
-await docs.including_refused().find({})    # the unsafe thing, named out loud
+await docs.including_refused().find({})    # break-glass: gated, and counted
 
 await docs.revoke({"_id": x}, reason="credential leaked")
 # unreachable on the next read. The row is still on disk. That is the proof.
 ```
 
+There is **no unfiltered `find` and no unfiltered `search`** on that handle, so
+refusal doesn't depend on the next author remembering it. The failure mode is
+inverted: you used to have to remember to be safe; now you have to declare that
+you want the unsafe thing, in a word a reviewer can grep for — and that word is
+not a free pass. `including_refused()` asks an `AUDIT` grant where an authority
+is installed on every read, then increments `including_refused_total` and
+records the actor/time in `receipts()`, so a cached break-glass handle is a
+door with an alarm rather than a permanent pass.
+
 Multi-tenant is one argument away — `model("notes", tenant="tenant_id")` — and
 then the tenant field is required in every read, so `find({"tenant_id": t})`
 rather than `find({})`. The [quickstart](examples/quickstart.py) runs both.
 
-There is **no unfiltered read on that handle** — no `find`, no `search` — so
-refusal doesn't depend on the next author remembering it. The failure mode is
-inverted: you used to have to remember to be safe; now you have to declare
-that you want the unsafe thing, in a word a reviewer can grep for.
+## Refusal is the product; the stack is around it
+
+The sharpest instance is deletion. Deletion is a *storage* event, and storage
+events are eventually consistent: a TTL monitor sweeps about once a minute
+(measured here: 60.0s), an S3 lifecycle rule runs about once a day. In that
+window your vector index keeps returning a deleted document as a normal,
+well-scored result, with nothing logged and nothing to page on. **Delete is a
+wish. Refuse is a contract** — but the contract is the point, not the sweeper.
+The idea would still be true with an instant sweeper, because the index and the
+row are different systems with different clocks.
+
+So the erasure machinery is exactly that — machinery *around* refusal. A TTL
+deadline collects the row; crypto-shredding makes the copies in backups and
+replicas unreadable; refusal covers the window in between, on this read path,
+now. Each is honest about what it does and does not reach — see
+[three erasures](#three-erasures-each-honest-about-what-it-costs) below.
+
+None of this is one vendor's idea. `drift/refusal_on_postgres.py` ports the
+whole thesis to pgvector with no MongoDB in the file — a per-read predicate is
+the relational cousin of row-level security, and the honest concession that
+Postgres has no TTL is stated there rather than hidden. MongoDB is a good home
+for the *assembly* — the row, the index, the embedding model and the key vault
+under one deadline — not the identity of the idea.
 
 ---
 
@@ -82,6 +108,42 @@ Postgres holds the row, Qdrant holds the vector, MinIO holds the bytes, and a
 cron is supposed to keep them agreeing. Four clocks, three ways to drift. The
 deleted document answers the query.
 
+Then the pilot, run on synthetic data against a real MongoDB, filling its own
+report — a revoked credential still reaches a prompt through the raw read and
+an unfiltered candidate producer, the handle refuses it on both, and so does
+the summary an agent wrote from it. It does not run a vector index; it calls
+`reachable()` directly to isolate the same per-hit egress boundary
+`$vectorSearch` uses:
+
+```bash
+uv run python bench/pilot.py            # writes bench/results/pilot.md
+```
+
+Every line of the [`PILOT.md`](PILOT.md) report is filled from that run except
+the one only a real team can answer: kept after two weeks. A proof of the
+mechanism is not evidence of demand, and the report says so.
+
+And before installing anything, run it against **your own** repository — one
+stdlib file, no database, no credentials:
+
+```bash
+python tools/leak_scan.py path/to/your/repo
+```
+
+It reports your own floor: reads that hit a collection your code marks with a
+deadline or soft-delete field, without filtering on it. Every one is a read
+that can serve a document your own schema says is gone. The header is honest
+about what a source scan cannot see.
+
+And to see why this is more than a soft-delete flag, run
+[`examples/rosetta.py`](examples/rosetta.py): soft-delete, TTL, a feature flag,
+row-level security and a token budget written as five rules on **one** handle,
+enforced together on both halves — `deleted=true` is the smallest of them.
+
+```bash
+uv run python examples/rosetta.py
+```
+
 ---
 
 ## What it actually guarantees
@@ -96,16 +158,50 @@ name:
 | `quarantined()` | held back from models, deliberately still on disk | yes | yes |
 | `EmbeddedWith(m)` | a different model produced this vector | yes | — |
 | `Clearance(order=…)` | this caller is not cleared for this document | **no** | — |
+| `Restricted()` | the document names who may see it, and it is not this caller | **no** | — |
 | `compile_policy(…)` | a `deny` clause stored on the scope, compiled | **no** | — |
+| `Budget(limit=…)` | the read's token budget is spent, or a hit's cost is unreadable | yes | — |
 
 Two enforcement points, always both: the query clause and the per-document
 check. That is also why `compile_policy(…)` refuses at boot anything it cannot
 compile to *both* halves — falling back to the clause alone would be the silent
 hole described above.
 
+`Budget(…)` is the first rule with **no query half at all**, and that is sound
+rather than a hole: a running per-read total is not something a per-document
+query can express, so it lives entirely on the egress check. Per-document-only
+is the *safe* asymmetry — slower, never a leak. It is a rule expressible only
+as a clause that would be the hole, which is the one `compile_policy(…)`
+refuses to compile. A budget is also the first *cumulative* rule: it is asked
+after every other has admitted a hit, so it never spends the budget on a
+document a deadline was going to refuse anyway.
+
+The count is caller-owned, not guessed: by default each document supplies a
+non-negative integer `tokens` field, or `cost=` supplies a callable. Missing,
+fractional, negative and boolean costs fail closed as `uncosted`; VOYD does not
+pretend `len(text) // 4` is Voyage's tokenizer. One cumulative rule is allowed
+per collection — declaring two raises at construction rather than letting one
+rule's running total silently govern the other. Budgeted `find()` requires an
+explicit `sort`; strict-prefix admission over MongoDB's natural order would
+change policy after compaction or failover. `Page.spent` is the amount
+reserved by the selected prefix; over-fetched candidates below a full page do
+not consume prompt budget. `find_one()` still returns prompt content and gets a
+fresh one-item tab; `count()`, `exists()` and `reachability_at()` return
+cardinality or reconstruction rather than content, so they deliberately do not
+apply a cumulative budget. `Budget` and `.sealed(...)` currently fail at
+construction when combined: decryption can refuse a selected hit, and charging
+before that would call ciphertext "spent prompt tokens." The composition waits
+until the read path decrypts before cumulative admission rather than shipping a
+precise-looking lie.
+
+The audit handle in that third column is not a free waiver. `including_refused()`
+asks an `AUDIT` grant on every read where an authority is installed and is
+counted in `receipts()` as `including_refused_total`, with actor/time, so
+"waivable" means waivable through a door with an alarm — not by default.
+
 **What the per-read check costs, measured.** The reviewer's first objection is
 *"so you pay on every read, forever."* On a laptop the per-candidate egress
-check is about **0.5 µs p50, under 0.8 µs p99**, flat from a 1-hit page to a
+check is about **1 µs p50, under 2 µs p99**, flat from a 1-hit page to a
 100-hit page. Because forgotten hits are fetched then dropped, a page can
 over-fetch; under a realistic (interleaved) refusal rate that stays near **2×
 up to 50% refused**, and the handle refills rather than returning a short page.
@@ -191,12 +287,25 @@ that code path, and what is unproven about them is vendor-specific.
 
 ## Install
 
+**Not on an index yet.** `pip install voyd` is the intended install, and the
+wheel already builds and installs clean on its own — CI builds it and imports
+`Engine` from it in a fresh venv on every commit — but `0.1.0` has not been
+pushed to PyPI. Until it is, install from a clone with `uv`:
+
 ```bash
-pip install voyd              # Engine + a MongoDB driver. That is the install.
-pip install 'voyd[app]'       # the HTTP service
-pip install 'voyd[crypto]'    # cryptographic erasure
-pip install 'voyd[mcp]'       # the same guarantee, as tools a model can call
+git clone https://github.com/ranfysvalle02/VOYD && cd VOYD
+uv sync                       # Engine + a MongoDB driver. That is the base.
+
+# Later surfaces, not the on-ramp. The handle is the product; these are ways to
+# reach it. Add one only when a pilot has kept the handle (see PILOT.md).
+uv sync --extra app           # the HTTP service
+uv sync --extra crypto        # cryptographic erasure
+uv sync --extra mcp           # the same guarantee, as tools a model can call
 ```
+
+Or build and install the wheel the way a stranger eventually will —
+`uv build`, then `pip install dist/voyd-0.1.0-py3-none-any.whl` — which is
+exactly what CI does before asserting the engine-only contract holds.
 
 Running the HTTP service needs its settings file — `cp .env.example .env`,
 then `docker compose up -d`. Every key in it is checked against the real
@@ -240,7 +349,7 @@ Four shelves, in the order a new reader should take them.
 | [`pain.md`](pain.md) | eight failures whose signature is a plausible answer. Mostly real incidents from this repository |
 | [`blog.md`](blog.md) | the long version: the three times the same bug came back, and the two bugs in the proof |
 | [`drift/`](drift/README.md) | the counter-argument, executable — including the whole thesis ported to pgvector with no MongoDB in the file |
-| [`examples/`](examples/) | eleven runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py) |
+| [`examples/`](examples/) | twelve runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
 
 **What is wrong with it** — read before trusting any of the above.
 
@@ -253,10 +362,11 @@ Four shelves, in the order a new reader should take them.
 
 | | |
 |---|---|
-| [`PROPOSAL.md`](PROPOSAL.md) | three directions, ranked. Admission for the prompt, not a memory product |
-| [`PILOT.md`](PILOT.md) | the smallest honest trial: refusal on one collection, with exit criteria and a report template |
+| [`PROPOSAL.md`](PROPOSAL.md) | three directions, ranked. **Direction 1 — admission for the prompt — is the live one**; the handle is the identity, the other two are frozen until a pilot |
+| [`PILOT.md`](PILOT.md) | the smallest honest trial: refusal on one collection, exit criteria and a report template — plus `bench/pilot.py`, the same flow run against a real MongoDB with the report already filled |
 | [`DECISION.md`](DECISION.md) | what to build next, pre-registered — each API waits on pilot evidence |
 | [`appendix.md`](appendix.md) | the sell decomposed, the ceiling of the pitch, and the compliance vendors |
-| [`copy.md`](copy.md) | the words: right of first refusal, permission slips, sole custody of the deadline |
+
+Internal, not landing-page copy: [`copy.md`](copy.md) (the family-court register — a mnemonic for the team, not a public sell) and [`mongodb.md`](mongodb.md) (a memo for a MongoDB conversation, not the project's identity).
 
 MIT.

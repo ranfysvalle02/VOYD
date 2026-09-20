@@ -1,6 +1,6 @@
 # What is worth building next
 
-**Forward-looking only**, and verified against the code on **19 September
+**Forward-looking only**, and verified against the code on **20 September
 2026** — where something below says a thing does not exist, that was checked,
 not assumed. The date is here because a roadmap with no date is
 indistinguishable from a roadmap nobody maintains.
@@ -13,6 +13,31 @@ Three of these are also in [`blog.md`](blog.md#what-is-not-done), which is
 the public commitment. This is the working version: the reasoning, the
 shape, and — for each one — **how you would know it worked**, because an
 item without that is a wish.
+
+---
+
+## Frozen until a retained pilot
+
+These are real and reasoned below, and none of them is the next thing to build.
+The next thing is one retained Python + MongoDB pilot on the handle
+([`PILOT.md`](PILOT.md)); until that exists, each of these adds surface to a
+project whose public surface has already overgrown once ([`ISSUES.md`](ISSUES.md)
+item 8). Listed here so the reasoning below is not mistaken for a queue:
+
+- **The HTTP namespace as the first surface** -- still owes an authorization
+  story for the verbs that change reachability. See [`DECISION.md`](DECISION.md).
+- **MCP as an identity** -- a channel a model calls, not the category. A demo,
+  not a listing in an agent-memory marketplace.
+- **A TypeScript client** (item 9) -- reach, not proof.
+- **Qdrant as a second engine** and **the outward leak detector** -- both
+  double the surface that has to hold.
+- **The policy editor** (item 5) -- the compiler shipped; loading and an
+  editing endpoint wait on the same authorization question as the HTTP surface.
+- **Wiring `redrive()`** (item 1) -- a worker with credentials for every sink
+  is a deployment decision, not a default.
+
+The items below keep their reasoning. This section is the freeze: the identity
+is the handle, and these wait on evidence that a stranger keeps it.
 
 ---
 
@@ -129,7 +154,7 @@ the over-fetch factor under a realistic refusal rate. `bench/admission.py`
 now does, and writes `bench/results/admission.json` and `.md`.
 
 **The numbers** (laptop, Darwin arm64, Python 3.12, reproducible): the
-per-candidate classification check is ~0.5 µs p50 and under 0.8 µs p99, flat
+per-candidate classification check is ~1 µs p50 and under 2 µs p99, flat
 across page sizes 1–100 and 2–3 rules. Over-fetch under an interleaved refusal
 rate is ~2× to 50% refused, ~7.6× p50 at 80%, ~15× p50 at 90%, refilling to
 the round cap rather than starving. *"So you pay on every read, forever"* now
@@ -153,17 +178,30 @@ None}})`. `lifted_total` is already counted apart from `revoked_total`, so
 the queue arrives with the metric that matters: a climbing `lifted` means
 the detector is mistuned.
 
-### 8. Budget as a refusal reason
+### 8. Budget as a refusal reason — shipped
 
 `Rule` answers *may this reach a prompt?* A context-token budget is the same
 question with a different reason: `over_budget`, refusing marginal hits once
-the budget is spent.
+the budget is spent. `Budget(limit=…)` ships, and it is the evidence the
+abstraction is a *primitive* rather than a compliance feature — a reason with
+nothing to do with erasure, expressed in the same shape as one that is.
 
-**Why it is worth building even though nobody asked.** It is evidence the
-abstraction is a *primitive* rather than a compliance feature. A rule
-protocol that pays off in a domain with nothing to do with erasure has
-earned its place; one that only ever holds compliance reasons is a
-compliance feature with extra indirection.
+Building it grew the protocol in the way that was the actual point: a rule may
+now be **cumulative**, declaring `needs_tab` to be handed a `Tab` scoped to one
+read. Cumulative rules are asked last, after every pure rule has admitted the
+document, so a budget never charges a hit a deadline was going to refuse — and
+`saturate()` learned that a page cut short by a spent budget is *complete*, not
+`starved`. `why_refused` generalised too: a rule exposing `why()` names its own
+sub-reason, so `over_budget` and `uncosted` are counted apart, the same way
+`Deadline` separates an expiry from an unreadable one.
+
+**Still open:** the cost is the caller's. `Budget` reads a `tokens` field or a
+supplied callable and ships no tokenizer, because a number pretending to match
+a vendor's counting is the fabricated precision this repo refuses. An
+integration that needs *Voyage's* count computes it and hands it over.
+Budget and sealing also fail at construction when combined until the read path
+can decrypt before cumulative admission; [`ISSUES.md`](ISSUES.md) records why
+shipping the opposite order would make `Page.spent` a precise-looking lie.
 
 ### 9. A TypeScript client
 
@@ -177,34 +215,46 @@ true — a second implementation is where an API finds out it has fourteen.
 
 ## Bigger bets, lower confidence
 
-### Qdrant, not Postgres, as the second engine
+### Qdrant, not Postgres, as the second engine — the finding shipped
 
 `drift/refusal_on_postgres.py` already runs the whole thesis on pgvector
 with no MongoDB in it, which removed the "this is just MongoDB advocacy"
-dismissal for the price of one file. A *shipped adapter* is still open, and
+dismissal for the price of one file. A *shipped adapter* is still frozen, and
 the honest reason to hold off is unchanged: it doubles the surface that has
 to hold.
 
-But **Qdrant is the more interesting target than Postgres**, and it is the
-one that would teach us something. Postgres has rows, so refusal there is
-recognisably the same shape — a view and a grant. Qdrant has no rows at all:
-refusal has to live in the payload filter, and whether that is *enforceable*
-or merely *conventional* is a genuinely open question. If it turns out to be
-conventional, that is a finding worth publishing on its own — it would mean
-a whole class of vector databases cannot express this guarantee structurally
-at all, only politely.
+But **Qdrant was the more interesting target than Postgres**, and the open
+question — is refusal on a rowless engine *enforceable* or merely
+*conventional*? — is now answered, measured against the real service in
+`drift/refusal_on_qdrant.py`: **conventional**. The payload filter enforces
+the deadline in the read path cleanly (its Act II), but Qdrant has no row, no
+view and no GRANT, so nothing can make the *unfiltered* read fail — the next
+caller who omits the filter is served the expired point. The structural third
+act Postgres reaches (revoke the table, grant only a view, the naive read
+*raises*) is not available on the stock image. That is the finding pre-agreed
+to be worth publishing: a whole class of vector databases can express this
+guarantee only politely. A shipped adapter remains a different, frozen thing —
+a finding is not an adapter.
 
-### A leak detector for stacks that are not this one
+### A leak detector for stacks that are not this one — the code-scan half shipped
 
-Point a tool at a live Pinecone + Postgres and report how many currently
-queryable vectors have no live row. `drift/exhibit.py` turned outward.
+Nobody buys a guarantee until they see their own number, and the number is
+never zero. There are two versions of that instrument, and the cheap one is
+now built.
 
-**Why.** Nobody buys a guarantee until they see their own number, and the
-number is never zero.
+**Shipped: the source scan.** `tools/leak_scan.py` reads a repository with
+`ast` — no database, no credentials, one stdlib file a stranger can copy — and
+reports how many reads hit a collection its own code marks with a deadline or
+soft-delete field *without* filtering on it. It is the AST walker in
+`test_no_module_reaches_past_the_handle.py` turned outward, and it is honest
+about being a floor: dynamically named collections and ORM layers are
+invisible, and a filter it cannot read is called *indeterminate*, never a leak.
 
-**Why not yet.** It is a go-to-market artifact, not a foundation one, and it
-needs read credentials for somebody else's production data — a different
-kind of responsibility than anything here currently carries.
+**Still deferred: the live scan.** Pointing a tool at a live Pinecone +
+Postgres to report how many currently queryable vectors have no live row needs
+read credentials for somebody else's production data — a different kind of
+responsibility than anything here carries. The code scan is the version that
+does not, which is why it went first.
 
 ### Sealing on the HTTP path
 

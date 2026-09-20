@@ -133,8 +133,8 @@ price of the idea, and paying it is what makes the idea shippable rather
 than a blog post.
 
 The CPU tax of the check itself is not where the time goes. Measured in
-[`bench/admission.py`](bench/admission.py): about **0.5 µs p50 per
-candidate, under 0.8 µs p99**, flat from a 1-hit page to a 100-hit page.
+[`bench/admission.py`](bench/admission.py): about **1 µs p50 per
+candidate, under 2 µs p99**, flat from a 1-hit page to a 100-hit page.
 Over-fetch under a realistic (interleaved) refusal rate stays near **2×
 up to 50% refused**. The published table is
 [`bench/results/admission.md`](bench/results/admission.md).
@@ -167,7 +167,10 @@ repository stops being a pile of features and becomes consequences:
   check is the guarantee, the guarantee cannot be optional, so the
   unsafe read gets a name instead of a default: `including_refused()`
 - **reasons are plural** — the check is per document, so a deadline, a
-  revocation, a clearance and a compiled policy are the same shape
+  revocation, a clearance and a compiled policy are the same shape.
+  [`examples/rosetta.py`](examples/rosetta.py) is the executable form of this:
+  soft-delete, TTL, a feature flag, row-level security and a token budget as
+  five rules on one handle, with `deleted=true` the smallest member
 - **erasure is a deadline that has already passed** — no erasure
   subsystem; `revoke()` stamps the mark and moves `expire_at` into the
   past, and the same TTL index collects both
@@ -177,6 +180,11 @@ repository stops being a pile of features and becomes consequences:
   so it can be evaluated against a past instant too
 - **crypto erasure** — refusal binds this read path only, so the copies
   outside it need a mechanism that is not a check at all
+- **rules are a protocol, not a fixed list** — a new reason is a new object,
+  not a new branch in a predicate; and because the check runs on a live read,
+  a rule can even be *cumulative*: a token budget refusing `over_budget` once
+  the prompt's room is spent is the same shape as a deadline, which is the
+  evidence the protocol is a primitive rather than a compliance feature
 
 Read [`TLDR.md`](TLDR.md) for the pitches, [`pain.md`](pain.md) for the
 failures, [`blog.md`](blog.md) for the long argument, and

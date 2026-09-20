@@ -1,14 +1,14 @@
 [project]
 name = "voyd"
 version = "0.1.0"
-description = "Every database can delete; none can refuse. A retrieval scope with a deadline, and a read path that cannot return what it has forgotten."
+description = "Ranking is not permission. A retrieval read path that cannot return a fact it has forgotten -- admission control for what may reach a prompt."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Fabian Valle" }]
 requires-python = ">=3.11"
 keywords = [
     "mongodb", "vector-search", "retrieval", "rag", "admission-control",
-    "ttl", "expiry", "gdpr", "erasure", "audit-log",
+    "ttl", "expiry", "erasure", "audit-log",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

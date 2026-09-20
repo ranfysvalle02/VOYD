@@ -31,10 +31,10 @@ from pathlib import Path
 PACKAGE = Path(__file__).resolve().parents[1] / "voyd"
 
 # ``admission/reads.py`` is where the wrapping lives, so it must call the
-# primitive. ``verify.py`` calls it deliberately to assert that the unwrapped
-# version really does leak -- if that stopped being true, the read-path
-# read-path check would have become a tautology, so it is a call worth
-# keeping and worth exempting by name.
+# primitive. ``test_admission_is_structural.py`` separately asserts that the
+# unwrapped version really does leak -- if that stopped being true, the other
+# read-path checks would quietly become tautologies. A test needs no package
+# exemption.
 #
 # This exemption used to read ``admission.py`` and cover a 2,393-line module,
 # which meant *any* of admission's concerns could have reached for the
@@ -43,7 +43,7 @@ PACKAGE = Path(__file__).resolve().parents[1] / "voyd"
 # lineage, sealing and attestation are now inside the rule like everybody
 # else. An exemption that shrinks when code is reorganised is the only kind
 # worth having.
-ALLOWED = {"reads.py", "verify.py"}
+ALLOWED = {"reads.py"}
 
 
 def _calls_to_search(path: Path) -> list[int]:

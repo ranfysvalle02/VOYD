@@ -309,6 +309,26 @@ async def test_revocation_is_counted_exactly(facts):
     assert r["last_reason"] == "erasure"
 
 
+async def test_break_glass_is_counted_on_receipts(facts):
+    """Setting the guarantee aside is a fact worth a number, so it is one.
+
+    Counted per terminal read, not per row the audit then sees -- the question
+    a dashboard has is "how often was refusal set aside", not "how many rows
+    did the auditor read". The engine's own write paths use the
+    private ``_unfiltered()`` hatch and so are not counted here; only the
+    named, public break-glass is.
+    """
+    _, _, docs = facts
+    assert docs.receipts()["including_refused_total"] == 0
+    await docs.including_refused().find({})
+    await docs.including_refused().find({})
+    assert docs.receipts()["including_refused_total"] == 2
+
+    # A revoke (which uses _unfiltered internally) does not inflate the count.
+    await docs.revoke({"name": "live"}, reason="erasure")
+    assert docs.receipts()["including_refused_total"] == 2
+
+
 async def test_receipts_count_refusals_by_reason(facts):
     """"It became unreachable at T" should be showable, not assertable."""
     _, db, docs = facts

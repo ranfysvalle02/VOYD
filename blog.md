@@ -1,4 +1,4 @@
-# Every database can delete. None of them can refuse.
+# Ranking is not permission
 
 Delete a document. Then ask your vector index about it.
 
@@ -171,7 +171,7 @@ docs = engine.model("notes").forgettable()
 
 await docs.find({})                        # cannot return a forgotten fact
 await docs.search(vector, text="P0301")    # nor can the search path
-await docs.including_refused().find({})    # the unsafe thing, named out loud
+await docs.including_refused().find({})    # break-glass: gated, and counted
 
 await docs.revoke({"_id": x}, reason="credential leaked")
 # unreachable on the next read. The row is still on disk. That is the proof.
@@ -274,10 +274,10 @@ And this time the enforcement is not prose.
 in the package and asserts none of them calls the primitive. AST rather than a
 regex, because `.search(` appears in strings and comments all over the package —
 including inside the docstring explaining the rule — and a guard that fires on
-prose is a guard somebody deletes. Two files are exempt, each for a stated
-reason: `admission.py`, which is where the wrapping lives, and `verify.py`,
-which calls it deliberately to assert that the unwrapped version really does
-leak.
+prose is a guard somebody deletes. One file is exempt:
+`admission/reads.py`, which is where the wrapping lives. The separate
+assertion that the unwrapped primitive still leaks is in
+`test_admission_is_structural.py`; it needs no package exemption.
 
 A grep does not need anybody to be paying attention. That is the only property
 that distinguishes it from the two conventions it replaced.
@@ -398,7 +398,7 @@ deadline, so a quoted secret would outlive every mechanism built to forget it.
 Ids and reasons only — also asserted, because that is the kind of field
 somebody adds helpfully.
 
-### Two bugs in the proof, and why I am telling you
+### Three bugs in the proof, and why I am telling you
 
 The chain is the component whose entire value is being trustworthy. It arrived
 with two bugs, both of the kind that would have been discovered by whoever was
@@ -699,7 +699,7 @@ of 5 examined 46 candidates.
 
 The per-hit CPU cost of the admission check itself is no longer an estimate.
 `bench/admission.py` measures it: on a laptop (Darwin arm64, Python 3.12) the
-per-candidate classification cost is about **0.5 µs p50, under 0.8 µs p99**,
+per-candidate classification cost is about **1 µs p50, under 2 µs p99**,
 flat from a 1-hit page to a 100-hit page and across two to three rules — the
 check is not where the time goes. Over-fetch under a *realistic* (interleaved)
 refusal rate stays near **2× up to 50% refused**, rising to ~7.6× p50 (30× p99)
@@ -915,8 +915,10 @@ code it describes.
 | An expired document cannot reach a prompt | its row is still on disk and `recall` refuses it, with the reaper uninvolved |
 | A read path written in ignorance is still safe | a naive `find({})` through the handle returns neither expired nor revoked rows |
 | Admission does not wait for deletion | `revoke()` is unreachable on the next read, with the row still on disk |
-| Setting the guarantee aside has a name | `including_refused()` is the only way, and it does not mutate the handle |
+| Setting the guarantee aside has a name, a gate, and a counter | every terminal read through `including_refused()` asks `AUDIT` again, increments `including_refused_total`, and records actor/time |
 | A garbage deadline fails closed | a string, int or list `expire_at` reads as expired, and never raises |
+| A token budget is just another refusal reason | `Budget(limit=…)` refuses over_budget once a read's room is spent, with no query half |
+| `deleted=true` is the smallest member of the protocol | `examples/rosetta.py` runs soft-delete, TTL, a feature flag, RLS and a budget as five rules on one handle |
 | An unreadable deadline fails closed too | a `datetime.max` that cannot be shifted to UTC is dead, not an exception |
 | The embedding leaves with the document | after the reaper runs, no vector survives its row |
 | Pinning is the absence of a deadline | a null `expire_at` sibling survives in the same collection |

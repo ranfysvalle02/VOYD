@@ -1,6 +1,6 @@
 # Known issues
 
-**Verified against the code on 19 September 2026.** Every entry here was
+**Verified against the code on 20 September 2026.** Every entry here was
 checked, not recalled, and each one says what would close it.
 
 This is not the roadmap — [`ideas.md`](ideas.md) is what is worth *building*
@@ -188,10 +188,13 @@ one. Staleness bounds the lie; it does not remove it.
 blog or example. Not wrong individually — nothing had ever asked them to
 earn the name.
 
-Cut to 75 and pinned by
+Initially cut to 75 and pinned by
 `tests/test_the_public_surface_is_deliberate.py`. Nothing was deleted
 except `POLICY` (a constant referenced nowhere); the rest went from
 *promised* to *present*, still importable from the module that owns it.
+Since grown to 78 — the `Budget` rule and its two reasons (`OVER_BUDGET`,
+`UNCOSTED`) — each addition a line somebody typed into that test's diff,
+which is the mechanism working rather than the surface drifting again.
 
 **What this does not fix.** A curated export list does not make the package
 smaller — it makes the promise
@@ -228,6 +231,48 @@ the *engine declared expiring* rather than a literal somebody maintains.
 It reports `unreadable: true/false` so a caller can tell "noise in every
 backup" from "this database will forget on the reaper's schedule".
 
+## 10. ~~`including_refused()` was ungated and uncounted~~ — closed
+
+**Severity: closed.** [`appendix.md`](appendix.md) named the one hole in the
+escape hatch: it turned the guarantee off, and it was neither gated nor
+counted, so the 2am use to "just fix a bug" needed no permission and left no
+trace.
+
+Both halves are now code. Disclosing a forgotten fact is the *granting*
+direction -- `AUDIT` in [`voyd/engine/authority.py`](voyd/engine/authority.py),
+alongside `RELEASE` -- so `including_refused()` asks an authority for it where
+one is installed, and raises for a withholding-only caller, the same asymmetry
+`release` sits behind. And it increments `including_refused_total` in
+`receipts()` once per terminal read, recording the last actor/time; a cached
+handle is re-authorised on every use and an unused one records nothing. The
+engine's own write paths do not pay this: they use a private `_unfiltered()`
+hatch, because `revoke`
+seeing the row it marks is a `REVOKE`, not an `AUDIT`, and routing it through
+the gate would break `Grants.withholding_only()`.
+[`tests/test_break_glass_is_named.py`](tests/test_break_glass_is_named.py) fails
+the build if any module outside
+[`voyd/engine/admission/core.py`](voyd/engine/admission/core.py) reaches for the
+public name.
+
+**Still open:** the lint against *new* call sites is exactly that test, but it
+only covers `voyd/`. A call site in application code is the deployment's to
+police.
+
+## 11. Budget and sealing do not yet compose
+
+**Severity: low — refused at construction, not silently wrong.**
+
+`Budget` charges a selected hit; sealing can then refuse that hit only after
+asynchronous decryption discovers its key is gone. Charging before decryption
+would make `Page.spent` include ciphertext that never reached the caller and
+could make a budget-complete page look complete before an unreadable hit was
+dropped. Both are precise numbers with false meanings.
+
+So `sealed_by()` rejects a handle with a cumulative rule. The fix is not an
+exception in the counter: it is ordering the read path as pure admission →
+decryption → cumulative admission, with refill after either refusal. Until
+that exists, failing at construction is the only honest composition.
+
 ## Operational caveats
 
 Not defects — known trades, written down so they are not rediscovered as
@@ -244,7 +289,10 @@ surprises.
   about erasure timing.
 - **Passcode rate limiting is per-replica.** In-process, the trade for not
   needing Redis, and the first thing to fix on more than one process.
-- **CORS is wildcard-open on `/v1`**, which is the whole public surface.
+- **CORS is wildcard-open on `/v1`**, which is the whole public surface -- and
+  `/v1` is a frozen surface (see [`ideas.md`](ideas.md)): the HTTP namespace is
+  not the on-ramp, so tightening this waits on the surface being promoted by a
+  pilot rather than being fixed speculatively now.
 - **The chain's signature is HMAC** — an attestation to whoever trusts the
   key holder, not a public proof. The chain itself needs no trust; only the
   signature does.

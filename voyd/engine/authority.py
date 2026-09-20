@@ -64,11 +64,20 @@ QUARANTINE = "quarantine"
 RELEASE = "release"
 SHRED = "shred"
 DERIVE = "derive"
+# Prying the guarantee open to read what was forgotten. ``including_refused()``
+# is the handle that does it, and it is a verb like the others because "who
+# may see the erased rows" is exactly the question the other verbs made
+# askable -- and leaving it ungated was the one hole appendix.md named.
+AUDIT = "audit"
 
-# Operations that make a fact *more* reachable. A mistake here is the
-# breach the detector fired about, which is why they are named as a set
-# rather than left for each deployment to rediscover.
-GRANTS_REACHABILITY = frozenset({RELEASE})
+# The granting direction: operations that put a forgotten fact back in front
+# of somebody. A mistake here is the breach the detector fired about, which is
+# why they are named as a set rather than left for each deployment to
+# rediscover. ``release`` re-admits the fact to every reader; ``audit``
+# (``including_refused()``) discloses it to this one. Both are the direction a
+# mistake cannot be walked back, and neither is granted by
+# ``Grants.withholding_only()``.
+GRANTS_REACHABILITY = frozenset({RELEASE, AUDIT})
 
 WITHHOLDS = frozenset({REVOKE, QUARANTINE, SHRED})
 
@@ -91,9 +100,15 @@ class NotAuthorised(PermissionError):
         self.operation = operation
         self.collection = collection
         self.held = held
-        danger = (" This operation makes facts reachable again, which is "
-                  "the direction a mistake cannot be walked back."
-                  if operation in GRANTS_REACHABILITY else "")
+        if operation == AUDIT:
+            danger = (" This operation discloses facts that were forgotten, "
+                      "which is the granting direction: a disclosure cannot "
+                      "be walked back.")
+        elif operation in GRANTS_REACHABILITY:
+            danger = (" This operation makes facts reachable again, which is "
+                      "the direction a mistake cannot be walked back.")
+        else:
+            danger = ""
         super().__init__(
             f"not authorised to {operation} in {collection}"
             f"{f' (holds: {sorted(held)})' if held else ''}.{danger}")

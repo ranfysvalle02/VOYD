@@ -5,9 +5,24 @@ the answer is. Adding a reason is therefore a new class in this file rather
 than a new branch in a predicate that keeps growing -- and a third-party rule
 is the same kind of object as a builtin one, with no privileged path.
 
+There are two kinds of rule, and the difference is the only subtlety in this
+file:
+
+- **pure** -- a function of one document (and, for some, the caller): a
+  deadline, a revocation, a clearance. Order-independent, side-effect-free,
+  testable as pure functions.
+- **cumulative** -- a function of one document *and a running total across
+  the read*: a token budget. It declares ``needs_tab`` and is handed a
+  ``Tab`` scoped to that one read, which it charges as a side effect.
+
+That side effect is why cumulative rules are asked **last**, after every pure
+rule has had its say -- ``spec.why_refused`` enforces the order so a budget
+never charges a document that a deadline was going to refuse anyway. A rule
+author does not arrange this; declaring ``needs_tab`` is the whole contract.
+
 Nothing here touches a database, a caller or a receipt. That is what makes
-the reasons testable as pure functions, and it is why this module sits at the
-bottom of the package with only the vocabulary beneath it.
+the pure reasons testable as pure functions, and it is why this module sits
+at the bottom of the package with only the vocabulary beneath it.
 """
 
 from __future__ import annotations
@@ -15,11 +30,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Callable, ClassVar, Protocol
 
 from ..time import aware, living, now
-from .reasons import (DEADLINE, NOT_CLEARED, QUARANTINED, REVOKED,
-                      UNREADABLE, UNRECOVERABLE, WRONG_MODEL)
+from .reasons import (DEADLINE, NOT_CLEARED, OVER_BUDGET, QUARANTINED,
+                      REVOKED, UNCOSTED, UNREADABLE, UNRECOVERABLE,
+                      WRONG_MODEL)
 
 
 log = logging.getLogger("engine.admission")
@@ -44,13 +60,17 @@ log = logging.getLogger("engine.admission")
 class Rule(Protocol):
     """One reason a document may not reach a prompt.
 
-    Three optional class attributes change how a rule is treated, and all
-    three default to the behaviour of the original rules:
+    Four optional class attributes change how a rule is treated, and all
+    four default to the behaviour of the original rules:
 
     ``needs_caller``  the rule compares the document against *who is asking*,
                       so it is handed the caller's claims. A rule without it
                       is never passed them, which keeps the ordinary rules
                       free of a parameter they have no use for.
+    ``needs_tab``     the rule is *cumulative*: it compares the document
+                      against a running total for the read, so it is handed
+                      a ``Tab`` and is asked only after every pure rule has
+                      admitted the document. A budget is the one built-in.
     ``bypassable``    whether ``including_refused()`` sets this rule aside.
                       True for reasons a fact is *forgotten* -- audit and
                       administration exist to see those. False for reasons a
@@ -84,16 +104,76 @@ class Rule(Protocol):
     suggested. So the reason declares its own reversibility, the verb reads
     it, and "can this be taken back?" is answerable by looking at the rule
     instead of by reading the method that writes it.
+
+    The four attributes above and ``why()`` below are optional extensions
+    discovered with ``getattr``. They are deliberately *not* members of this
+    protocol: putting an optional method on a Python ``Protocol`` makes it
+    required to static type checkers and would falsely reject ordinary
+    third-party rules.
     """
 
     reason: str
-    needs_caller: bool
-    bypassable: bool
-    reversible: bool
-
     def refuses(self, doc: dict, *, when: datetime | None = None) -> bool: ...
 
     def clause(self) -> dict | None: ...
+
+
+@dataclass
+class Tab:
+    """One read's running budget. Mutable, and scoped to a single read.
+
+    It is *not* stored on the rule or the handle, and that is the whole point.
+    A handle is deduplicated per collection and cloned per caller, so a
+    running total living on it would bleed one request's spend into another's
+    under concurrency -- the same reason ``for_caller`` returns a new handle
+    rather than assigning to ``self``. So the core opens a fresh ``Tab`` for
+    each read and hands it to the cumulative rules; nothing survives the call.
+
+    ``charge`` is all-or-nothing per document: a cost that does not fit is not
+    partially spent, and the tab latches ``exhausted`` so the *first* document
+    that overflows ends admission for the read (a strict prefix -- see
+    ``Budget`` for why "skip the whale and take the next small one" is
+    rejected).
+    """
+
+    limit: int
+    spent: int = 0
+    exhausted: bool = False
+
+    def charge(self, cost: int) -> bool:
+        """Spend ``cost`` if it fits. Returns whether it did.
+
+        A cost that does not fit latches ``exhausted`` and is not spent, so
+        ``spent`` is always the sum of what was actually admitted. Once
+        latched the tab stays closed: a later, smaller cost is refused too,
+        because the prefix ended at the first overflow -- the strict-prefix
+        guarantee lives here, not only in ``Budget``, so any cumulative rule
+        that charges a tab inherits it.
+        """
+        if isinstance(cost, bool) or not isinstance(cost, int) or cost < 0:
+            raise ValueError("Tab.cost must be a non-negative integer")
+        if self.exhausted or self.spent + cost > self.limit:
+            self.exhausted = True
+            return False
+        self.spent += cost
+        return True
+
+
+class CumulativeRule(Rule, Protocol):
+    """The documented shape of the one cumulative rule a spec may declare.
+
+    Present for authors and type checkers, not used for runtime dispatch and
+    not exported from the engine. ``needs_tab`` is a class contract (not a
+    constructor switch), ``new_tab`` creates per-read state, and ``why`` may
+    return a sub-reason such as ``uncosted``.
+    """
+
+    needs_tab: ClassVar[bool]
+
+    def new_tab(self) -> Tab: ...
+
+    def why(self, doc: dict, *, when: datetime | None = None,
+            tab: Tab | None = None) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -411,6 +491,117 @@ class Restricted:
     def clause_for(self, caller: dict | None) -> dict | None:
         held = sorted(self._set((caller or {}).get(self.claim)))
         return {self.field: {"$in": held}}
+
+
+@dataclass(frozen=True)
+class Budget:
+    """Refused because the read's context-token budget was spent.
+
+    The first *cumulative* rule, and the reason the protocol grew a ``Tab``.
+    ``Rule`` answers *may this reach a prompt?*; a budget is the same question
+    with a different reason -- ``over_budget`` -- asked once the room is gone.
+    It is evidence the rule protocol is a primitive rather than a compliance
+    feature: a reason with nothing to do with erasure, expressed in the same
+    shape as one that is.
+
+        docs = engine.model("notes").admitting(Deadline(), Budget(limit=8000))
+        page = await docs.search(vector, limit=20)   # stops at ~8000 tokens
+
+    **Cost is the caller's to define, never guessed.** ``cost`` is a callable
+    over the document; by default it reads an integer ``cost_field`` (a
+    ``tokens`` a pipeline already computed). This package ships no tokenizer,
+    because a number that pretends to match a vendor's counting is exactly the
+    fabricated precision it refuses everywhere else. A missing or non-numeric
+    cost is ``uncosted`` -- refused, failing closed like an unreadable
+    deadline, but it does *not* close the page: one uncostable document says
+    nothing about the room left.
+
+    **A strict prefix, on purpose.** The first document that does not fit ends
+    admission for the read; a later, smaller hit is not slipped in ahead of
+    it. Admitting by size would reorder results by how big they are rather
+    than by how relevant -- the same silent reordering ``search.py`` documents
+    for a rule in ``compound.must`` -- so the budget cuts the ranking at a
+    point, it does not repack it. ``search`` already has a relevance order;
+    budgeted ``find`` therefore requires an explicit ``sort`` rather than
+    pretending MongoDB's natural order is a stable policy.
+
+    **No query half, and there never can be one.** ``clause()`` is ``None``: a
+    running total is not something a per-document query can express. Per
+    ``AHA.md`` that is the safe asymmetry -- per-document-only is slower, not a
+    hole; a clause-only rule would be the hole -- and ``Unrecoverable`` is the
+    existing precedent for a rule that lives entirely on egress.
+
+    Bypassable, because the audit handle is not assembling a prompt and has no
+    budget to keep. Not reversible: nobody imposes a budget with a verb, so
+    ``impose()``/``lift()`` correctly never target it. It applies to reads that
+    return prompt content -- ``search``/``saturate``, ``find``, ``find_one``
+    and ``reachable``. A singleton gets a fresh tab of its own. Cardinality
+    and reconstruction operations (``count``, ``exists``, ``reachability_at``)
+    return no content page and deliberately do not apply it.
+    """
+
+    limit: int
+    cost: Callable[[dict], Any] | None = None
+    cost_field: str = "tokens"
+    reason: str = OVER_BUDGET
+    needs_tab: ClassVar[bool] = True
+    bypassable: ClassVar[bool] = True
+
+    def __post_init__(self) -> None:
+        """Reject a configuration whose arithmetic would be ambiguous.
+
+        Token counts are non-negative integers. Accepting ``3.7`` and silently
+        truncating it to ``3`` would let a page exceed the budget while every
+        receipt still looked exact; accepting ``True`` as ``1`` is the same
+        Python footgun in a different coat. Configuration errors are cheap at
+        construction, so the limit fails there rather than making every
+        document ``over_budget`` at runtime.
+        """
+        if isinstance(self.limit, bool) or not isinstance(self.limit, int):
+            raise TypeError("Budget.limit must be a non-negative integer")
+        if self.limit < 0:
+            raise ValueError("Budget.limit must be a non-negative integer")
+        if not isinstance(self.cost_field, str) or not self.cost_field:
+            raise ValueError("Budget.cost_field must be a non-empty string")
+        if self.cost is not None and not callable(self.cost):
+            raise TypeError("Budget.cost must be callable or None")
+
+    def new_tab(self) -> Tab:
+        """A fresh budget for one read. The core calls this per read."""
+        return Tab(limit=self.limit)
+
+    def _cost_of(self, doc: dict) -> Any:
+        return self.cost(doc) if self.cost is not None else doc.get(self.cost_field)
+
+    def why(self, doc: dict, *, when: datetime | None = None,
+            tab: Tab | None = None) -> str | None:
+        """The reason, charging the tab as a side effect.
+
+        Returns ``None`` (admit and charge), ``over_budget`` (no room), or
+        ``uncosted`` (cannot tell how big it is). Read defensively, because
+        the cost may come from a document field or third-party callable and
+        this runs inside the filter that must never raise.
+        """
+        if tab is None:
+            return None                       # not a set read: nothing to say
+        if tab.exhausted:
+            return self.reason                # the prefix is already closed
+        try:
+            cost = self._cost_of(doc)
+        except Exception:  # noqa: BLE001 - third-party costing must fail closed
+            log.exception("budget cost failed; refusing the document as uncosted")
+            return UNCOSTED
+        if (isinstance(cost, bool) or not isinstance(cost, int)
+                or cost < 0):
+            return UNCOSTED
+        return None if tab.charge(cost) else self.reason
+
+    def refuses(self, doc: dict, *, when: datetime | None = None,
+                tab: Tab | None = None) -> bool:
+        return self.why(doc, when=when, tab=tab) is not None
+
+    def clause(self) -> dict | None:
+        return None
 
 
 def revoked(field: str = "forgotten") -> Marked:

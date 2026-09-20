@@ -100,7 +100,7 @@ class Lineage:
             missing = set(parents) - {d["_id"] for d in found}
             raise DerivationBroken(self.collection, sorted(map(str, missing)),
                                    "not in this scope")
-        audit = self.including_refused()
+        audit = self._unfiltered()
         for parent in found:
             reason = why_refused(parent, self.spec, when=when,
                                  caller=self._caller)
@@ -174,7 +174,7 @@ class Lineage:
         turn "this parent may not be used" into "this parent does not
         exist" -- two very different things to report.
         """
-        return self.including_refused()._query(
+        return self._unfiltered()._query(
             {**scope, "_id": {"$in": ids}})
 
     async def _descendants(self, query: dict) -> tuple[list, int]:
@@ -226,7 +226,7 @@ class Lineage:
             return query
         scope = {self.tenant: (filters or {}).get(self.tenant)} \
             if self.tenant else {}
-        guard = self.including_refused()._query(scope)
+        guard = self._unfiltered()._query(scope)
         reach = {"$or": [{"_id": {"$in": ids}}, {field: {"$in": ids}}]}
         guard["$and"] = [*guard.pop("$and", []), reach]
         return guard

@@ -43,7 +43,6 @@ import json
 import os
 import platform
 import random
-import statistics
 import sys
 import time
 import uuid

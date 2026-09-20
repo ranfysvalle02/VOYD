@@ -3,10 +3,13 @@
     docker compose up -d
     uv run python examples/agent.py
 
-A caller — here, an agent — using the ``memory`` trait. The trait is a
-composition of admission, not a product category. Embeddings are your job;
-this file passes fake vectors so the pitch runs with no vendor. Swap in
-Voyage, OpenAI, whatever — ``remember()`` takes floats, not an API key.
+An agent here is a **caller**, not the category. It uses the ``memory`` trait,
+which is a composition of admission -- a worked example of the handle, not a
+product. The comparison set for a memory product is recall@k; this is judged on
+what it *refuses*, so the demo shows the trait and does not pretend to be Mem0.
+Embeddings are your job; this file passes fake vectors so the pitch runs with
+no vendor. Swap in Voyage, OpenAI, whatever -- ``remember()`` takes floats, not
+an API key.
 """
 
 from __future__ import annotations

@@ -1,25 +1,38 @@
-"""VOYD: a retrieval scope that expires, and refuses what it has forgotten.
+"""VOYD: a retrieval read path that refuses what it has forgotten.
 
-Every database can delete. None of them can refuse. Deletion is a storage
-event and it is eventually consistent, so between deleting a document and it
-being gone, a vector index keeps returning it. A **void** is a scope that
-closes both halves: open it with a deadline, put documents in, query them, and
-stop thinking about it.
+Ranking is not permission. A vector index ranks by relevance and is never
+asked the other question -- may this fact reach a prompt? -- so a retrieval
+answers with a confident score and no idea whether the hit was allowed to be
+there: an expired row the sweeper has not reached, a fact somebody revoked, a
+vector from a model that was swapped. VOYD answers that question at the one
+place every read passes through on the way out: a handle with no unfiltered
+read on it.
 
-The deadline is trustworthy because one thing owns it. Split across Postgres
-for metadata, Pinecone for vectors, S3 for blobs and a cron for cleanup, and
-you have four clocks and four ways to drift -- the vector outliving the
-document is the bug class, and nothing is ever wrong enough to page you. Here
-it is one ``expire_at``, inherited by every row in the scope, collected by one
-TTL index. There is no fourth clock and no second store: the text is a field on
-the document, so a collected row leaves nothing behind to reclaim.
+    from voyd import Engine
 
-Four primitives, and everything else is mechanics:
+    engine = Engine(client, db)
+    await engine.connect()
+    docs = engine.model("notes").forgettable()
+    await engine.ensure(search_wait_s=0)      # 0: skip the search-index wait
 
-**Scope** -- a namespace selected by the HTTP Host header. Every query is
-filtered by
-it, and the filter is pushed into the search index rather than remembered by a
-caller, because a leak here is a breach that arrives as an answer.
+    await docs.find({})                       # cannot return a forgotten fact
+    await docs.including_refused().find({})   # break-glass: gated, and counted
+    await docs.revoke({"_id": x}, reason="credential leaked")
+
+    # Multi-tenant threads a field through: ``model("notes", tenant="t")``
+    # then makes it required, so a read is ``find({"t": tenant})`` -- a
+    # forgotten ``{}`` raises rather than crossing the boundary.
+
+The deadline underneath the handle is trustworthy because one thing owns it.
+Split across Postgres for metadata, Pinecone for vectors, S3 for blobs and a
+cron for cleanup, and you have four clocks and four ways to drift -- the
+vector outliving the document is the bug class, and nothing is ever wrong
+enough to page you. Here it is one ``expire_at``, inherited by every row in the
+scope, collected by one TTL index. There is no fourth clock and no second
+store: the text is a field on the document, so a collected row leaves nothing
+behind to reclaim.
+
+The pieces, and everything else is mechanics:
 
 **Deadline** -- one ``expire_at``, inherited by every row in the scope and
 collected by one TTL index. Enforced in the *read path* as well as by the
@@ -52,8 +65,10 @@ read path. ``Guard`` asks whether this caller may read the
 scope and ``Admission`` asks whether this document may reach a prompt; the
 pair of them is a third question, and ``for_caller(claims)`` is where it is
 answered -- a ``Clearance`` rule compares what a document is classified
-against what its reader is cleared for, per hit. There is one door: gating
-queries and leaving another way in would make search the way around the lock.
+against what its reader is cleared for, per hit; ``Restricted`` is the
+complement, admitting only callers whose groups overlap the document's named
+audience. There is one door: gating queries and leaving another way in would
+make search the way around the lock.
 
 Refusal answers *may this reach a prompt*, which is not the same question as
 *and your backups?* -- refusal binds this application's read path, and a
@@ -92,29 +107,15 @@ Refusal is also **provable**. Every revocation is a link in an append-only
 hash chain, so "this fact stopped being reachable at 14:02" is a claim
 somebody can check rather than one they have to take -- and the receipt handed
 back is the half that holds against whoever owns the database. See
-``engine.ledger`` and ``GET /v1/voids/{token}/proof``.
+``engine.ledger``.
 
-    from voyd import Engine
-
-    engine = Engine(client, db)
-    await engine.connect()
-    docs = engine.model("notes").forgettable()
-    await engine.ensure(search_wait_s=0)      # 0: skip the search-index wait
-
-    await docs.find({})                       # cannot return a forgotten fact
-    await docs.including_refused().find({})   # the unsafe thing, named out loud
-    await docs.revoke({"_id": x}, reason="credential leaked")
-
-    # Multi-tenant threads a field through: ``model("notes", tenant="t")``
-    # then makes it required, so a read is ``find({"t": tenant})`` -- a
-    # forgotten ``{}`` raises rather than crossing the boundary.
-
-``Engine`` is the core -- ``pip install voyd`` is Engine and a MongoDB driver,
-and importing it does not load FastAPI or Voyage. ``Voyd`` is the HTTP
-service built on it, and needs the ``app`` extra. :mod:`voyd.mcp` is the same
-admission path as five tools a model can call, none of which is a delete --
-``forget`` changes reachability and hands the caller no cleanup obligation,
-which is why it costs nothing to offer.
+``Engine`` is the core -- the base install (``uv sync`` from a clone; not on
+an index yet) is Engine and a MongoDB driver, and importing it does not load
+FastAPI or Voyage. The HTTP service (``Voyd``,
+the ``app`` extra) and the MCP tools (:mod:`voyd.mcp`) are later surfaces onto
+the same admission path, not the thesis -- none of the five MCP tools is a
+delete, because ``forget`` changes reachability and hands the caller no cleanup
+obligation, which is why it costs nothing to offer.
 
 Every claim above is asserted by the test suite against a real MongoDB --
 no mock tier, on purpose, because these properties are only true if the

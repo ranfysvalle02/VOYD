@@ -11,19 +11,24 @@ the sell and its ceiling, [`PROPOSAL.md`](PROPOSAL.md) for what to be,
 
 ## One line
 
-**Every database can delete. None of them can refuse.**
+**Ranking is not permission.**
 
 ## One paragraph
 
-Deletion is a storage event, so it is eventually consistent — MongoDB's
-TTL monitor sweeps about once a minute (measured here: 60.0s), an S3
-lifecycle rule runs about once a day, a cron runs whenever it last
-worked. In that window your vector index keeps returning the deleted
-document as a normal, well-scored hit, with nothing logged and nothing
-to page on. Retrieval does not need a faster sweeper; it needs a
-different guarantee — *this fact may not reach a prompt*, answered on
-every read, immediately. That is **refusal**. Most stacks offer a
-filter you must remember; this makes the filter structural.
+Your retrieval answers with a confident score and no idea whether the hit was
+allowed to be there. An index ranks by *relevance*; nothing in the ordinary
+read path was asked whether a fact may **reach a prompt**, and those are
+different questions. The sharpest case is deletion: it is a storage event, so
+it is eventually consistent — MongoDB's TTL monitor sweeps about once a minute
+(measured here: 60.0s), an S3 lifecycle rule runs about once a day, a cron runs
+whenever it last worked — and in that window your vector index keeps returning
+the deleted document as a normal, well-scored hit, with nothing logged and
+nothing to page on. The fix is not a faster sweeper; it is a different
+guarantee — *this fact may not reach a prompt*, answered on every read,
+immediately. That is **refusal**, and most stacks offer a filter you must
+remember; this makes the filter structural. *Delete versus refuse* is the
+mechanism, not the headline: an instant sweeper would not change the argument,
+because the index and the row are different systems with different clocks.
 
 ## Thirty seconds
 
@@ -32,7 +37,7 @@ docs = engine.model("notes").forgettable()
 
 await docs.find({})                        # cannot return a forgotten fact
 await docs.search(vector, text="P0301")    # nor can the search path
-await docs.including_refused().find({})    # the unsafe thing, named out loud
+await docs.including_refused().find({})    # break-glass: gated, and counted
 
 await docs.revoke({"_id": x}, reason="credential leaked")
 # unreachable on the next read. The row is still on disk. That is the proof.
@@ -62,6 +67,14 @@ derives why pushing the filter into the index is possible but
 insufficient as the sole enforcement point.
 
 ## Why it reads as strange
+
+To be precise first, because a sharp engineer will be: a per-read predicate is
+not unheard of — row-level security is its relational cousin, and some engines
+apply visibility filters at rank time. "None of them can refuse" is too strong
+as a literal claim. What is unclaimed is naming the egress check the *only*
+authoritative form of the rule, and building the handle so that no read path,
+fallback or future caller can skip it — which is a stronger and more defensible
+statement than a slogan.
 
 Three of its central moves are the opposite of what the category does,
 and each one is the reason it works.
@@ -103,7 +116,9 @@ an expired row the sweeper has not reached, a revoked fact, a vector
 from the embedding model you swapped last quarter (measured: identical
 text scores −0.053 across models, unrelated text +0.301, and a width
 check catches neither). One handle, two enforcement points, every reason
-reported by name.
+reported by name — including a token budget that refuses `over_budget` once
+the prompt's room is spent, the same shape as a deadline and the proof the
+rule protocol is a primitive rather than a compliance feature.
 
 **Platform / SRE.** One connection string instead of four systems with
 four clocks. `health()` treats degraded as a first-class state.

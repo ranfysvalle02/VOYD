@@ -54,7 +54,23 @@ class Sealing:
     # encryption as a convention and encryption as a guarantee.
 
     def sealed_by(self, sealing) -> Self:
-        """Attach a resolved ``Sealing``. Returns ``self``."""
+        """Attach a resolved ``Sealing``. Returns ``self``.
+
+        A cumulative rule and sealing are rejected together for now. Sealing
+        can refuse a selected hit only after asynchronous decryption; charging
+        a budget before that would report room spent on content never returned,
+        while charging after it requires the refill loop to decrypt before
+        cumulative admission. Both are implementable, but silently choosing
+        the first is a false precision claim. Fail at construction until the
+        read path owns that ordering explicitly.
+        """
+        cumulative = [r.reason for r in self.rules
+                      if getattr(r, "needs_tab", False)]
+        if cumulative:
+            raise ValueError(
+                f"{self.collection}: sealing cannot yet compose with "
+                f"cumulative rule(s) {cumulative}; decryption must happen "
+                "before budget charging so Page.spent stays truthful")
         self.sealing = sealing
         return self
 

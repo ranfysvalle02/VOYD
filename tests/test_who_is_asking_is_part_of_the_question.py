@@ -21,8 +21,8 @@ import asyncio
 
 import pytest
 
-from voyd.engine import (NOT_CLEARED, CallerRequired, Clearance, Deadline,
-                         Restricted, revoked)
+from voyd.engine import (NOT_CLEARED, REFUSED, CallerRequired, Clearance,
+                         Deadline, Restricted, now, revoked)
 from voyd.engine.admission import Admission, AdmissionSpec, why_refused
 
 ORDER = ("public", "internal", "secret")
@@ -353,6 +353,24 @@ async def test_the_two_halves_agree_against_mongodb(core):
     uncleared = docs.for_caller({})
     assert await uncleared.find({"tenant": "t1"}) == []
     assert await uncleared.count({"tenant": "t1"}) == 0
+
+
+async def test_reachability_at_does_not_confuse_clearance_with_missing_evidence(core):
+    """The row survives and this caller is not cleared: REFUSED/not_cleared,
+    never UNKNOWN. A query-side clearance clause must not hide the evidence
+    before the historical classifier sees it."""
+    engine, db = core
+    docs = engine.model("classified", tenant="tenant").admitting(
+        Deadline(), revoked(), Clearance(order=ORDER))
+    await engine.ensure(search_wait_s=0)
+    row = (await db.classified.insert_one({
+        "tenant": "t1", "classification": "secret", "expire_at": None
+    })).inserted_id
+
+    verdict, reason = await docs.for_caller({
+        "clearance": "public"
+    }).reachability_at({"tenant": "t1", "_id": row}, when=now())
+    assert (verdict, reason) == (REFUSED, NOT_CLEARED)
 
 
 async def test_restricted_pushes_down_correctly_against_an_array_field(core):

@@ -62,6 +62,12 @@ nicer," and "a demo went well" are not triggers.
   truthful integration and the fastest way to measure installation friction.
   Vector search (Atlas + Voyage autoEmbed) is the second example, not the
   gate. Recorded here so the sequencing is not relitigated.
+- **The public identity is the handle.** `Engine.model(...).forgettable()` is
+  the first sentence and the on-ramp. The HTTP namespace, the MCP tools, the
+  `memory` trait and the MongoDB-specific pitch are frozen as later surfaces,
+  not the product, until a filled [`PILOT.md`](PILOT.md) report says otherwise.
+  The reframe that set this is "ranking is not permission"
+  ([`README.md`](README.md)); the frozen list is in [`ideas.md`](ideas.md).
 
 ## How an entry moves
 
