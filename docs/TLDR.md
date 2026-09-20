@@ -132,6 +132,19 @@ investigation. Those are contradictory requirements for `DELETE` and the
 same requirement for refusal: unreachable now, on disk until the
 deadline, and every revocation is a link in an append-only hash chain.
 
+**Whoever owns authorization.** You already run a policy engine, and your
+RAG pipeline is a hole in it: `$vectorSearch` returns hits that never passed
+through the query your policy compiles to. The fix is not to call
+`enforce()` once per candidate — that is a matcher call per hit and nothing
+pushed to the database. It is to let each layer do what it is shaped for.
+Casbin flattens the role graph, one call, subject-side; this compiles the
+result into `{"acl": {"$in": [...]}}` and enforces it again on the way out,
+where the vector path can be reached. Measured both ways against a live
+enforcer: four classic Casbin models decide identically and push fully into
+MongoDB, and a token budget is something `enforce(subject, object, action)`
+cannot express at all, because the same pair has two answers depending on
+what else is in the page. See [`policy-engines.md`](policy-engines.md).
+
 **Compliance / the auditor.** *Show me this document stopped being
 reachable at 14:02, and show me the record has not been edited since.*
 A counter cannot answer that and neither can a log line held by the

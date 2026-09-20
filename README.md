@@ -205,7 +205,15 @@ rule, but only if every read path, fallback and future caller supplies it.
 Everything else here is downstream of that — including the invariant it
 forces: **a rule that can express itself in a query or index filter but not per
 document is not a slower rule, it is a silent hole.** [`AHA.md`](docs/AHA.md)
-derives it in four steps, with the measurements.
+derives it in five steps, with the measurements.
+
+And the converse, which is what makes the egress check the *only* complete
+place rather than the safer of two: **some rules cannot have a query half at
+all.** A token budget refuses a document because of the other documents in the
+same read, so no index filter and no `enforce(subject, object, action)` can
+express it — the same pair has two answers.
+[`policy-engines.md`](docs/policy-engines.md) proves it against a real Casbin
+enforcer, and shows the division of labour that does work.
 
 ---
 
@@ -405,7 +413,7 @@ on-ramp and the pilot.
 | | |
 |---|---|
 | [`ADOPTING.md`](ADOPTING.md) | the first hour: one collection, one read path, under ten lines — and what you do *not* get by stopping there |
-| [`AHA.md`](docs/AHA.md) | the one idea, derived in four steps with the measurements. Everything else is downstream |
+| [`AHA.md`](docs/AHA.md) | the one idea, derived in five steps with the measurements. Everything else is downstream |
 | [`TLDR.md`](docs/TLDR.md) | the short versions, the pitches by room, and why the approach reads as strange |
 
 **The argument** — why this is a real problem, at length and executable.
@@ -414,8 +422,9 @@ on-ramp and the pilot.
 |---|---|
 | [`pain.md`](docs/pain.md) | eight failures whose signature is a plausible answer. Mostly real incidents from this repository |
 | [`blog.md`](docs/blog.md) | the long version: the three times the same bug came back, and the two bugs in the proof |
+| [`policy-engines.md`](docs/policy-engines.md) | the converse of the one idea: a retrieval rule no index filter and no policy engine can express, checked against a live Casbin enforcer |
 | [`drift/`](drift/README.md) | the counter-argument, executable — including the whole thesis ported to pgvector with no MongoDB in the file |
-| [`examples/`](examples/) | twelve runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
+| [`examples/`](examples/) | thirteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
 
 **What is wrong with it** — read this before trusting any of the above.
 

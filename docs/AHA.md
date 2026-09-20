@@ -6,7 +6,7 @@ Everything else in this repository is downstream of one sentence.
 > the way out. Any query or index clause is an optional optimisation and
 > must agree with it.**
 
-That is the whole thing. If you read nothing else here, read the four
+That is the whole thing. If you read nothing else here, read the five
 steps that make it true, because it is derived rather than asserted.
 
 ---
@@ -93,6 +93,38 @@ is cheap.
 Every operator in [`voyd/engine/policy.py`](../voyd/engine/policy.py) is a
 hand-written *pair* of implementations, checked against each other
 against a live server. Both halves or the operator does not exist.
+
+## Step 5 — and some rules have no query half at all
+
+Step 4 rules out a clause without an egress check. This is the converse,
+and it is the step that makes the argument closed rather than merely
+cautious.
+
+A **token budget** refuses a document because of the *other* documents in
+the same read. So:
+
+```
+'small' asked for on its own   ->  admitted
+'small' behind a 95-token row  ->  refused
+```
+
+Same document, same caller, same instant, two answers. An index filter
+cannot produce that — it decides each candidate independently, before the
+page exists. Neither can a policy engine: `enforce(subject, object,
+action)` is a pure function of two arguments, with nowhere to put *the
+rest of the page*, so for a fixed pair it returns one answer forever.
+Checked against a live `casbin.Enforcer` in
+[`tests/test_a_policy_engine_owns_the_subject_not_the_objects.py`](../tests/test_a_policy_engine_owns_the_subject_not_the_objects.py).
+
+Once one such rule exists, egress is not the safer of two enforcement
+points. It is the only one where every reason can live, and `clause()`
+returning `None` stops being a degradation: it is a rule accurately
+reporting it has no server-side form, enforced anyway, at the layer that
+was always authoritative.
+
+The long version, including what policy engines *are* good at and the
+division of labour that follows, is
+[`policy-engines.md`](policy-engines.md).
 
 ---
 
@@ -187,5 +219,6 @@ repository stops being a pile of features and becomes consequences:
   evidence the protocol is a primitive rather than a compliance feature
 
 Read [`TLDR.md`](TLDR.md) for the pitches, [`pain.md`](pain.md) for the
-failures, [`blog.md`](blog.md) for the long argument, and
+failures, [`policy-engines.md`](policy-engines.md) for the rule no index or
+policy engine can express, [`blog.md`](blog.md) for the long argument, and
 [`ISSUES.md`](ISSUES.md) for what is still wrong.

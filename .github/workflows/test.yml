@@ -82,6 +82,17 @@ jobs:
           assert ok, f'automatic encryption unavailable in CI: {why}'
           print('crypto:', why)"
 
+      - name: A real policy engine is actually installed
+        # `tests/test_a_policy_engine_owns_the_subject_not_the_objects.py`
+        # compares a compiled VOYD policy against a live `casbin.Enforcer`,
+        # and skips without one -- and a skip that is always a skip is a test
+        # nobody has ever run. This is the same argument as the pykmip step
+        # above: the claim is about the real thing, so CI must have it.
+        run: |
+          uv run --no-sync python -c "
+          import casbin
+          print('casbin available:', casbin.Enforcer.__name__)"
+
       - name: Lint
         # [tool.ruff] was configured for a long time and ruff was not a
         # declared dependency, and CI never ran it -- so the rules held only

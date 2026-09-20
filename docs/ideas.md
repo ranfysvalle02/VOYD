@@ -39,6 +39,21 @@ item 8). Listed here so the reasoning below is not mistaken for a queue:
 The items below keep their reasoning. This section is the freeze: the identity
 is the handle, and these wait on evidence that a stranger keeps it.
 
+**One thing that passed the freeze, and why.** On 20 September 2026 the policy
+compiler was measured against a live `casbin.Enforcer`: four classic Casbin
+models decide identically, per caller, comparing sets of admitted documents,
+and all four push fully into MongoDB -- which Casbin has no mechanism to do at
+all. The reverse direction found a boundary rather than a gap: a cumulative
+rule cannot be expressed by `enforce(subject, object, action)`, because the
+same pair has two answers depending on what else is in the page. That is
+written up in [`policy-engines.md`](policy-engines.md) and demonstrated in
+[`examples/policy_engine.py`](../examples/policy_engine.py).
+
+It got through the freeze because it is not surface: no module, no dependency
+(`casbin` is a dev dependency so the test runs in CI, and `voyd` must never
+import it -- "these are two layers" is the argument). It is one example, one
+test file, and a doc. Anything here that needs more than that is still frozen.
+
 ---
 
 ## The frontier

@@ -86,6 +86,14 @@ dev = [
     # managed service -- KMIP is the open standard the category runs on,
     # and unlike any hosted KMS it can be started in a subprocess.
     "pykmip>=0.10",
+    # A real policy engine, so `docs/policy-engines.md` argues against the
+    # thing rather than against a description of it. The claim there is a
+    # pair -- that a compiled policy decides what Casbin decides, and that a
+    # cumulative rule is something Casbin structurally cannot express -- and
+    # both halves are the kind that rot silently. Declared here, not in
+    # `[project.optional-dependencies]`: `voyd` must not import it, because
+    # "these are two layers" is the argument.
+    "casbin>=1.17",
     # The package ships `py.typed`, which tells every downstream type checker
     # that these annotations are load-bearing. That promise was made in the
     # wheel and checked nowhere -- the same failure the ruff comment above
