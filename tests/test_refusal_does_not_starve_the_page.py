@@ -189,11 +189,43 @@ async def test_recall_refills_against_a_real_index(core):
     # Still on disk, every one of them: the reaper is uninvolved.
     assert await db.memories.count_documents({}) == DOOMED + LIVE
 
+    # And wait for the index a *second* time. Updating 40 rows makes mongot
+    # re-sync them, and during that window the candidate set is short -- so
+    # the refill loop runs out of candidates rather than out of live rows,
+    # and this test fails claiming the page was starved by refusal when it
+    # was starved by an index that had not caught up. It is the same race
+    # `_wait_indexed` above covers for the initial write, and it went
+    # unnoticed because a quiet machine re-syncs faster than the assertion
+    # arrives. Four pytest workers is not a quiet machine.
+    await _wait_candidates(mem, DOOMED + LIVE)
+
     hits = await mem.recall(SCOPE, vec(1), limit=5)
     assert len(hits) == 5, (
         f"{DOOMED} forgotten rows outranked the live ones and the page came "
         f"back with {len(hits)} of 5")
     assert all(h["text"].startswith("live") for h in hits)
+
+
+async def _wait_candidates(mem, n: int):
+    """Wait until the *index* holds ``n`` rows, refused or not.
+
+    ``_wait_indexed`` counts what ``recall`` returns, which is the admitted
+    set -- useless once the rows under test are expired on purpose. This
+    counts candidates through the break-glass handle instead, which is the
+    number the refill loop actually depends on.
+    """
+    import asyncio
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 60
+    seen = 0
+    while loop.time() < deadline:
+        page = await mem.admission.including_refused().search(
+            vec(1), limit=200, filters={"scope": SCOPE})
+        seen = page.examined
+        if seen >= n:
+            return
+        await asyncio.sleep(0.5)
+    pytest.fail(f"mongot re-indexed only {seen} of {n} rows within 60s")
 
 
 async def _wait_indexed(mem, n: int):

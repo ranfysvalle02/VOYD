@@ -76,6 +76,15 @@ async def test_an_expired_memory_is_unreachable_while_its_row_is_still_on_disk(c
     (``count_documents`` says 2) at the moment ``recall()`` already refuses it.
     """
     mem, db = await _memory_with_two(core)
+    # Opt this database out of the reaper entirely. The window between the
+    # update and the assertion is milliseconds, which against a 60s sweep is
+    # about one run in fourteen thousand and was rightly left alone -- but
+    # another test in this suite turns ``ttlMonitorSleepSecs`` down to 1 for
+    # its own purposes, and under ``pytest -n`` that now runs *concurrently*
+    # with this one. Same window, sixty times the sweep rate, by design
+    # rather than by accident. The database is this test's own and is dropped
+    # afterwards, so this reaches nothing else.
+    await db.memories.drop_index("expire_at_1")
 
     await db.memories.update_one(
         {"text": DOOMED},

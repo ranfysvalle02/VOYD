@@ -208,13 +208,18 @@ async def test_a_past_deadline_is_accepted_and_simply_collects(client, app, scop
     """A zero/negative TTL is not an error -- it is a scope that is already
     over. It must not linger just because the reaper has not run yet.
 
-    This one races the reaper and is left alone on purpose. The row is expired
-    when written, so the TTL monitor may take it between the POST and the
-    ``find_one`` -- but that window measures 4.3ms against a 60s sweep, which
-    is about one run in fourteen thousand. Fixturing that is not robustness,
-    it is ceremony: the cost is a line of indirection on every reader forever,
-    against a failure nobody in this project will see.
+    The row is expired when written, so the TTL monitor may take it between
+    the POST and the ``find_one``. That window measures 4.3ms, which against
+    the default 60s sweep is about one run in fourteen thousand -- not worth
+    a line of indirection on every future reader.
+
+    It is worth one now. Another test turns ``ttlMonitorSleepSecs`` down to 1
+    for thirty seconds, and under ``pytest -n`` that overlaps this one on
+    purpose rather than by luck: the same window against a 1s sweep is about
+    one run in two hundred. So the index comes off this test's own database,
+    which is dropped afterwards.
     """
+    await app.store.db.voids.drop_index("expire_at_1")
     r = await client.post("/v1/voids", json={"ttl_seconds": -1},
                           headers=scope["headers"])
     assert r.status_code == 200

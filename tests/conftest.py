@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
+from datetime import timedelta
 
 import pytest
 
@@ -59,18 +61,80 @@ _available: bool | None = None
 # knowledge that no other benchmark is running actually lives.
 _TEST_DB_PREFIXES = ("voyd_test_", "core_")
 
-# Two footguns, both of which surface as a *different* test failing:
+# How long a test database may live before the sweep is willing to call it
+# abandoned. It has to exceed the longest a *single* test holds one, because
+# every fixture here creates a database, runs one test and drops it -- the
+# 60s mongot wait in test_an_expired_void_is_gone.py is the ceiling, and this
+# is an order of magnitude above it. It does not have to exceed the length of
+# a whole run: no database outlives the test that made it.
+_ABANDONED_AFTER = timedelta(minutes=15)
+
+
+def throwaway_db_name(prefix: str) -> str:
+    """A throwaway database name that says when it was created.
+
+    Not ``test_db_name``: two modules import this, and pytest collects any
+    imported callable whose name starts with ``test_`` as a test case. It
+    then errors on the fixtures it cannot supply, which reads as two broken
+    tests rather than one badly named helper.
+
+    The timestamp is not decoration. The sweep below has to distinguish a
+    database leaked by a run somebody killed last Tuesday from one a
+    *concurrent* run is using right now, and the name is the only thing it
+    can read without connecting to anything or writing a marker document.
+
+    Seconds since the epoch, from this process's clock. Two runners sharing
+    a mongod are on one host in every arrangement this repository supports
+    (docker-compose publishes it on localhost), so clock skew between them
+    is not a thing that happens. If that ever stops being true the failure
+    is a leaked database, not a deleted live one, because skew would have to
+    exceed fifteen minutes to matter.
+    """
+    return f"{prefix}{int(time.time())}_{uuid.uuid4().hex[:10]}"
+
+
+def _abandoned(name: str, *, now_: float) -> bool:
+    """Is this database certainly not in use by a live run?
+
+    Three cases, and the middle one is the whole reason this exists:
+
+    - no parseable timestamp: a name from before this scheme, so no live run
+      under the current one owns it. Drop.
+    - young: somebody is using it. **Leave it alone**, even though it looks
+      exactly like the kind of thing a sweep wants to tidy. This is the case
+      that made two concurrent pytest runs delete each other's data mid-test.
+    - old: no single test runs for fifteen minutes. Drop.
+    """
+    for prefix in _TEST_DB_PREFIXES:
+        if not name.startswith(prefix):
+            continue
+        stamp = name[len(prefix):].split("_")[0]
+        if not stamp.isdigit():
+            return True
+        return (now_ - int(stamp)) > _ABANDONED_AFTER.total_seconds()
+    return False
+
+# The suite runs in parallel -- ``uv run pytest -n 4``, about 70s against
+# about 300s -- and getting there was mostly removing the two footguns that
+# used to be listed here.
 #
-# 1. The sweep below drops every database matching the prefixes above, so two
-#    concurrent pytest runs delete each other's data mid-test.
-# 2. The reaper test in test_the_deadline_is_enforced_twice.py turns
-#    ``ttlMonitorSleepSecs`` down and restores it, and so do
-#    examples/forget.py and examples/why_this_belongs_in_the_database.py. It
-#    is a server-global, so running a demo during the suite makes each restore
-#    the other's temporary value.
+# 1. **Fixed.** The sweep below used to drop every database matching the
+#    prefixes above, so two concurrent runs deleted each other's data
+#    mid-test. It now reads the timestamp in the name and leaves young
+#    databases alone; see ``throwaway_db_name``.
+# 2. **Contained, not fixed.** ``test_the_deadline_is_enforced_twice.py``
+#    turns ``ttlMonitorSleepSecs`` down to 1 for about thirty seconds, and so
+#    do examples/forget.py and examples/why_this_belongs_in_the_database.py.
+#    It is a server-global and there is no per-database equivalent, so a
+#    *demo run during the suite* still makes each restore the other's
+#    temporary value.
 #
-# In both cases the symptom is an unrelated assertion about a row count. Run
-# the suite alone.
+#    Within one run it is harmless, and deliberately so rather than by luck:
+#    every test that needs an expired row to stay on disk drops the TTL index
+#    on its own database, so none of them depends on how fast the reaper is.
+#    That is three tests, each with the reasoning at the call site.
+#
+# So: parallel is fine, and a demo alongside the suite is still not.
 #
 # Note what is *not* on that list. ``indexed_namespace`` in
 # test_an_expired_void_is_gone.py also needs the reaper to leave a row alone,
@@ -118,12 +182,13 @@ async def _sweep():
 
     client = AsyncMongoClient(TEST_MONGO_URI)
     try:
+        now_ = time.time()
         names = await client.list_database_names()
-        stale = [n for n in names if n.startswith(_TEST_DB_PREFIXES)]
+        stale = [n for n in names if _abandoned(n, now_=now_)]
         for name in stale:
             await client.drop_database(name)
         if stale:
-            print(f"\nswept {len(stale)} leaked test database(s) from a "
+            print(f"\nswept {len(stale)} abandoned test database(s) from a "
                   f"previous interrupted run")
     except Exception as exc:  # never fail the suite over housekeeping
         print(f"\ncould not sweep leaked test databases: {exc}")
@@ -153,7 +218,7 @@ async def core():
     from voyd.engine import Engine
 
     client = AsyncMongoClient(TEST_MONGO_URI)
-    name = f"core_{uuid.uuid4().hex[:12]}"
+    name = throwaway_db_name("core_")
     engine = Engine(client, client[name])
     await engine.connect()
     try:
@@ -184,7 +249,7 @@ async def app():
     from voyd.web.vault import _passcode_limiter
 
     _passcode_limiter.clear()
-    db_name = f"voyd_test_{uuid.uuid4().hex[:12]}"
+    db_name = throwaway_db_name("voyd_test_")
     voyd = Voyd(
         domain="voyd.test",
         store=Store.Mongo(TEST_MONGO_URI, db_name=db_name),

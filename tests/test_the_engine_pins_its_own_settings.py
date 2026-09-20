@@ -12,12 +12,12 @@ layer's store to pass, the engine has leaked again.
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tests.conftest import TEST_MONGO_URI, _mongo_available
+from tests.conftest import throwaway_db_name
 from voyd.engine import Engine, aware, deadline, live, living, now
 from voyd.engine.time import UTC, bind
 
@@ -85,7 +85,10 @@ async def vanilla_engine():
 
     raw = AsyncMongoClient(TEST_MONGO_URI)
     # core_ so conftest's leaked-database sweep covers it.
-    name = f"core_{uuid.uuid4().hex[:10]}"
+    # Via the shared helper: the sweep in conftest reads the timestamp
+    # this puts in the name to tell an abandoned database from one a
+    # concurrent run is using.
+    name = throwaway_db_name("core_")
     handed = raw[name]
     engine = Engine(raw, handed)
     await engine.connect()

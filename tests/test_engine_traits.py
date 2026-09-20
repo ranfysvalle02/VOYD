@@ -7,11 +7,11 @@ extension point has failed. The contract is ``kind``, ``collection``,
 
 from __future__ import annotations
 
-import uuid
 
 import pytest
 
 from tests.conftest import TEST_MONGO_URI, _mongo_available
+from tests.conftest import throwaway_db_name
 from voyd.engine import Engine
 from voyd.engine.trait import collection_of, kind_of
 from voyd.engine.trait import Trait
@@ -74,7 +74,10 @@ async def app():
 
     raw = AsyncMongoClient(TEST_MONGO_URI)
     # core_ so conftest's leaked-database sweep covers it.
-    name = f"core_{uuid.uuid4().hex[:10]}"
+    # Via the shared helper: the sweep in conftest reads the timestamp
+    # this puts in the name to tell an abandoned database from one a
+    # concurrent run is using.
+    name = throwaway_db_name("core_")
     engine = Engine(raw, raw[name])
     await engine.connect()
     try:

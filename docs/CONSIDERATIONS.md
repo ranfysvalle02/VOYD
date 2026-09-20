@@ -186,6 +186,28 @@ The second fixture was removed and the number written into the test's
 docstring instead. Indirection on every future reader is a real cost; pay it
 for real failures.
 
+### The suite runs in parallel; keep it that way
+
+`uv run pytest -n 4` — about 70s against about 300s. Two things make that
+safe, and both are easy to undo by accident:
+
+**Throwaway databases carry their creation time.** The session sweep drops
+databases left by interrupted runs, and the only way it can tell those from
+the ones a *concurrent* run is using is the timestamp `throwaway_db_name`
+puts in the name. Build a test database name by hand and the next run to
+start will delete it out from under you, mid-test, and the symptom will be an
+unrelated assertion about a row count.
+
+**No test depends on how fast the reaper is.** One test turns
+`ttlMonitorSleepSecs` down to 1 for about thirty seconds, which under `-n`
+overlaps everything else by design. Three tests need an expired row to stay
+on disk, and each drops the TTL index on its own database rather than
+assuming a 60s sweep. If you add a fourth, do the same — the window you are
+betting against is 60× smaller than the arithmetic in a serial run suggests.
+
+A demo script run *alongside* the suite is still not safe: `setParameter` is
+a server-global with no per-database equivalent.
+
 ### A skip that is always a skip is a test nobody has ever run
 
 Optional dependencies that gate real assertions are declared as dev
