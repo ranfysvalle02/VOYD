@@ -21,7 +21,7 @@ import asyncio
 
 import pytest
 
-from voyd.engine import (DERIVED, OWNED, SEALED, Deadline, Perimeter,
+from voyd.engine import (DERIVED, INTERNAL, OWNED, SEALED, Deadline, Perimeter,
                          quarantined, revoked)
 
 
@@ -250,7 +250,12 @@ def test_describe_enumerates_the_perimeter_with_its_verbs():
     assert described["sinks"] == {OWNED: ["redis"],
                                   SEALED: ["pinecone-mirror"],
                                   DERIVED: ["slack-#incidents"]}
-    assert set(described["claims"]) == {SEALED, OWNED, DERIVED}
+    # Every class carries a verb, including the one no sink is registered
+    # for here. A deployment reading this is choosing between them, and a
+    # class that only appears once somebody already used it is one nobody
+    # discovers in time.
+    assert set(described["claims"]) == {SEALED, OWNED, DERIVED, INTERNAL}
+    assert described["claims"][INTERNAL].startswith("purged by overwriting")
 
 
 # ---- 3. what the model was allowed to see ------------------------------

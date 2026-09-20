@@ -30,7 +30,7 @@ class VoydSettings(BaseSettings):
     db: str = "voyd"
 
     voyage_api_key: str = "vy-dev-key"
-    voyage_model: str = "voyage-3"
+    voyage_model: str = "voyage-4"
 
     require_passcode: bool = False
 

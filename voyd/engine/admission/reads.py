@@ -8,7 +8,7 @@ the cheap half -- the rule pushed into the collection query -- but a
 This module is the *only* one in the package permitted to call the engine's
 search primitive, and ``tests/test_no_module_reaches_past_the_handle.py``
 enforces that by name. Before the split that exemption covered a
-2,393-line file; now it covers the 280 lines that legitimately need it.
+2,393-line file; now it names only the capability whose job is the read path.
 """
 
 from __future__ import annotations
@@ -17,10 +17,11 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from ..errors import require_tenant
 from .reasons import REACHABLE, REFUSED, UNKNOWN
 from .receipts import Page
 from .spec import why_refused
-from ..time import aware
+from ..time import aware, now
 
 log = logging.getLogger("engine.admission")
 
@@ -102,17 +103,19 @@ class ReadPath:
         doubled blindly -- at a 90% refusal rate, doubling takes four rounds
         to find what one round of arithmetic gets in one.
 
-        Three things end the loop, and all three are honest:
+        Four things end the loop, and all four are honest:
 
         1. the page is full;
         2. ``fetch`` returned fewer rows than asked for -- there is nothing
            further down the ranking. This also covers the search tier's own
            ceiling (``MAX_LIMIT``): a request past it comes back short, which
            is the truth from where this sits, since no more are reachable;
-        3. ``rounds`` is spent. A scope where *everything* is forgotten must
+        3. a cumulative budget is spent. The page is short but complete:
+           lower-ranked candidates have no room, so another fetch cannot help;
+        4. ``rounds`` is spent. A scope where *everything* is forgotten must
            not turn one query into an unbounded sequence of them.
 
-        Only case 3 sets ``page.starved``, and the distinction is the
+        Only case 4 sets ``page.starved``, and the distinction is the
         interesting part. Case 2 can also leave the page short, and that
         short page is *complete*: the candidates are exhausted, so nothing is
         being withheld and there is nothing to go back for, however many
@@ -127,6 +130,11 @@ class ReadPath:
         query this engine will issue. A deployment that needs to see past
         that ceiling needs a bigger ceiling, not a different flag.
         """
+        self._begin_read()
+        # One instant for the whole page, frozen before the first fetch: every
+        # hit is admitted against the same "now", so a receipt or a recorded
+        # use can commit to a single evaluation time rather than a smear.
+        evaluated_at = aware(when) if when is not None else (self._as_of or now())
         want = max(1, int(limit))
         rounds = max(1, int(rounds))
         asked = want * 2          # the cheap first guess, unchanged
@@ -135,19 +143,28 @@ class ReadPath:
         examined = 0
         exhausted = False
 
+        tab = None
         for attempt in range(rounds):
             candidates = list(await fetch(asked))
             examined = len(candidates)
-            kept, tally = self._classify(candidates, when=when)
+            kept, tally, tab, redacted = self._classify(
+                candidates, when=evaluated_at, max_kept=want)
             # Fewer rows than asked for: there is nothing further down the
             # ranking, so whatever the page holds is the whole answer.
             exhausted = examined < asked
-            if len(kept) >= want or exhausted:
+            # A spent budget is a fourth honest way to be done: the page is
+            # short because the token ceiling cut the ranking, not because a
+            # round ran out. Refilling would fetch lower-ranked candidates the
+            # budget has no room for anyway, so stop -- and this is complete,
+            # not starved.
+            budget_done = tab is not None and tab.exhausted
+            if len(kept) >= want or exhausted or budget_done:
                 break
             if attempt + 1 < rounds:
                 asked = self._next_ask(asked, want, kept=len(kept),
                                        examined=examined)
 
+        budget_done = tab is not None and tab.exhausted
         hits = kept[:want]
         if self.seals:
             # Decrypted after the page is chosen, so a document whose key is
@@ -158,8 +175,12 @@ class ReadPath:
             for reason, n in sealed_tally.items():
                 tally[reason] = tally.get(reason, 0) + n
         self.receipts_log.record_many(tally)
-        page = Page(hits, refused=tally, examined=examined,
-                    starved=len(kept) < want and not exhausted)
+        page = Page(hits, refused=tally, examined=examined, redacted=redacted,
+                    spent=tab.spent if tab is not None else 0,
+                    starved=len(kept) < want and not exhausted and not budget_done,
+                    evaluated_at=evaluated_at,
+                    policy_revision=self.spec.policy_revision,
+                    snapshot_complete=True)
         if page.starved:
             # Worth a line at WARNING: it means a caller was told less than
             # the truth, which no amount of correct filtering makes fine. And
@@ -191,32 +212,88 @@ class ReadPath:
     # ---- reads: refusal is the default ---------------------------------
 
     async def find_one(self, filters: dict | None = None, *args, **kw):
+        self._begin_read()
         doc = await self.db[self.collection].find_one(self._query(filters),
                                                       *args, **kw)
-        admitted = self._admit(doc)
-        if admitted is None or not self.seals:
-            return admitted
+        # A singleton is still prompt content. It gets its own tab rather than
+        # bypassing a Budget merely because no page object is involved.
+        tab = self._open_tab()
+        admitted = self._admit(doc, tab=tab)
+        if tab is not None and tab.exhausted:
+            log.warning(
+                "find_one on %s refused by budget: %s spent of %s",
+                self.collection, tab.spent, tab.limit)
+        if admitted is None:
+            return None
+        if not self.seals:
+            # One document, so the redaction count has nowhere to ride; the
+            # reasons are already in ``receipts()``. Stripping here is not
+            # optional -- a private mark on a returned document is a field a
+            # caller would persist back.
+            cleaned, _ = self._harvest([admitted])
+            return cleaned[0]
         kept, tally = await self._unsealed([admitted])
         self.receipts_log.record_many(tally)
-        return kept[0] if kept else None
+        if not kept:
+            return None
+        cleaned, _ = self._harvest(kept)
+        return cleaned[0]
 
     async def find(self, filters: dict | None = None, *args,
-                   limit: int = 0, sort: Any = None, **kw) -> list[dict]:
+                   limit: int = 0, sort: Any = None, **kw) -> Page:
+        self._begin_read()
+        # Frozen once, threaded into every admission below, and stamped on the
+        # page so a use recorded from this find commits to one instant. It is
+        # a ``Page`` (a ``list`` subclass) for that reason -- callers that
+        # treat it as a list are unaffected.
+        evaluated_at = self._as_of or now()
+        tab = self._open_tab()
+        if tab is not None and sort is None:
+            raise ValueError(
+                f"{self.collection}: a cumulative rule needs a deterministic "
+                "find order; pass sort=(field, direction), or use search() "
+                "whose relevance ranking already defines the prefix")
         cur = self.db[self.collection].find(self._query(filters), *args, **kw)
         if sort is not None:
             cur = cur.sort(*sort) if isinstance(sort, tuple) else cur.sort(sort)
-        if limit:
-            cur = cur.limit(limit)
-        admitted = [d async for d in cur if self._admit(d) is not None]
-        if not self.seals:
-            return admitted
-        # Admitted first, then decrypted. A revoked or expired document is
-        # refused by its mark without anybody paying for a key lookup, and
-        # only the survivors reach the KMS -- which matters because the
-        # refusal rate on a live scope is most of the page.
-        kept, tally = await self._unsealed(admitted)
-        self.receipts_log.record_many(tally)
-        return kept
+        # A budget applies here too -- special-casing which read enforces a
+        # rule is how two enforcement points drift. A budget-truncated find is
+        # short; the WARNING and the ``over_budget`` count in ``receipts()``
+        # are the visibility, and ``search``/``saturate`` carry ``spent`` in
+        # band for a caller who needs it there.
+        admitted: list[dict] = []
+        async for doc in cur:
+            kept = self._admit(doc, when=evaluated_at, tab=tab)
+            if kept is not None:
+                admitted.append(kept)
+                # ``limit`` is a limit on the answer, not on raw candidates.
+                # Applying it in MongoDB first lets one refused candidate
+                # turn a live next row into an empty page.
+                if limit and len(admitted) >= limit:
+                    break
+            if tab is not None and tab.exhausted:
+                break
+        if tab is not None and tab.exhausted:
+            log.warning(
+                "find on %s truncated by budget: %d admitted, ~%s spent of %s",
+                self.collection, len(admitted), tab.spent, tab.limit)
+        if self.seals:
+            # Admitted first, then decrypted. A revoked or expired document is
+            # refused by its mark without anybody paying for a key lookup, and
+            # only the survivors reach the KMS -- which matters because the
+            # refusal rate on a live scope is most of the page.
+            admitted, tally = await self._unsealed(admitted)
+            self.receipts_log.record_many(tally)
+        # Redactions are taken off here for the same reason ``saturate``
+        # takes them off: a document that came back shorter than it is on
+        # disk must not be able to look like a whole one. The reasons are
+        # already in ``receipts()`` -- ``_admit`` recorded them as it went,
+        # because this path passes no tally -- so this only rescues the
+        # count that has to ride on the page.
+        admitted, redacted = self._harvest(admitted)
+        return Page(admitted, evaluated_at=evaluated_at, redacted=redacted,
+                    policy_revision=self.spec.policy_revision,
+                    snapshot_complete=True)
 
     def match(self, filters: dict | None = None) -> dict:
         """The refusing filter, for a pipeline that cannot use ``find``.
@@ -231,19 +308,38 @@ class ReadPath:
         the right tool for counting and grouping, where there is no document
         to hand back.
         """
+        if self._break_glass:
+            raise RuntimeError(
+                f"{self.collection}: including_refused().match() cannot be "
+                "gated per pipeline execution; use find/search/reachable so "
+                "every break-glass read is re-authorised and counted")
+        self._begin_read()
         return self._query(filters)
 
     async def count(self, filters: dict | None = None) -> int:
-        """How many facts are *reachable*, which is the number a caller means.
+        """How many facts satisfy the document rules, before a page budget.
 
-        Counted with the same query the reads use, so a count and a find
-        cannot disagree about what exists.
+        Counted with the same pushed-down clauses the reads use, so deadlines,
+        revocations, clearance and compiled policy agree with ``find``. A
+        cumulative ``Budget`` deliberately does not: count has no ranking, no
+        page and no running tab, so "how many fit" is undefined until a read
+        orders the documents. This reports how many *could be considered*;
+        ``Page.spent`` reports what the ordered read reserved for its selected
+        prefix.
         """
+        self._begin_read()
         return await self.db[self.collection].count_documents(
             self._query(filters))
 
     async def exists(self, filters: dict | None = None) -> bool:
-        return await self.find_one(filters) is not None
+        """Whether any document satisfies the policy rules.
+
+        Like ``count``, this is a cardinality question with no ordered prompt
+        page, so a cumulative budget does not apply. ``find_one`` is a content
+        read and does apply it; keeping the two paths separate makes that
+        distinction explicit rather than accidental.
+        """
+        return await self.count(filters) > 0
 
     # ---- what was reachable then ---------------------------------------
 
@@ -268,8 +364,15 @@ class ReadPath:
         ``unknown`` and every caller would default it to the flattering
         one.
         """
+        self._begin_read()
         when = aware(when)
-        doc = await self.including_refused().find_one(filters)
+        # Fetch by boundary only, not through an admission query. The point of
+        # this method is to classify a surviving row at an instant; letting a
+        # caller-aware clause hide it first turns "present but not cleared"
+        # into UNKNOWN ("no evidence survives"), which is both false and the
+        # flattering answer. The tenant boundary remains non-negotiable.
+        doc = await self.db[self.collection].find_one(
+            require_tenant(self.collection, self.tenant, filters))
         if doc is None:
             return UNKNOWN, ("no row survives, so nothing here can say. It "
                              "may have been reachable and later erased")

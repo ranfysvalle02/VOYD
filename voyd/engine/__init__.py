@@ -61,10 +61,12 @@ collections, fields and filters, never about namespaces or voids.
 from __future__ import annotations
 
 from .authority import AuthorityRequired, Anyone, Grants, NotAuthorised
+from .assumptions import WORLD, Assumption, report_assumptions
 from .capabilities import Capabilities, detect
 from .errors import (
     BlastRadius,
     CallerRequired,
+    ContextIncomplete,
     DerivationBroken,
     FilterInvalid,
     Irreversible,
@@ -74,12 +76,15 @@ from .errors import (
     UnboundedForgetting,
     UnknownReason,
 )
+from .context import (DIRECT, SOURCE, ContextIndex,
+                      ContextIndexSpec, ContextUse)
 from .expiry import Expiry, ExpirySpec
-from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED,
-                        QUARANTINED,
-                        REACHABLE, REFUSED, REVOKED, UNKNOWN, UNREADABLE,
-                        UNRECOVERABLE, WRONG_MODEL,
-                        Clearance, Deadline, EmbeddedWith, Page, Restricted,
+from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED, UNNAMED,
+                        OVER_BUDGET, QUARANTINED,
+                        REACHABLE, REFUSED, REVOKED, UNCOSTED, UNKNOWN,
+                        UNREADABLE, UNRECOVERABLE, WRONG_MODEL,
+                        Budget, Clearance, Deadline, EmbeddedWith, Page,
+                         Restricted,
                          Admission, AdmissionSpec, Marked, Unrecoverable,
                          quarantined, revoked, why_refused)
 from .jobs import JobQueue, PermanentFailure
@@ -88,7 +93,8 @@ from .keyring import Keyring, KeyringSpec, Queryable, Sealed
 from .ledger import GENESIS, Ledger, LedgerSpec, canonical, digest
 from .memory import Memory, MemorySpec
 from .policy import PolicyInvalid, compile_policy
-from .perimeter import (DERIVED, OWNED, SEALED, Perimeter, PerimeterLog,
+from .perimeter import (DERIVED, INTERNAL, OWNED, SEALED, Perimeter,
+                        PerimeterLog, derived_index,
                         sink)
 from .model import Model
 from .search import SearchEngine, SearchSpec, cosine
@@ -189,6 +195,8 @@ class Engine:
                 coll for coll, trait in items.items() if await trait.ensure()
             ]
         report["ttl"] = await self.expiry.ensure()
+        self._refuse_sealed_autoembed()
+        self._refuse_ungoverned_nesting()
         # After the traits: a sealing validator is applied to a collection
         # the keyring's own ensure() may have just created, and before
         # search, which is the step that waits.
@@ -258,6 +266,9 @@ class Engine:
                    mark_field: str = "forgotten",
                    tenant: str | None = None,
                    lineage_field: str | None = None,
+                   policy_revision: str | None = None,
+                   subjects: str | None = None,
+                   subject_key: str | None = None,
                    rules: tuple = ()) -> Admission:
         """A read handle for ``collection`` that refuses forgotten facts.
 
@@ -276,6 +287,8 @@ class Engine:
         spec = AdmissionSpec(collection, at_field=at_field,
                               mark_field=mark_field, tenant=tenant,
                               lineage_field=lineage_field,
+                              policy_revision=policy_revision,
+                              subjects=subjects, subject_key=subject_key,
                               rules=tuple(rules or ())).with_defaults()
         existing = self._installed.get("admission", {}).get(collection)
         if existing is not None:
@@ -289,6 +302,32 @@ class Engine:
                     f"decide whether the boundary is enforced at all")
             return existing
         return self.use(Admission(self.db, spec, engine=self))
+
+    def context_index(self, spec: ContextIndexSpec, *,
+                      best_effort: bool = False) -> ContextIndex:
+        """An index of which consequences were made out of which facts.
+
+        Idempotent per collection, for the reason ``admission()`` and
+        ``ledger()`` are: two handles on one index is two sets of counters,
+        and the one that stops being read is the one reporting how many
+        uses were dropped.
+
+        Attach it to a handle with ``Admission.contextualized_by()``. It is
+        not installed automatically and ``ContextIndexSpec`` has no default
+        retention -- keeping a record of every use is a retention decision
+        and this package does not make it quietly.
+        """
+        existing = self._installed.get("context", {}).get(spec.collection)
+        if existing is not None:
+            if existing.spec != spec:
+                raise ValueError(
+                    f"{spec.collection} is already indexing uses as "
+                    f"{existing.spec.describe()}; refusing to redeclare it "
+                    f"as {spec.describe()}. Two retentions for one "
+                    f"collection is how the shorter one silently stops "
+                    f"being the policy")
+            return existing
+        return self.use(ContextIndex(self.db, spec, best_effort=best_effort))
 
     def ledger(self, collection: str = "refusals", *,
                tenant: str | None = None,
@@ -309,6 +348,110 @@ class Engine:
             return existing
         return self.use(Ledger(self.db, LedgerSpec(collection, tenant=tenant),
                                key=key))
+
+    def _refuse_ungoverned_nesting(self) -> None:
+        """A nested vector index on a collection that never named its subjects.
+
+        Nested embeddings rank a **child** and return its **parent**, which
+        quietly separates two things this package had always been able to
+        treat as one: the unit of relevance and the unit of refusal. The
+        boundary is handed the parent. A refused chapter inside an admitted
+        book therefore reaches the prompt, is counted nowhere, and --
+        the part that makes this worth failing a boot over -- is attested as
+        *nothing was refused* by ``receipt_for``.
+
+        Declaring ``subjects`` is what makes the boundary able to see
+        children. Without it, indexing a nested path is asking for
+        parent-granularity retrieval over child-granularity data, on a
+        collection whose whole purpose is deciding what may reach a prompt.
+        There is no safe default available here: admitting the parent whole
+        is the bug, and withholding it for one child is not this library's
+        choice to make silently. So it refuses, and names both declarations.
+
+        Note it refuses at ``ensure()`` rather than on the read. By then the
+        index is built and the erasure has already been answered wrongly
+        once, and this is a *declaration* mistake -- two specs that do not
+        agree about what a fact is -- which is exactly the class of thing
+        that belongs at boot.
+        """
+        governed = self._installed.get("admission", {})
+        for spec in self.search_engine.specs.values():
+            paths = [p for p in (spec.vector_path, *spec.text_paths) if p]
+            nested = [p for p in paths if "." in p]
+            if not nested:
+                continue
+            handle = governed.get(spec.collection)
+            if handle is None:
+                continue          # no admission policy: nothing to disagree
+            subjects = handle.spec.subjects
+            if subjects is None:
+                raise ValueError(
+                    f"{spec.collection}: indexes a nested path "
+                    f"({', '.join(nested)}) and refuses on read, but never "
+                    f"declared subjects=. Nested retrieval ranks a child and "
+                    f"returns its parent, so the boundary would be handed "
+                    f"the parent and a refused child would reach the prompt "
+                    f"inside it -- counted nowhere, and attested as 'nothing "
+                    f"was refused'. Declare subjects='<array>' so the "
+                    f"boundary can see them, or index a top-level path")
+            wrong = [p for p in nested if p.split(".")[0] != subjects]
+            if wrong:
+                raise ValueError(
+                    f"{spec.collection}: declares subjects={subjects!r} but "
+                    f"indexes {', '.join(wrong)}. Retrieval would rank "
+                    f"elements of one array while refusal governed another, "
+                    f"and the two would disagree without either being wrong "
+                    f"on its own terms")
+
+    def _refuse_sealed_autoembed(self) -> None:
+        """A field cannot be both hidden from the server and embedded by it.
+
+        ``sealed()`` says: this field is ciphertext at rest and the server
+        never holds the plaintext. ``auto_embed`` says: the server reads this
+        field, sends it to an embedding endpoint over the network, and stores
+        a vector derived from it. Declared together on the same path, those
+        are not a trade-off, they are a contradiction, and both of its
+        resolutions are bad:
+
+        - mongot reads the CSFLE ``Binary`` and embeds *ciphertext*, so every
+          vector is noise and retrieval silently returns nothing useful. The
+          failure looks like bad relevance, which is the hardest kind to
+          attribute.
+        - or the field is not really sealed, and plaintext that a deployment
+          chose this library to protect is shipped to a third-party endpoint
+          -- a custody event that ``Perimeter.describe()`` cannot print,
+          because the embedding provider was never registered as a holder.
+
+        There is no third outcome, so this refuses at declaration rather than
+        picking one. It is the same argument ``derive()`` makes about a
+        refused parent: every available answer is wrong, so choose none and
+        say why.
+
+        Note what is *not* refused -- sealing a collection that auto-embeds a
+        **different** field. Sealing the notes and embedding the title is a
+        legitimate, if lossy, design, and this has no business forbidding it.
+        """
+        sealed: dict[str, set[str]] = {}
+        for keyring in self._installed.get("keyring", {}).values():
+            for collection, mode in getattr(keyring.spec, "protect", {}).items():
+                sealed.setdefault(collection, set()).update(
+                    getattr(mode, "fields", ()) or ())
+        for spec in self.search_engine.specs.values():
+            if not (spec.auto_embed and spec.text_paths):
+                continue
+            path = spec.text_paths[0]
+            if path in sealed.get(spec.collection, ()):
+                raise ValueError(
+                    f"{spec.collection}: field {path!r} is sealed and also "
+                    f"declared auto_embed={spec.auto_embed!r}. The server "
+                    f"cannot both be denied this field and be asked to embed "
+                    f"it: it would either embed the ciphertext -- vectors of "
+                    f"noise, and a relevance failure nobody attributes -- or "
+                    f"be handed the plaintext this deployment sealed it "
+                    f"against, and ship it to an embedding endpoint no "
+                    f"perimeter has registered. Embed a different field, or "
+                    f"compute the vector in this process and drop "
+                    f"auto_embed")
 
     # ---- introspection -------------------------------------------------
 
@@ -351,7 +494,18 @@ class Engine:
             # `unreadable` at all, is a question worth asking.
             "admission": [t.receipts()
                            for t in self._installed.get("admission", {}).values()],
+            # Uses recorded, and -- the number worth an alert -- uses that
+            # happened and were not. A best-effort index dropping records is
+            # an erasure worklist that will be quietly short.
+            "context": [t.describe()
+                        for t in self._installed.get("context", {}).values()],
             "change_streams": self.capabilities.change_streams,
+            # What this engine believes about software it does not ship, and
+            # how long ago anybody checked. Reported even when nothing is
+            # stale: a deployment whose assumptions are fresh and one whose
+            # assumptions have never been looked at are indistinguishable
+            # unless the absence is printed.
+            "assumptions": report_assumptions(),
             "time": {"tz": "UTC", "aware": True},
             "declared": {
                 "models": sorted(self._models),
@@ -387,16 +541,19 @@ __all__ = [
 
     # ---- reasons a fact may not reach a prompt: the rules you construct ----
     "Deadline", "Marked", "revoked", "quarantined",
-    "Clearance", "Restricted", "EmbeddedWith", "Unrecoverable",
+    "Clearance", "Restricted", "EmbeddedWith", "Unrecoverable", "Budget",
     "compile_policy",
 
     # ---- and the reasons you read back out of receipts() ----
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
     "NOT_CLEARED", "UNRECOVERABLE", "KEY_UNAVAILABLE", "LIFTED",
-    "REACHABLE", "REFUSED", "UNKNOWN",
+    "REACHABLE", "REFUSED", "UNKNOWN", "OVER_BUDGET", "UNCOSTED", "UNNAMED",
 
     # ---- proof ----
     "Ledger", "LedgerSpec", "GENESIS", "canonical", "digest",
+
+    # ---- what was said because of a fact ----
+    "ContextIndex", "ContextIndexSpec", "ContextUse", "DIRECT", "SOURCE",
 
     # ---- encryption, and who holds the key that wraps the keys ----
     "Keyring", "KeyringSpec", "Sealed", "Queryable",
@@ -406,11 +563,13 @@ __all__ = [
     "Grants", "Anyone",
 
     # ---- who else holds a copy ----
-    "Perimeter", "PerimeterLog", "sink", "SEALED", "OWNED", "DERIVED",
+    "Perimeter", "PerimeterLog", "sink", "derived_index",
+    "SEALED", "OWNED", "DERIVED", "INTERNAL",
 
     # ---- what you catch ----
     "ScopeError", "ScopeRequired", "ScopeInvalid", "FilterInvalid",
     "CallerRequired", "Irreversible", "UnknownReason", "BlastRadius",
+    "ContextIncomplete",
     "UnboundedForgetting", "DerivationBroken", "PolicyInvalid",
     "NotAuthorised", "AuthorityRequired",
 ]

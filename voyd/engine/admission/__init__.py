@@ -1,7 +1,9 @@
 """Admission as a retrieval guarantee, not a storage event.
 
-Every database can delete. None of them can *refuse*. That distinction is the
-whole point of this module:
+Ranking is not permission. An index decides what is *relevant*; nothing in the
+ordinary read path is asked whether a fact may *reach a prompt*. This module
+adds that second, missing check -- and the distinction it turns on is deletion
+versus refusal:
 
     deletion  is a storage operation -- eventually consistent, by nature.
               A TTL monitor sweeps about once a minute. An object lifecycle
@@ -97,10 +99,12 @@ from .attestation import _digest_of  # noqa: F401
 from .core import AdmissionCore  # noqa: F401
 from .handle import Admission
 from .reasons import (DEADLINE, KEY_UNAVAILABLE, LIFTED, LIFT_BATCH,
-                      NOT_CLEARED, QUARANTINED, REACHABLE, REFUSED, REVOKED,
-                      UNKNOWN, UNREADABLE, UNRECOVERABLE, WRONG_MODEL)
+                      NOT_CLEARED, OVER_BUDGET, QUARANTINED, REACHABLE,
+                      REFUSED, REVOKED, UNCOSTED, UNKNOWN, UNNAMED,
+                      UNREADABLE, UNRECOVERABLE, WRONG_MODEL)
 from .receipts import Page, Receipts
-from .rules import (Clearance, Deadline, EmbeddedWith, Marked, Restricted,
+from .rules import (Budget, Clearance, Deadline, EmbeddedWith, Marked,
+                    Restricted,
                     Rule,  # noqa: F401
                     Unrecoverable, quarantined, revoked)
 from .spec import AdmissionSpec, why_refused
@@ -108,8 +112,9 @@ from .spec import AdmissionSpec, why_refused
 __all__ = [
     "Admission", "AdmissionSpec", "Page", "Receipts", "why_refused",
     "Deadline", "Marked", "Unrecoverable", "EmbeddedWith", "Clearance",
-    "Restricted", "revoked", "quarantined",
+    "Restricted", "Budget", "revoked", "quarantined",
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
     "NOT_CLEARED", "UNRECOVERABLE", "KEY_UNAVAILABLE", "REACHABLE",
-    "REFUSED", "UNKNOWN", "LIFTED", "LIFT_BATCH",
+    "REFUSED", "UNKNOWN", "LIFTED", "LIFT_BATCH", "OVER_BUDGET", "UNCOSTED",
+    "UNNAMED",
 ]

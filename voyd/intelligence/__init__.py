@@ -10,7 +10,7 @@ class Intelligence:
     """Public factory. ``Intelligence.Voyage(...)`` -> :class:`VoyageIntelligence`."""
 
     @staticmethod
-    def Voyage(api_key: str, model: str = "voyage-3",
+    def Voyage(api_key: str, model: str = "voyage-4",
                dimensions: int = 1024) -> VoyageIntelligence:
         return VoyageIntelligence(
             VoyageConfig(api_key=api_key, model=model, dimensions=dimensions)

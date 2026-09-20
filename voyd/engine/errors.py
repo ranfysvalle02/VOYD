@@ -327,3 +327,40 @@ class DerivationBroken(ValueError):
             f"erasure gets defeated by a summary -- if the source may not "
             f"reach a prompt, neither may anything built on it"
         )
+
+
+class ContextIncomplete(ValueError):
+    """A use was about to be recorded that could not be stood behind.
+
+    ``record_use`` writes the record an incident review reads a year later:
+    *this answer was produced from these facts, under this policy, at this
+    instant.* Every part of that sentence has to be true, and the parts are
+    not independently optional -- a record missing the instant does not say
+    less than a complete one, it says something that cannot be checked, in a
+    collection whose entire purpose is to be checkable.
+
+    The tempting alternative is to fill the gaps: stamp ``now()`` when the
+    page cannot say when it was read, write ``"unknown"`` where a policy
+    revision should be. Both produce a record that *looks* like evidence and
+    exonerates a context nobody ever verified, which is worse than the
+    absence it replaces. So this refuses, the same way ``derive()`` refuses
+    a parent it should never have been handed: every available answer is
+    wrong, so it picks none.
+
+    ``missing`` names what was absent, all of it at once, because fixing
+    these one raise at a time is three deploys.
+    """
+
+    def __init__(self, collection: str, missing: tuple,
+                 remedy: str | None = None):
+        self.collection = collection
+        self.missing = tuple(missing)
+        super().__init__(
+            f"{collection}: cannot record this use without "
+            f"{', '.join(self.missing)}. "
+            + (remedy or
+               "A page from this handle carries the instant it was admitted "
+               "at and the policy revision it was admitted under; a bare "
+               "list carries neither. Read through the handle, declare "
+               "policy_revision on the model, and name the consequence")
+        )

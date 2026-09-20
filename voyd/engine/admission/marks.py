@@ -118,7 +118,7 @@ class MarkWrites:
         every unbypassable rule, so widening the write here does not widen
         who may perform it.
         """
-        query = self.including_refused()._query(filters)
+        query = self._unfiltered()._query(filters)
         clause = self._marked(rule, present)
         query["$and"] = [*query.pop("$and", []), clause]
         return query
@@ -204,6 +204,94 @@ class MarkWrites:
                                  erase_after=erase_after, expect=expect,
                                  everything=everything)
         return n
+
+    async def revoke_subject(self, filters: dict | None = None, *,
+                             key, reason: str,
+                             expect: int | None = None) -> int:
+        """Erase one embedded subject, by name, inside its parent.
+
+        The verb ``subjects`` was missing. Declaring the array made refusal
+        able to *see* embedded subjects; this makes one addressable, which is
+        what an erasure request actually needs -- "forget chapter 3" and
+        "forget the book" are different instructions and only the second one
+        had a way to be expressed.
+
+        ``key`` is the value of the declared ``subject_key`` on the element,
+        not its position. Position was the other candidate and it is wrong
+        the first time anybody removes an element from the array: every later
+        index shifts, silently, and the erasure lands on somebody else's
+        paragraph. An identifier that moves with the data is the only one
+        safe to put in an audit record.
+
+        The mark written is the same ``revoked`` mark the document-level verb
+        writes, in the same shape, so the read path needs no second rule --
+        ``_redact`` already asks the ordinary rules of each element. One
+        vocabulary, two granularities.
+
+        **The deadline is not moved, and that is a deliberate asymmetry.**
+        Revoking a document pulls its ``expire_at`` earlier so the reaper
+        takes the bytes. An embedded subject has no deadline of its own that
+        the reaper could act on -- TTL collects documents, not array elements
+        -- so there is nothing here to pull. The element stays on disk,
+        refused on every read, until its parent's own deadline arrives. Say
+        so rather than implying the bytes are gone: this is unreachability,
+        and the erasure is the parent's.
+
+        Returns the number of *parent documents* modified, because that is
+        what the database reports and inventing a per-element count from it
+        would be a number nobody could verify.
+        """
+        field = self._subject_field("revoke_subject")
+        rule = self._rule_for(REVOKED)
+        self._require_caller()
+        self._authorise(REVOKE)
+        # The audit query: the parent must be findable even if it is itself
+        # already refused. Revoking a chapter inside an expired book is a
+        # legitimate instruction, and a query that hid the parent would
+        # report "nothing matched" for a document that is plainly there.
+        query = self._unfiltered()._query(filters)
+        await self._guard("revoke_subject", filters, query,
+                          expect=expect, everything=False)
+        stamp = now()
+        path = f"{self.spec.subjects}.$[element].{rule.field}"
+        # A plain update, not a pipeline, because ``arrayFilters`` and
+        # pipeline-style updates are mutually exclusive in MongoDB. That also
+        # removes the need for the ``$literal`` wrapper ``impose`` carries: a
+        # ``$``-prefixed value is only read as a field path inside an
+        # aggregation expression, so a caller-supplied reason of "$set" is
+        # stored as the string it is here.
+        result = await self.db[self.collection].update_many(
+            query, {"$set": {path: {"at": stamp, "reason": reason}}},
+            array_filters=[{f"element.{field}": key}])
+        n = result.modified_count
+        self.receipts_log.record_write("revoked", n, reason)
+        if n:
+            log.info("revoked subject %r in %d %s document(s) (%s)",
+                     key, n, self.collection, reason)
+        await self._witness(
+            filters or {}, event=REVOKED, reason=reason, count=n, at=stamp,
+            detail={"subject": {"path": self.spec.subjects,
+                                "key": str(key)}})
+        return n
+
+    def _subject_field(self, verb: str) -> str:
+        """The key field, or a sentence explaining what is missing.
+
+        Two separate declarations have to be in place before a subject can
+        be addressed, and telling the caller which one is absent is cheaper
+        than letting them guess from an empty result.
+        """
+        if not self.spec.subjects:
+            raise UnknownReason(
+                self.collection, verb,
+                ("declare subjects= on the model to govern embedded "
+                 "subjects",))
+        if not self.spec.subject_key:
+            raise UnknownReason(
+                self.collection, verb,
+                ("declare subject_key= to name embedded subjects; without "
+                 "one they can be refused but never addressed",))
+        return self.spec.subject_key
 
     async def witness(self, filters: dict | None = None, *, reason: str,
                       erase_after: timedelta | None = None,
@@ -449,7 +537,7 @@ class MarkWrites:
                           everything=everything)
 
         stamp = now()
-        audit = self.including_refused()
+        audit = self._unfiltered()
         # Released with the thing they were held with. A review that clears
         # a document and leaves its summaries withheld has not finished.
         ids, inherited = await self._descendants(query)

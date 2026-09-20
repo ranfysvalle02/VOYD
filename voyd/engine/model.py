@@ -86,7 +86,10 @@ class Model:
             tenant=self.tenant)
 
     def admitting(self, *rules, at_field: str = "expire_at",
-                  lineage_field: str | None = None) -> Admission:
+                  lineage_field: str | None = None,
+                  policy_revision: str | None = None,
+                  subjects: str | None = None,
+                  subject_key: str | None = None) -> Admission:
         """A read handle with an explicit list of reasons to refuse.
 
         ``forgettable()`` is this with the two defaults. Naming the rules is
@@ -100,6 +103,19 @@ class Model:
         differ. The TTL is still declared, because a deadline refused on
         read and never collected is a storage leak.
 
+        ``subjects`` names an array whose elements carry their own marks and
+        deadlines -- chapters in a book, comments on a ticket. Without it the
+        document is the only subject, which is what every collection here
+        meant before the embedded-document pattern made that assumption
+        silently wrong: a chapter carrying the mark ``revoke()`` writes
+        reaches a prompt with its parent and is counted nowhere. With it,
+        refused elements are dropped from the document and counted on
+        ``Page.redacted``. ``subject_key`` names the field that identifies
+        one, which is what makes ``revoke_subject()`` possible: without it a
+        subject can be refused but never addressed, and an element that does
+        not carry the declared key is refused as ``unnamed`` rather than
+        admitted.
+
         ``lineage_field`` opts the collection into derivation tracking, so
         ``derive()`` can record what a document was made out of and a
         refusal travels to everything downstream of it. Off by default: a
@@ -109,7 +125,8 @@ class Model:
         self.expiring(at_field=at_field)
         return self.engine.admission(
             self.collection, at_field=at_field, tenant=self.tenant,
-            lineage_field=lineage_field, rules=tuple(rules))
+            lineage_field=lineage_field, policy_revision=policy_revision,
+            subjects=subjects, subject_key=subject_key, rules=tuple(rules))
 
     def sealed(self, *fields: str, keyring=None, scope: str | None = None,
                custody=None, **kw) -> Admission:

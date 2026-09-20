@@ -27,6 +27,19 @@ NOT_CLEARED = "not_cleared"
 # serve it, unrecoverable says nobody can.
 UNRECOVERABLE = "unrecoverable"
 
+# The context-token budget for this read was spent before this hit could be
+# admitted. Not a reason the fact is *forgotten* -- a reason there was no room
+# for it in the prompt being assembled. Counted apart so a climbing
+# ``over_budget`` reads as "raise the budget or tighten retrieval", not "the
+# system is forgetting things".
+OVER_BUDGET = "over_budget"
+# The budget could not be charged for this document: its cost field is missing
+# or not a non-negative number. Fails closed like an unreadable deadline -- a
+# hit whose size cannot be established has no business silently taking room --
+# but, unlike being over budget, it does not close the page: one uncostable
+# document says nothing about how much room is left.
+UNCOSTED = "uncosted"
+
 # The three answers ``reachability_at`` can give. ``unknown`` is the one
 # worth having: a row the reaper took leaves nothing to answer from, and
 # reporting that as "not reachable" would let a deployment clear itself
@@ -36,6 +49,17 @@ UNRECOVERABLE = "unrecoverable"
 # one is somebody's erasure request being honoured, the other is an outage
 # during which a dashboard reporting erasures is reporting a lie.
 KEY_UNAVAILABLE = "key_unavailable"
+
+# An embedded subject that cannot be named. Declared ``subject_key`` and no
+# value for it, so there is no stable way to refer to this element -- which
+# means no erasure request can ever target it, no lineage can name it, and no
+# receipt can attest to it. Fails closed for the same reason ``unreadable``
+# does: a fact whose lifetime cannot be established has no business in a
+# prompt, and neither has one that cannot be addressed. It is the only
+# refusal here that is a statement about the *schema* rather than the fact,
+# and it is counted apart so it reads as "fix the writer", not "the system is
+# forgetting things".
+UNNAMED = "unnamed"
 
 REACHABLE = "reachable"
 REFUSED = "refused"

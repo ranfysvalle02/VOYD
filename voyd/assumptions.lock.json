@@ -1,0 +1,16 @@
+{
+  "embedding.default_model": {
+    "complaints": [],
+    "evidence": "ecf57374198140860135291a10180f98018325c3f89a07a159a694e8881f1f5e",
+    "fingerprint": "a451f517cfac8fd4d87556eeffbfc2ddb20068439fc9ec851f9fa968b1a241ea",
+    "ok": true,
+    "verified_at": "2026-09-20T15:51:24.659320+00:00"
+  },
+  "embedding.server_side_models": {
+    "complaints": [],
+    "evidence": "2f0b89379980926045d2f3cfa1000e8f2924e4cd913ed4665216e355952ca6b4",
+    "fingerprint": "d5bff57a69d5a395baaf8fe27f5706031490b66c71b77069c4b96620068d9a3e",
+    "ok": true,
+    "verified_at": "2026-09-20T15:51:24.659320+00:00"
+  }
+}

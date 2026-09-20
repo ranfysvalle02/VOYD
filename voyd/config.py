@@ -39,7 +39,26 @@ class VoyageConfig:
     """Voyage AI embedding settings."""
 
     api_key: str
-    model: str = "voyage-3"
+    # The vendor's recommended general-purpose model. Moved off ``voyage-3``
+    # once that became two generations old, and the reason is not "newer is
+    # better": ``voyage-3`` is the one model in the current comparison with a
+    # **fixed** 1024 dimensions and no quantization. Every 4-series model
+    # emits 256/512/1024/2048 by Matryoshka truncation.
+    model: str = "voyage-4"
+    # 1024, and this number is the one worth arguing about rather than the
+    # model name, because it is the one that cannot be changed later without
+    # a full index rebuild -- ``numDimensions`` is baked into the vector
+    # index, and ``search.py`` documents at length why that migration is the
+    # expensive one.
+    #
+    # So the default is the middle rung, deliberately: 2048 costs storage and
+    # scan time most corpora never recover in relevance, and 256/512 are
+    # choices a deployment should make *knowing* it is trading accuracy for
+    # cost. 1024 is also what the previous default was, so an existing index
+    # keeps working across this change -- the model moved, the geometry did
+    # not. Anything that reads a vector still has to check *which model*
+    # wrote it (see ``EmbeddedWith``), because same-width vectors from two
+    # models compare without error and rank like noise.
     dimensions: int = 1024
     # Voyage context is generous; we still bound the text we embed so a huge
     # dropped file never balloons API memory. ~32k chars is a safe window.

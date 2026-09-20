@@ -333,8 +333,16 @@ def test_the_response_shape_is_the_same_whether_anything_was_refused():
     from voyd.web.vault import _admission_of
 
     clean = _admission_of(Page([{"doc_id": "d1"}], examined=1))
-    assert clean == {"refused": [], "refused_total": 0,
-                     "examined": 1, "starved": False}
+    assert clean == {"refused": [], "refused_total": 0, "examined": 1,
+                     "spent": 0, "redacted": 0, "starved": False}
+
+    # ``redacted`` obeys the same rule as the rest, and has to: a document
+    # returned with an embedded subject removed is shorter than the row on
+    # disk, and a caller told only "1 match" has been quietly edited. Present
+    # and zero, or the API reintroduces at its own boundary the silence that
+    # ``subjects`` was added to end.
+    trimmed = _admission_of(Page([{"doc_id": "d1"}], examined=1, redacted=2))
+    assert trimmed["redacted"] == 2
 
     refused = _admission_of(Page([], refused={"quarantined": 3}, examined=3,
                                  starved=True))

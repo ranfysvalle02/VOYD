@@ -78,6 +78,25 @@ log = logging.getLogger("engine.perimeter")
 SEALED = "sealed"
 OWNED = "owned"
 DERIVED = "derived"
+# The fourth, and the one this module did not have a name for until a
+# server-side index needed one. A copy held **inside the deployment you
+# control, outside the document you can write**: the vector a search node
+# derived from a field and keeps in its own storage.
+#
+# It is not ``owned`` -- there is no endpoint to call and no acknowledgement
+# to collect. It is not ``derived`` -- "cannot be recalled" is false, and
+# saying so would give up a purge that is actually available. It is not
+# ``sealed``, because the whole point of a server-side embedding is that the
+# server read the plaintext.
+#
+# What makes it its own class is the verb: **it is purged by overwriting the
+# field it was derived from.** That is a real erasure and it has a real cost
+# -- the source text goes earlier than its deadline, so an
+# ``including_refused()`` audit can no longer show what was erased. Which is
+# exactly why registering one is a decision somebody types out rather than a
+# default: the trade is auditability for immediacy, and it is not this
+# package's to make.
+INTERNAL = "internal"
 
 # How long a single sink gets before it is recorded as unreachable. Short
 # on purpose: this runs on the erasure path, and an erasure request must
@@ -170,6 +189,59 @@ def sink(name: str, holds: str, *, forget=None, verify=None):
     return made
 
 
+def derived_index(db, collection: str, *, field: str,
+                  name: str | None = None):
+    """A sink for a copy the database itself derived from a field.
+
+    The case this exists for is server-side embedding. With
+    ``auto_embed``, nothing in this process ever holds a vector -- the
+    search node reads the text, embeds it, and keeps the result in storage
+    no query here can write to. ``AdmissionSpec.derived_fields`` cannot
+    reach it: that mechanism nulls a field *in the document*, and on an
+    auto-embedding collection there is no such field.
+
+    So the lossy copy of an erased fact outlives the erasure, quietly. The
+    refusal guarantee is untouched -- the boundary still refuses the
+    document -- but the promise this package makes about *derived
+    encodings*, that they go immediately rather than on the reaper's
+    schedule, silently stops applying. An embedding is partially
+    invertible; that promise is not decorative.
+
+    This is the purge that is actually available: **overwrite the source
+    field, and the index entry goes with it.** Registering the sink is how
+    a deployment says it wants that, because it is not free --
+
+        the source text is destroyed at revocation rather than at its
+        deadline, so ``including_refused()`` can no longer show an auditor
+        what was erased. Immediacy is bought with auditability.
+
+    -- and a library that made that trade by default would be deciding
+    something only the deployment can. Reversible holds never reach here:
+    ``Perimeter.forget`` is called on irreversible revocation only, so a
+    quarantine that is later lifted does not destroy anything.
+
+        notes.bounded_by(
+            Perimeter().register(
+                derived_index(db, "notes", field="text")))
+    """
+    label = name or f"{collection}.{field}-index"
+
+    async def _forget(ids: list, *, reason: str) -> bool:
+        if not ids:
+            return True
+        # ``None`` rather than ``$unset``, matching ``derived_fields``: the
+        # document keeps its shape, so a reader sees an erased field rather
+        # than a missing one, and nothing downstream has to special-case an
+        # absent key it has always been able to read.
+        await db[collection].update_many(
+            {"_id": {"$in": list(ids)}}, {"$set": {field: None}})
+        log.info("derived index %s: cleared %s on %d document(s) (%s)",
+                 label, field, len(ids), reason)
+        return True
+
+    return sink(label, INTERNAL, forget=_forget)
+
+
 @dataclass
 class Perimeter:
     """The registered holders of copies, and what each one is owed.
@@ -191,11 +263,11 @@ class Perimeter:
                     f"a sink needs a string .{attr}; without it the "
                     f"perimeter cannot say who holds what, which is the "
                     f"only thing it is actually for")
-        if sink.holds not in (SEALED, OWNED, DERIVED):
+        if sink.holds not in (SEALED, OWNED, DERIVED, INTERNAL):
             raise ValueError(
                 f"{sink.name}: holds must be one of {SEALED!r}, {OWNED!r}, "
-                f"{DERIVED!r}. Each one is a different claim, and picking "
-                f"the wrong one is how this module starts lying")
+                f"{DERIVED!r}, {INTERNAL!r}. Each one is a different claim, "
+                f"and picking the wrong one is how this module starts lying")
         self.sinks.append(sink)
         log.info("perimeter: registered %s (%s)", sink.name, sink.holds)
         return self
@@ -447,6 +519,9 @@ class Perimeter:
                        "enforced",
                 DERIVED: "cannot be recalled; findable via a context "
                          "receipt",
+                INTERNAL: "purged by overwriting the field it was derived "
+                          "from; costs the source text its remaining "
+                          "deadline",
             },
         }
 

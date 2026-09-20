@@ -42,6 +42,13 @@ class Receipts:
     # every mark-shaped write lands in one counter.
     held: int = 0
     lifted: int = 0
+    # Counted apart again, because it is a different kind of event: not a
+    # fact being withheld or let back, but the guarantee itself being set
+    # aside. ``including_refused()`` is break-glass, and a break-glass read
+    # that logs nothing is a break-glass read nobody reviews.
+    bypassed: int = 0
+    last_bypass_actor: str | None = None
+    last_bypass_at: datetime | None = None
     last_reason: str | None = None
     last_at: datetime | None = None
 
@@ -82,6 +89,21 @@ class Receipts:
         self.last_reason = reason
         self.last_at = now()
 
+    def record_bypass(self, *, actor: str | None = None) -> None:
+        """One terminal read through an ``including_refused()`` handle.
+
+        Counted once per read, not once per document and not once per handle
+        construction -- the question a dashboard has is "how often was the
+        guarantee set aside", and a cached handle must not turn one event into
+        unlimited reads. Exact, because unlike ``refused`` there is no
+        server-side half that gets away uncounted. Actor/time ride beside the
+        count so the alarm names the last hand on the door when an authority
+        knows it.
+        """
+        self.bypassed += 1
+        self.last_bypass_actor = actor
+        self.last_bypass_at = now()
+
     @property
     def total(self) -> int:
         return sum(self.refused.values())
@@ -98,6 +120,13 @@ class Receipts:
             # and a dashboard that adds them up says nothing.
             "held_total": self.held,
             "lifted_total": self.lifted,
+            # Exact: how many times the guarantee was deliberately set aside
+            # through ``including_refused()``. Not prevented, but visible.
+            "including_refused_total": self.bypassed,
+            "last_including_refused_actor": self.last_bypass_actor,
+            "last_including_refused_at": (
+                self.last_bypass_at.isoformat()
+                if self.last_bypass_at else None),
             "last_reason": self.last_reason,
             "last_at": self.last_at.isoformat() if self.last_at else None,
         }
@@ -116,9 +145,28 @@ class Page(list):
                   here the candidates were counted as they went past.
     ``examined``  how many candidates it took to fill the page. The cost of
                   enforcing on read rather than in the index, as a number.
+    ``spent``     budget charged to the selected page prefix when a ``Budget``
+                  rule is in force (``0`` otherwise). Over-fetched candidates
+                  below a full page are never charged. A selected document
+                  whose key later proves unrecoverable may still have reserved
+                  room, deliberately conservative: decryption happens after
+                  selection and a missing key does not make the prompt budget
+                  available to a lower-ranked hit retroactively.
+    ``redacted``  how many *embedded subjects* were removed from documents on
+                  this page -- a chapter inside an admitted book, a comment
+                  inside an admitted ticket. Zero unless the collection
+                  declared ``subjects``. It is reported separately from
+                  ``refused`` because the two are different events with the
+                  same reason attached: a document that never arrived, versus
+                  a document that arrived shorter than it is on disk. Only the
+                  second one changes what a caller is holding without changing
+                  the length of the page, which is exactly the kind of quiet
+                  edit that has to be counted out loud.
     ``starved``   the page is short and the search **gave up before running
                   out of candidates**. That is the only state in which the
-                  caller was told less than the truth.
+                  caller was told less than the truth. A page cut short by a
+                  spent budget is *not* starved: it is complete, because
+                  nothing further down the ranking had room anyway.
 
     ``starved`` is the field worth wiring to an alert, and its definition is
     narrower than it first looks. It is not "short", and it is not "short and
@@ -133,16 +181,44 @@ class Page(list):
     So ``starved`` means: ``rounds`` ran out, or the search tier's own
     ceiling did, while candidates remained. There is more, and this page
     could not reach it -- the one thing a bare list cannot say.
+
+    Three more fields exist for one reason: a use recorded against this page
+    (see ``record_use``) has to commit to *when* the policy was evaluated and
+    *which* policy it was, and it must refuse to persist a page that cannot
+    say. So a read stamps them, and a plain ``list`` handed in from somewhere
+    else has none of them and cannot be recorded as a use.
+
+    ``evaluated_at``       the single instant this whole page was admitted
+                           against -- frozen once at the start of the read, not
+                           re-read per candidate, so every hit on the page
+                           agrees about what "now" was.
+    ``policy_revision``    the revision string the handle was declared with, or
+                           ``None``. ``over_budget`` does not say whether the
+                           budget was 100 or 10000; a revision does.
+    ``snapshot_complete``  whether this page carries a read snapshot at all. A
+                           bare ``list`` degrades to ``False``, which is what
+                           makes "incomplete pages cannot be persisted" a check
+                           rather than a hope.
     """
 
-    __slots__ = ("refused", "examined", "starved")
+    __slots__ = ("refused", "examined", "starved", "spent", "redacted",
+                 "evaluated_at", "policy_revision", "snapshot_complete")
 
     def __init__(self, hits: Iterable[dict] = (), *, refused: dict | None = None,
-                 examined: int = 0, starved: bool = False):
+                 examined: int = 0, starved: bool = False, spent: int = 0,
+                 redacted: int = 0,
+                 evaluated_at: datetime | None = None,
+                 policy_revision: str | None = None,
+                 snapshot_complete: bool = False):
         super().__init__(hits)
         self.refused: dict[str, int] = dict(refused or {})
         self.examined = examined
         self.starved = starved
+        self.spent = spent
+        self.redacted = redacted
+        self.evaluated_at = evaluated_at
+        self.policy_revision = policy_revision
+        self.snapshot_complete = snapshot_complete
 
     @property
     def refused_total(self) -> int:
@@ -161,5 +237,7 @@ class Page(list):
                         for r, n in sorted(self.refused.items())],
             "refused_total": self.refused_total,
             "examined": self.examined,
+            "spent": self.spent,
+            "redacted": self.redacted,
             "starved": self.starved,
         }
