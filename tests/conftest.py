@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from contextlib import asynccontextmanager
 
 import pytest
 
@@ -73,13 +72,10 @@ _TEST_DB_PREFIXES = ("voyd_test_", "core_")
 # In both cases the symptom is an unrelated assertion about a row count. Run
 # the suite alone.
 #
-# ``ttl_reaper_disarmed`` below is deliberately *not* a third entry on that
-# list, and the reason is written up there: it needs the reaper to leave one
-# database's rows alone, which is a per-database question, so it answers it
-# per database instead of reaching for the server-global switch that would
-# have fought footgun 2 directly. The nearest thing to a rule this file has
-# learned is that a fixture protecting one test's data should not be writing
-# state every other test can see.
+# Note what is *not* on that list. ``indexed_namespace`` in
+# test_an_expired_void_is_gone.py also needs the reaper to leave a row alone,
+# and does it by dropping one TTL index in its own throwaway database rather
+# than by touching the server-global. Same need, no third footgun.
 
 
 async def _mongo_available(uri: str) -> bool:
@@ -134,88 +130,6 @@ async def _sweep():
     finally:
         await client.close()
 
-
-
-@asynccontextmanager
-async def ttl_reaper_disarmed(db):
-    """Take the TTL indexes off *this* database, so an expired row stays put.
-
-    Several tests assert the pair that is the product's entire thesis: a
-    document is **past its deadline** and **still physically on disk**, and the
-    read path refuses it anyway. Both halves have to be true at the same
-    instant or the test proves nothing -- if the row is gone, the refusal might
-    just be an empty collection, which is the ordinary behaviour of every
-    database and not a claim worth shipping.
-
-    MongoDB's TTL monitor is what breaks the pair. It sweeps every 60s, and a
-    test that waits on anything slow -- mongot building an index, say -- can
-    cross a sweep boundary and lose the row mid-test. That is not a flaky
-    assertion; it is the fixture and the server racing over the same document,
-    with the winner decided by how warm the machine is.
-
-    **Why the index and not the monitor.** The obvious lever is
-    ``setParameter: {ttlMonitorEnabled: false}``, and it works, and it is the
-    wrong lever for three reasons -- all of which come from it being *global
-    state on a shared server* while the thing it protects is one test's rows:
-
-    1. It does not compose. Two concurrent pausers (pytest-xdist, or simply
-       two developers pointed at the same mongod) and the first one to finish
-       restores the monitor while the second is still running -- which does
-       not fail, it just silently reinstates the race the pause existed to
-       remove. A guard that quietly stops guarding is worse than no guard.
-    2. It does not survive a crash. A ``kill -9`` between pause and restore
-       leaves the monitor off on a shared deployment indefinitely, and nothing
-       in a later run would notice or put it back.
-    3. It needs admin. Managed Atlas refuses ``setParameter``, so the tests
-       that most need this would have skipped there -- and a skip that is
-       always a skip is a test nobody has ever run, which is the complaint
-       this repository makes about everybody else's suite.
-
-    Dropping the TTL indexes has none of those properties, because the scope
-    is already right: ``app`` gives every test its own ``voyd_test_<uuid>``
-    database, the reaper can only reach these rows *through indexes in that
-    database*, and the database is dropped at teardown. No admin command, no
-    shared state, nothing to restore, and two of these can run at once on one
-    server without knowing about each other.
-
-    Nothing here touches ``ttlMonitorSleepSecs``: speeding the reaper up would
-    be the opposite mistake, a test passing because deletion happened to be
-    quick. The monitor still runs, on its own clock, for every other database
-    on the server. It simply has nothing to find in this one.
-    """
-    disarmed = []
-    for name in await db.list_collection_names():
-        async for index in await db[name].list_indexes():
-            if "expireAfterSeconds" in index:
-                await db[name].drop_index(index["name"])
-                disarmed.append(f"{name}.{index['name']}")
-
-    # A disarm that silently found nothing would turn every caller into the
-    # race this exists to remove, and they would still look green most of the
-    # time -- which is worse than the race, because nobody would go looking.
-    # This is what fails if the schema stops declaring a deadline, or renames
-    # the field one is on.
-    assert disarmed, (
-        f"{db.name} declares no TTL index, so this fixture protected nothing. "
-        f"Either the schema changed and these tests are now racing the "
-        f"reaper, or they no longer need to be here")
-
-    # Deliberately not restored. The database is thrown away at teardown, so
-    # putting the indexes back would be ceremony -- and ceremony in a teardown
-    # is where "it only leaks when the test fails" comes from.
-    yield disarmed
-
-
-@pytest.fixture
-async def reaper_disarmed(app):
-    """``ttl_reaper_disarmed`` on the service's database, for autouse modules.
-
-    Takes ``app`` so it is ordered after the schema exists -- there is nothing
-    to take off a database whose indexes have not been created yet, and the
-    assertion inside would be the thing that told you so.
-    """
-    async with ttl_reaper_disarmed(app.store.db) as disarmed:
-        yield disarmed
 
 
 @pytest.fixture

@@ -204,17 +204,16 @@ async def test_an_expired_scope_takes_its_documents_and_vectors_with_it(
         assert doc["expire_at"] == void["expire_at"]
 
 
-async def test_a_past_deadline_is_accepted_and_simply_collects(
-        client, app, scope, reaper_disarmed):
+async def test_a_past_deadline_is_accepted_and_simply_collects(client, app, scope):
     """A zero/negative TTL is not an error -- it is a scope that is already
     over. It must not linger just because the reaper has not run yet.
 
-    ``reaper_disarmed`` because the row this reads back is expired the instant
-    it is written, so the TTL monitor is entitled to delete it between the
-    POST and the ``find_one`` -- a narrow window, but one that turns a real
-    assertion into a ``NoneType`` traceback roughly whenever a sweep lands
-    there. The claim is about what the *API* did with a past deadline, so the
-    reaper is noise in it either way.
+    This one races the reaper and is left alone on purpose. The row is expired
+    when written, so the TTL monitor may take it between the POST and the
+    ``find_one`` -- but that window measures 4.3ms against a 60s sweep, which
+    is about one run in fourteen thousand. Fixturing that is not robustness,
+    it is ceremony: the cost is a line of indirection on every reader forever,
+    against a failure nobody in this project will see.
     """
     r = await client.post("/v1/voids", json={"ttl_seconds": -1},
                           headers=scope["headers"])

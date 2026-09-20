@@ -12,24 +12,11 @@ then assert the row is still physically present and the API refuses it anyway.
 That separation is the whole point: if a test passed only because the reaper
 happened to run, it would prove nothing about the query.
 
-They also **stop** the reaper, which they did not used to, and the reason is
-worth keeping. The claim being made is a pair -- *past its deadline* and
-*still on disk* -- and both halves have to hold at the same instant. Not
-waiting for the reaper is not the same as the reaper not running: the monitor
-sweeps on its own 60s clock, and ``indexed_namespace`` below waits up to 60s
-for mongot to build an index. On a cold index those two windows overlap, the
-sweep takes the expired row out from under the fixture, and the final
-assertion -- that it really was still there to be found -- fails. Nothing
-about VOYD was wrong on those runs; the test was racing the server for the
-document it was about to make a claim about, and the winner was decided by how
-warm the machine happened to be.
-
-So ``reaper_disarmed`` below removes MongoDB's cleanup from the experiment,
-by taking the TTL indexes off this test's own database rather than by
-switching the server's monitor off -- see the fixture for why that distinction
-is the whole design. Either way the claim gets stronger, not weaker: with
-nothing deleting anything, a document that does not come back came back from
-nowhere except the filter.
+One place that is not enough on its own: ``indexed_namespace`` below waits up
+to 60s for mongot, holding an expired row the whole time, and the monitor
+sweeps every 60s. Those windows overlap on a cold index, the row goes, and the
+test fails on the one line that checks it was still there. That fixture drops
+its TTL index to opt out; see the two lines there.
 """
 
 from __future__ import annotations
@@ -60,22 +47,6 @@ async def owner_on(app, slug: str, email: str) -> dict:
     owner_id = await app.store.create_owner(email, hash_api_key(key))
     await app.store.create_voyd(slug, owner_id, {}, name=slug)
     return {"X-Voyd": slug, "Authorization": f"Bearer {key}"}
-
-
-@pytest.fixture(autouse=True)
-async def _the_row_must_stay_on_disk(reaper_disarmed):
-    """Every test in this module needs an expired row to stay on disk.
-
-    Autouse rather than named per test, because the requirement is a property
-    of the whole file: each test here opens something already past its
-    deadline and then asserts the row survived long enough to be refused. One
-    that forgot to ask for this would not fail -- it would pass until the
-    machine got slow, which is the failure mode this module is about.
-
-    The body is ``reaper_disarmed`` in conftest.py; this exists only to make
-    it unconditional here.
-    """
-    yield
 
 
 @pytest.fixture
@@ -170,6 +141,13 @@ async def indexed_namespace(client, app, dead_void):
     never got ready", which is a different and honest statement.
     """
     headers = dead_void["headers"]
+    # Opt this database out of the reaper. The wait below can run for 60s
+    # holding a row that is already expired, and the TTL monitor sweeps on the
+    # same 60s clock -- so on a cold index it deletes the document this test is
+    # about to prove is still on disk. `app` gives every test its own database
+    # and drops it afterwards, so this reaches nothing else, and `drop_index`
+    # raises if the schema stops declaring a deadline here.
+    await app.store.db.documents.drop_index("expire_at_1")
     # The query has to be embedded to be searched, and these tests carry no
     # real Voyage key. The vector is irrelevant here: the claim is about which
     # rows the filter admits, not about ranking.
