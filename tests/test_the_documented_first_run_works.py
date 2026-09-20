@@ -1,6 +1,7 @@
 """The first command a stranger runs must be a command that exists.
 
-``cp .env.example .env`` is step two of the Quickstart and step one of CI, and
+``cp .env.example .env`` is the first line of CI and the one instruction the
+README gives for booting the service, and
 for a while ``.env.example`` was neither tracked nor present. So the documented
 first run failed on its second line, and CI failed on its first -- a break that
 no test could see, because every test builds its own settings and none of them

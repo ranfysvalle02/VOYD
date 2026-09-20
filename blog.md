@@ -891,6 +891,130 @@ that does not travel to what was made out of the fact is defeated by a
 summary. Refusal is missing from retrieval everywhere. This is one
 implementation, on the engine where the deadline can have a single owner.
 
+## Every claim, and how it is held
+
+One hundred and twelve of them. This table is the index: each row is a
+property somebody could otherwise take on trust, and the right-hand column
+is the mechanism that makes it checkable. A test asserts that every
+identifier named here still exists, so the table cannot quietly outlive the
+code it describes.
+
+| Claim | How |
+|---|---|
+| The engine works with no VOYD | `test_engine_*` import only `voyd.engine` |
+| Documents inherit the scope's deadline | one `expire_at`, asserted equal on both rows |
+| Nothing can be left holding a vector | both collections TTL on the same field, zero grace |
+| An expired void answers nothing | search, describe and ingest 404 while its rows are still on disk |
+| An expired document cannot reach a prompt | its row is still on disk and `recall` refuses it, with the reaper uninvolved |
+| A read path written in ignorance is still safe | a naive `find({})` through the handle returns neither expired nor revoked rows |
+| Admission does not wait for deletion | `revoke()` is unreachable on the next read, with the row still on disk |
+| Setting the guarantee aside has a name | `including_refused()` is the only way, and it does not mutate the handle |
+| A garbage deadline fails closed | a string, int or list `expire_at` reads as expired, and never raises |
+| An unreadable deadline fails closed too | a `datetime.max` that cannot be shifted to UTC is dead, not an exception |
+| The embedding leaves with the document | after the reaper runs, no vector survives its row |
+| Pinning is the absence of a deadline | a null `expire_at` sibling survives in the same collection |
+| The void is the retrieval boundary | a sibling scope's doc is not a hit, on both `$rankFusion` legs |
+| A tenant id cannot be an operator | `{"$ne": ...}` in the tenant position is refused on all three tiers, not served |
+| Search cannot walk around the lock | a passcode-gated scope refuses to be queried |
+| "Added" is not "searchable" | `describe` reports pending vs indexed separately |
+| A wrong-width vector is not "indexed" | a 512-wide vector in a 1024 index is parked as `failed`, not counted as searchable |
+| A same-width vector from another model is refused | measured: a model swap inverts ranking, and every width check passes |
+| A document awaiting its first vector is pending, not wrong | or the embed queue would vanish from `describe()` |
+| A rule cannot open the gate by raising | a rule that throws is a refusal, named after itself |
+| Quarantine holds without destroying | flagged rows stop reaching prompts and stay on disk for the investigation |
+| The server can own the embedding | verified on Atlas: text in, no vector field stored, text query returns the right row |
+| Asking for it is safe where it is unavailable | Atlas Local refuses, the engine falls back to a client vector index, loudly |
+| Admission survives the server owning the vector | `revoke()` still refuses a row this process never embedded |
+| A cold index cannot look empty | unready indexes route to cosine, logged and counted |
+| A 500 is not input validation | an unrepresentable `ttl_seconds` and an oversized `metadata` are 422s |
+| A 429 is not a bad document | failed embeds retry; a later valid key backfills |
+| There is no way to leak a cleanup chore | no tool is named for reclaiming anything, and `forget` reclaims nothing |
+| Admission is reachable from the product | `POST /v1/voids/{token}/forget` and a `forget` tool, not engine-only |
+| Admission is not deletion renamed | after `forget`, `describe` reports 0 and the rows are still on disk |
+| A stale index cannot pass for a current one | a changed spec is corrected, or named in `stale_indexes` |
+| Refusal costs the refused document its place, not the page | 40 expired rows ahead of 6 live ones still fills a page of 5 |
+| A short page is not silently passed off as a complete one | `starved` when the search gave up with candidates left, and *not* when they ran out |
+| An empty result says whether refusal is why it is empty | `admission.refused` on every search response, present when empty too |
+| A revocation cannot be quietly un-recorded | deleting, reordering or editing a chain entry is reported as `gap`, `broken` or `forged` |
+| A re-hashed forgery is still caught | the next entry commits to the old hash, so the edit has to reach the head |
+| A rewritten chain is falsified by a receipt | the hash handed to the caller at the time is absent from the rebuilt one |
+| The proof outlives what it proves | no TTL index on the chain, asserted by its absence |
+| The audit record is not a new copy of the secret | a chain entry carries ids and reasons, never document text |
+| A chain cannot fork under concurrency | twelve concurrent revocations produce twelve linear links |
+| A hash survives its own round trip | the stored entry hashes to the receipt handed out, field by field |
+| An unrecordable refusal still refuses | a broken ledger cannot turn a completed revocation into an error |
+| An erasure cannot be taken back | `lift()` raises on an irreversible reason, and `release()` is not a way around it |
+| A hold can be | imposed, lifted, and counted apart from erasure, because overruling a detector is its own number |
+| A hold does not destroy its own evidence | imposing a reversible reason stamps no erase deadline |
+| Reasons stack | a quarantined document can still be erased; an expired one can still answer an erasure request |
+| A revocation never extends a row's life | the deadline moves earlier or not at all, so `erase_after` is a cap |
+| A retry cannot buy an erased row a new lease | already-marked documents are excluded from the write, not re-stamped |
+| Re-admitting is not a way past clearance | `lift()` runs the per-document check, because it is the only verb that *grants* reachability |
+| Un-refusing reaches the chain too | a record of one direction of a two-direction transition is intact and false |
+| Forgetting the whole scope has to be said out loud | a filter that narrows nothing beyond the tenant raises unless `everything=True` |
+| A write with no undo checks its blast radius first | `expect=n` counts before it writes, and writes nothing on a mismatch |
+| A caller-supplied reason cannot be an expression | `$`-prefixed reasons are stored verbatim, not read as a field path |
+| Forgetting survives being summarised | erasing a source erases its summary, and the summary's summary, in one query |
+| Lineage is closed at write time | a grandchild names the grandparent, so propagation is `$in` rather than a recursive walk |
+| Either parent is enough | a synthesis of two facts is refused when *either* source is erased |
+| You cannot build on a refused fact | `derive()` raises on a parent that is revoked, held, foreign, or above your clearance |
+| A derived fact cannot outlive its source | the earliest parent deadline is inherited, and a shorter one set deliberately stands |
+| Propagation does not cross the tenant | the boundary and every unbypassable rule are rebuilt on the way down the edge |
+| The thesis is not MongoDB-shaped | the whole argument re-executed on pgvector, with what is harder there stated |
+| The plaintext never reaches the disk | checked by reading with a client that holds no key, which is the only check that means anything |
+| Shredding a key erases one scope | `keyId` is a JSON pointer, so one subject's erasure is not everybody's |
+| The key expires with the documents | a TTL index on the key vault, and a key's deadline moves earlier or not at all |
+| A destroyed key is a refusal, not a 500 | one crypto-erased document must not fail a page of fifty |
+| Ciphertext cannot be served as text | `Unrecoverable` refuses a `Binary` that reached a read path unsealed |
+| A plaintext write is refused by MongoDB | a `binData` validator, so bypassing the encrypting client fails loudly instead of silently |
+| Sealing adds no bookkeeping to the document | the scope is the tenant; the stored row gains no field |
+| Sealing composes with refusal | a revoked document is refused by its mark before any key is fetched |
+| Sealing without a scope refuses to default | one key for everybody means one erasure request erases everybody |
+| Durable custody survives a restart | a second engine, a new keyring, the same key file, yesterday's ciphertext |
+| An erased document keeps no vector | the embedding went with the text; a held one keeps it, because evidence |
+| A broken sink cannot fail an erasure | a raising or hanging cache is recorded unacknowledged, and the row is still refused |
+| A sink must declare which claim applies | sealed, owned or derived — picking wrong is the only way the perimeter lies |
+| A context receipt recomputes without a secret | over the admitted ids, the rules in force and the ledger head |
+| A receipt will not guess its chain | naming the wrong one is worse than not being issued |
+| A mark refuses from its own timestamp | a revocation stamped today did not apply in 2020 |
+| Both halves agree under `as_of` too | or a replayed scope reads as one where nothing was reachable |
+| Reachability is three-valued | a reaped row is `unknown`, never a flattering "no" |
+| A policy compiles to both halves or neither | half-enforcement is a hole `$vectorSearch` walks through |
+| A compiled policy matches hand-written behaviour | nine operators, query vs per-document, against a live server |
+| A sealed sink is checked, not trusted | `audit()` catches one that still serves plaintext, and reports an unchecked claim as unchecked |
+| Forgetting is the same verb at every tier | a document, a scope, a namespace — `POST .../forget`, never `DELETE` |
+| A namespace erasure reaches every declared collection | from `engine.expiry.specs`, not a literal that rots |
+| A retry has a horizon | past it the row is closed *unconfirmed*, because a false success is worse than an honest gap |
+| Granting reachability is gated apart from withholding it | a pipeline may quarantine and may not release |
+| An authority with no caller raises | permitting makes it decorative; refusing silently is a no-op on a write |
+| An unknown operation is denied | a new verb is not retroactively granted to old tokens |
+| The chain names who | and hashes it, so attribution cannot be attached afterwards |
+| A stale audit does not read as a current one | `never verified` / `verified` / `verified, 400d ago (stale)` |
+| The queue reports what was given up on | `unconfirmed`, because draining by expiry looks healthy otherwise |
+| A KMS custody carries its provider and master key | hardcoding `"local"` wraps an AWS deployment's keys with a process secret, silently |
+| Custody declares durability and audit | and the weak rungs warn; a lost ephemeral key is indistinguishable from a full shred |
+| A local key file is created once and reused | including base64, because secrets arrive text-shaped; a wrong length refuses rather than guesses |
+| QE buys queryability and costs per-subject erasure | asserted against a live server, not recalled from a doc page |
+| Rotation costs no document its readability | `rewrap_many_data_key` changes the wrapping, not the data key |
+| A missing crypto stack is loud | the probe says which half is absent, and CI asserts it is present |
+| No module reaches past the handle | the AST of every module in the package, not a review comment |
+| A caller with no clearance claim gets nothing | absence is the lowest level, asserted for four shapes of missing |
+| An unrecognised classification is refused, not ranked low | a renamed level cannot become world-readable |
+| Untagged is not public | a document with no label is refused unless a default is declared |
+| Two concurrent callers cannot see each other's documents | twelve interleaved requests against one shared handle |
+| The audit handle cannot waive clearance | `including_refused()` shows forgotten rows, never rows above the caller |
+| Both enforcement points agree about access | the query and the per-document check return the same set, per clearance |
+| An unbound read raises rather than guessing | and an unbound `revoke()` cannot report success having matched nothing |
+| A caller holding no claims is a real answer | `for_caller({})` returns nothing; never binding raises |
+| The image cannot ship a credential | `.dockerignore` excludes `.env`, and `.env.example` is asserted to survive |
+| The documented first run is a run that works | the file the Quickstart copies exists, parses, and covers every setting |
+| Nothing in the package is orphaned | the AST of `voyd/`, with a two-part allowlist that is itself checked |
+| The README cannot promise what is gone | every backticked identifier in this table must still exist in the source |
+| A third party can add a primitive | a trait this package does not ship is built by `ensure()` and listed by `health()` |
+| A third party can add a reason to refuse | a stranger's rule, enforced on both halves, counted by name, and unwaivable if it says so |
+| Atlas filling in its own index defaults is not drift | or every start-up would rewrite every index |
+
+
 ## The claim, restated without the gloss
 
 Not "MongoDB is faster." Not "vector databases are bad." Not "we solved

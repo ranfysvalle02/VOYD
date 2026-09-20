@@ -1,6 +1,6 @@
 """The claims table is a promise. This checks it still has code behind it.
 
-The README ends with fifty-odd rows of the form *claim -> how it is proven*.
+The claim table ends with fifty-odd rows of the form *claim -> how it is proven*.
 That table is the most load-bearing prose in the repository: it is what a
 reader checks instead of reading the suite, and it is the thing a sceptical
 reviewer greps.
@@ -9,7 +9,7 @@ It also rots in a way nothing else notices. Deleting a feature deletes its
 tests, and a green suite then says nothing about a row still claiming the
 feature works. Two were found that way -- a race-proof read limit and a
 change-stream oplog counter, both of which went with the byte path they
-bounded, and one of which the README had already announced the removal of
+bounded, and one of which the claim table had already announced the removal of
 *twenty lines above the row still promising it*.
 
 So: every identifier the table names in backticks must appear somewhere in the
@@ -34,7 +34,7 @@ NOT_IDENTIFIERS = {
 
 
 def _claim_rows() -> list[str]:
-    readme = (ROOT / "README.md").read_text()
+    readme = (ROOT / "blog.md").read_text()
     start = readme.index("| Claim | How |")
     table = readme[start:]
     table = table[:table.index("\n\n")]
@@ -72,7 +72,7 @@ def test_every_identifier_the_readme_claims_still_exists():
                 missing[probe] = claim
 
     assert not missing, (
-        "the README claims these are proven, and nothing in the source "
+        "the claim table claims these are proven, and nothing in the source "
         "mentions them any more: "
         + "; ".join(f"`{k}` (in '{v}')" for k, v in missing.items())
         + ". Either the claim outlived its feature, or the identifier was "
