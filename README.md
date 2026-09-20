@@ -432,6 +432,7 @@ on-ramp and the pilot.
 |---|---|
 | [`ISSUES.md`](docs/ISSUES.md) | defects, unproven claims, and operational caveats |
 | [`ideas.md`](docs/ideas.md) | what is worth building next, and what is deliberately not |
+| [`CONSIDERATIONS.md`](docs/CONSIDERATIONS.md) | what will bite you while working on it: the traps, what each one cost, and which guard now catches it |
 
 **Whether anyone will use it** — positioning, not engineering.
 
