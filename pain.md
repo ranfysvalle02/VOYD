@@ -25,7 +25,7 @@ correct answer.
 The window is the bug, and it is invisible by construction: the failure
 looks exactly like the system working.
 
-→ Refusal is answered on every read, immediately. `voyd/engine/admission.py`
+→ Refusal is answered on every read, immediately. `voyd/engine/admission/core.py`
 
 ### The erasure that a summary defeated
 
@@ -43,7 +43,7 @@ erasure request was honoured against the source and defeated by the
 paraphrase, and every artefact in your system says the erasure worked.
 
 → A refusal travels down the derivation edge, at any depth, in one indexed
-query. `derive()` in `voyd/engine/admission.py`
+query. `derive()` in `voyd/engine/admission/lineage.py`
 
 ### Four owners of one deadline
 

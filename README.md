@@ -144,7 +144,7 @@ claim:
 
 | | |
 |---|---|
-| [`engine/admission.py`](voyd/engine/admission.py) | refusal as a retrieval guarantee, the rule protocol, inherited refusal, `as_of` |
+| [`engine/admission/`](voyd/engine/admission) | refusal as a retrieval guarantee. Read [`core.py`](voyd/engine/admission/core.py) first — the state and the two enforcement points — then [`rules.py`](voyd/engine/admission/rules.py) for the rule protocol, [`lineage.py`](voyd/engine/admission/lineage.py) for inherited refusal, [`reads.py`](voyd/engine/admission/reads.py) for `as_of` |
 | [`engine/keyring.py`](voyd/engine/keyring.py) | crypto-shredding, and why CSFLE and Queryable Encryption are a real trade |
 | [`engine/custody.py`](voyd/engine/custody.py) | who holds the key that wraps the keys — `Ephemeral` → `LocalFile` → AWS/Azure/GCP/KMIP |
 | [`engine/ledger.py`](voyd/engine/ledger.py) | the hash chain, and forty lines on what it does *not* prove |
@@ -152,8 +152,9 @@ claim:
 | [`engine/authority.py`](voyd/engine/authority.py) | may this caller *do* this — and why granting and withholding are asymmetric |
 | [`engine/search.py`](voyd/engine/search.py) | the measurements behind *not* pushing deadlines into the vector index |
 
-Start with `admission.py`. If the module docstrings and this README ever
-disagree, the docstrings are right.
+Start with `admission/core.py`; its own package docstring lists the other
+ten modules in dependency order. If the module docstrings and this README
+ever disagree, the docstrings are right.
 
 ---
 

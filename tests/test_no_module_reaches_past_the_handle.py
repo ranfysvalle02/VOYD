@@ -30,12 +30,20 @@ from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parents[1] / "voyd"
 
-# ``admission.py`` is where the wrapping lives, so it must call the
+# ``admission/reads.py`` is where the wrapping lives, so it must call the
 # primitive. ``verify.py`` calls it deliberately to assert that the unwrapped
 # version really does leak -- if that stopped being true, the read-path
 # read-path check would have become a tautology, so it is a call worth
 # keeping and worth exempting by name.
-ALLOWED = {"admission.py", "verify.py"}
+#
+# This exemption used to read ``admission.py`` and cover a 2,393-line module,
+# which meant *any* of admission's concerns could have reached for the
+# primitive without this guard noticing. Splitting that module into a package
+# narrowed the hole to the one file whose job is the read path: marks,
+# lineage, sealing and attestation are now inside the rule like everybody
+# else. An exemption that shrinks when code is reorganised is the only kind
+# worth having.
+ALLOWED = {"reads.py", "verify.py"}
 
 
 def _calls_to_search(path: Path) -> list[int]:

@@ -49,7 +49,12 @@ PUBLIC_API = {
     "signature_valid",
 }
 
-SOURCE_GLOBS = ("voyd/*.py", "voyd/*/*.py")
+# Three levels, because ``voyd/engine/admission/`` is a package. A glob
+# that stopped one level short would have quietly dropped eleven modules
+# out of this check the day they were created -- a guard silently
+# narrowing its own scope during a refactor is the exact failure this
+# file exists to catch in other people's code.
+SOURCE_GLOBS = ("voyd/*.py", "voyd/*/*.py", "voyd/*/*/*.py")
 CALLER_GLOBS = SOURCE_GLOBS + ("tests/*.py", "examples/*.py", "bench/*.py",
                                "drift/*.py")
 

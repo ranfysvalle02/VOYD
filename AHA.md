@@ -65,7 +65,7 @@ the collection query clause. A pushed-down clause is a performance trick
 that lets the database or index drop candidates early, and it is worth
 having for exactly that reason and no other.
 
-`_admit()` in [`voyd/engine/admission.py`](voyd/engine/admission.py)
+`_admit()` in [`voyd/engine/admission/core.py`](voyd/engine/admission/core.py)
 says so where it lives:
 
 > The authoritative check, on the way out.
