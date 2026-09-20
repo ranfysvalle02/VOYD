@@ -207,10 +207,13 @@ class Sealing(_Composed):
                         keyring, doc.get(scope_field) if scope_field else None,
                         verdicts)
                     tally[reason] = tally.get(reason, 0) + 1
-                    # Refused: this document does not survive the loop. A
-                    # sentinel rather than a flag because the `for fields`
-                    # loop has to stop as well -- one undecryptable field is
-                    # the whole document's answer.
+                    # One undecryptable field is the whole document's
+                    # answer, so stop reading fields and drop it. A flag
+                    # paired with the `for ... else` below rather than
+                    # `out = None`: reusing `out` to mean both "the
+                    # document" and "there is no document" is what made a
+                    # type checker read the append as possibly-None, and it
+                    # reads no better to a person.
                     refused = True
                     break
             else:
