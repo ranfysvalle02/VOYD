@@ -1,11 +1,12 @@
-"""An agent backend. No Redis. No vector DB. No cron. One MongoDB.
+"""A retrieval backend. No Redis. No vector DB. No cron. One MongoDB.
 
     docker compose up -d
     uv run python examples/agent.py
 
-Embeddings are your job. This file passes fake vectors so the pitch runs
-with no vendor. Swap in Voyage, OpenAI, whatever — ``remember()`` takes
-floats, not an API key.
+A caller — here, an agent — using the ``memory`` trait. The trait is a
+composition of admission, not a product category. Embeddings are your job;
+this file passes fake vectors so the pitch runs with no vendor. Swap in
+Voyage, OpenAI, whatever — ``remember()`` takes floats, not an API key.
 """
 
 from __future__ import annotations

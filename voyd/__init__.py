@@ -94,24 +94,27 @@ somebody can check rather than one they have to take -- and the receipt handed
 back is the half that holds against whoever owns the database. See
 ``engine.ledger`` and ``GET /v1/voids/{token}/proof``.
 
-    from datetime import timedelta
     from voyd import Engine
 
     engine = Engine(client, db)
     await engine.connect()
-    mem = engine.model("memories", tenant="session").memory(
-        default_ttl=timedelta(hours=1))
-    await engine.ensure()
+    docs = engine.model("notes").forgettable()
+    await engine.ensure(search_wait_s=0)      # 0: skip the search-index wait
 
-    await mem.remember(session, "prefers concise answers", vec)
-    hits = await mem.recall(session, qvec, text="E_QUOTA_429")
+    await docs.find({})                       # cannot return a forgotten fact
+    await docs.including_refused().find({})   # the unsafe thing, named out loud
+    await docs.revoke({"_id": x}, reason="credential leaked")
+
+    # Multi-tenant threads a field through: ``model("notes", tenant="t")``
+    # then makes it required, so a read is ``find({"t": tenant})`` -- a
+    # forgotten ``{}`` raises rather than crossing the boundary.
 
 ``Engine`` is the core -- ``pip install voyd`` is Engine and a MongoDB driver,
 and importing it does not load FastAPI or Voyage. ``Voyd`` is the HTTP
 service built on it, and needs the ``app`` extra. :mod:`voyd.mcp` is the same
-API as five agent tools, none of which is a delete -- ``forget`` changes
-reachability and hands the agent no cleanup obligation, which is why it costs
-nothing to offer.
+admission path as five tools a model can call, none of which is a delete --
+``forget`` changes reachability and hands the caller no cleanup obligation,
+which is why it costs nothing to offer.
 
 Every claim above is asserted by the test suite against a real MongoDB --
 no mock tier, on purpose, because these properties are only true if the

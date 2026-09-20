@@ -53,21 +53,21 @@ Every system's honest answer to *"when was this forgotten?"* is *"whenever the
 sweeper got to it"* — a timestamp nobody can defend to an auditor, describing
 a window nobody is watching.
 
-Nobody ships the second row. VOYD is an attempt to, and this is what that took.
-Not the pitch: the three times the same bug came back, the two bugs in the
-proof I built to prevent bugs, and the number that turned out to be worse than
-I had written down.
+Ordinary stacks do not make the second row structural. VOYD is an attempt to,
+and this is what that took. Not the pitch: the three times the same bug came
+back, the two bugs in the proof I built to prevent bugs, and the number that
+turned out to be worse than I had written down.
 
 ## Whose problem this is
 
 Four situations, and if none of them is yours then the rest of this is just an
 argument about databases.
 
-**A session ends.** An agent has been accumulating memories against a
-conversation, and the conversation is over. "This session is forgotten" has to
-be true of the next retrieval, not of the next sweep — otherwise the following
-session inherits context nobody intended it to have, with a good score
-attached.
+**A retrieval scope expires.** A collection of facts a model is about to read
+has a deadline. "This is forgotten" has to be true of the next retrieval, not
+of the next sweep — otherwise the next query inherits context nobody intended
+it to have, with a good score attached. A session ending is one such scope.
+It is not a special kind of database.
 
 **Somebody asks to be erased.** A subject erasure request whose effective
 timestamp is *"whenever the cron ran"* is not a timestamp you can defend. And
@@ -89,7 +89,7 @@ drift problem below with extra steps.
 All four are the same question asked at different volumes: *may this fact reach
 this prompt, right now?* None of them is a question about storage.
 
-## Why nobody ships it
+## Why it is rarely structural
 
 Because refusal is not a feature you add. It is a shape, and almost every
 retrieval stack has the wrong one.
@@ -170,8 +170,8 @@ read around. `Admission` is a read handle with **no unfiltered read on it**:
 docs = engine.model("notes").forgettable()
 
 await docs.find({})                        # cannot return a forgotten fact
-await docs.search(vector, text="P0301")  # nor can the search path
-await docs.including_refused().find({})  # the unsafe thing, named out loud
+await docs.search(vector, text="P0301")    # nor can the search path
+await docs.including_refused().find({})    # the unsafe thing, named out loud
 
 await docs.revoke({"_id": x}, reason="credential leaked")
 # unreachable on the next read. The row is still on disk. That is the proof.
@@ -184,8 +184,10 @@ name a reviewer can grep for.
 Two enforcement points, always both. The rule is pushed into the query where
 the query can express it, *and* re-checked per document on the way out. That
 second one is the guarantee rather than an optimisation, because
-`$vectorSearch` hits never went through a query at all: deadlines are
-deliberately not pushed into the vector index, for reasons I will come back to.
+`$vectorSearch` hits do not pass through the collection query and deadlines
+are deliberately not duplicated in the vector index, for reasons I will come
+back to. The derivation — egress is the guarantee, any pushed-down clause is
+optional and must agree — is in [`AHA.md`](AHA.md).
 
 And `revoke()` is the operation no vector database has:
 
@@ -593,7 +595,7 @@ stronger property than keeping it in step well.
 **Hybrid ranking happens in the database.** `$rankFusion` (8.1+) fuses a
 `$vectorSearch` leg and a `$search` leg in one round trip, with no
 hand-normalised scores. That matters because semantic search is bad at
-identifiers, and the things agents put in a scope are full of them — `P0301`
+identifiers, and retrieval corpora are full of them — `P0301`
 has no useful embedding.
 
 **The tenant filter is pushed into the index**, including inside both
@@ -693,8 +695,16 @@ So: expired hits are fetched and then dropped, and they spend part of the fetch
 budget. The handle refills rather than guessing, and reports `examined` per
 query so the over-fetch factor is a number rather than a belief. In the
 pathological case above — 40 expired rows ahead of 6 live ones — filling a page
-of 5 examined 46 candidates. The per-hit CPU cost of the admission check itself
-is still unmeasured, and I would rather say that than estimate it.
+of 5 examined 46 candidates.
+
+The per-hit CPU cost of the admission check itself is no longer an estimate.
+`bench/admission.py` measures it: on a laptop (Darwin arm64, Python 3.12) the
+per-candidate classification cost is about **0.5 µs p50, under 0.8 µs p99**,
+flat from a 1-hit page to a 100-hit page and across two to three rules — the
+check is not where the time goes. Over-fetch under a *realistic* (interleaved)
+refusal rate stays near **2× up to 50% refused**, rising to ~7.6× p50 (30× p99)
+at 80% and ~15× p50 at 90%; the refill hits its round cap rather than starving.
+Those are the two numbers a reviewer asks for, and they are reproducible.
 
 The read path is also the only layer that works on the cosine fallback, where
 there is no index to push anything into. A guarantee that holds on two of three
@@ -749,10 +759,6 @@ scope; it says nothing about a review workflow. Three blocks on one absence
 is a message, and I only heard it because the issues were written down
 somewhere they could be read next to each other.
 
-**The admission overhead as a published number.** p50/p99 per hit. The obvious
-reviewer objection is "so you pay on every read, forever," and the answer
-should be a figure.
-
 **The two small sharp ones.** Passcode rate limiting is in-process, therefore
 per-replica — the honest trade for not needing Redis, and the first thing to
 fix on more than one process. CORS is wildcard-open on `/v1`, which is the whole
@@ -792,8 +798,9 @@ and already in a backup, while forgetting to decrypt hands you an obviously
 wrong `Binary`. Automatic decryption also raises for the entire batch when
 one key is missing — so a single crypto-erased document would turn a page of
 fifty into a 500, which is the "fewer rows, or an error" shape this whole
-system refuses. A destroyed key is a refusal with a name, `unrecoverable`,
-sitting beside the deadline and the revocation.
+system refuses. A destroyed key is a refusal with a name, `unrecoverable`;
+an unreachable vault is a different name, `key_unavailable`, so an outage
+cannot count as an erasure. Both sit beside the deadline and the revocation.
 
 ### And it is eventually consistent too
 
@@ -1034,7 +1041,7 @@ hold documents of different sensitivity without becoming four boundaries. And
 a reason declares whether it can be taken back, so a hold is an investigation
 rather than a graveyard, and an erasure stays an erasure.
 
-612 tests, six skipped, run against real `mongot` rather than a mock.
+More than six hundred tests run against real `mongot` rather than a mock.
 Three bugs found in the proof, one found by writing an example, three
 silent no-ops found by asking whether a refusal should be undoable, and two
 more found by chasing flakes instead of retrying them. Every number in this

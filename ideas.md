@@ -60,23 +60,16 @@ The cost is a retention decision worth making deliberately rather than by
 default: a receipt names ids and not document text, but it is a record of
 *who saw what*, and that has its own sensitivity and its own deadline.
 
-### 3. A failed KMS call must not look like a shredded key
+### 3. A failed KMS call must not look like a shredded key — shipped
 
-Smaller than the others, and it is a correctness bug in something already
-shipped, which is why it is here rather than in a backlog.
+`unseal()` now discriminates: `unrecoverable` when the data key is gone,
+`key_unavailable` when it still exists and could not be fetched. Counted
+apart, logged apart, both fail closed. Decided by asking our own key vault
+whether the key document exists, not by matching the driver's error text.
 
-`unseal()` refuses a document whose key cannot be fetched. A destroyed key
-and an unreachable KMS produce the same refusal — but one is the feature
-working and the other is an outage, and a dashboard that cannot tell them
-apart will report a successful erasure during a network partition.
-
-**Shape.** Separate the reasons (`unrecoverable` vs something like
-`key_unavailable`), fail closed on both, and count them apart — the same
-move that separated `not_cleared` from `deadline`, and for the same reason:
-a climbing count means different things.
-
-**You would know it worked when** killing the KMS in a test produces a
-different reason string than shredding a key, and both still refuse.
+**What is left.** It is tested against a simulated failure, not a real KMS
+outage. A dashboard that trusts the reason string is trusting that
+simulation until someone kills a real vault in anger.
 
 ### 4. `as_of(t)` — shipped, and it found the bug it was for
 
@@ -128,19 +121,25 @@ function:
   exist — but somebody will ask, and the answer should be written down
   before it is argued about.
 
-### 6. The admission overhead, as a published number
+### 6. The admission overhead, as a published number — shipped
 
 `bench/measure.py` measures TTL lag, per-tier latency and the cosine cliff.
-It does not measure the thing being sold: p50/p99 CPU per admitted hit, and
-the over-fetch factor under a realistic refusal rate.
+It did not measure the thing being sold: p50/p99 CPU per admitted hit, and
+the over-fetch factor under a realistic refusal rate. `bench/admission.py`
+now does, and writes `bench/results/admission.json` and `.md`.
 
-**Why.** *"So you pay on every read, forever"* is the first question a
-reviewer asks and it currently gets prose. `Page.examined` already reports
-over-fetch per query, so half the instrumentation exists.
+**The numbers** (laptop, Darwin arm64, Python 3.12, reproducible): the
+per-candidate classification check is ~0.5 µs p50 and under 0.8 µs p99, flat
+across page sizes 1–100 and 2–3 rules. Over-fetch under an interleaved refusal
+rate is ~2× to 50% refused, ~7.6× p50 at 80%, ~15× p50 at 90%, refilling to
+the round cap rather than starving. *"So you pay on every read, forever"* now
+has an answer that is a number rather than prose.
 
-Add the key-cache turnover while you are in there — measured at ~60s in one
-shape and >120s in another, which is currently a sentence in a docstring
-rather than a number in a table.
+**Still open:** the key-cache turnover — measured at ~60s in one shape and
+>120s in another — is a sentence in a docstring rather than a number in a
+table. The Atlas end-to-end scenario in `bench/admission.py` reports
+`examined/admitted` on a real server-embedded index, but its wall-clock is
+dominated by cloud round-trips and is labelled as such, not as the overhead.
 
 ### 7. The quarantine reviewer
 
@@ -168,8 +167,8 @@ compliance feature with extra indirection.
 
 ### 9. A TypeScript client
 
-The API is five calls. The agent ecosystem is TypeScript-first and the only
-client is Python.
+The API is five calls. The callers that matter are TypeScript-first (MCP
+hosts, RAG services) and the only client is Python.
 
 Cheapest reach-per-line here, and a genuine test of whether "five calls" is
 true — a second implementation is where an API finds out it has fourteen.
@@ -270,10 +269,12 @@ so the reasoning is not relitigated every six months.
 Not ideas — the honest caveats, written down so they are not rediscovered as
 surprises.
 
-- **Nothing has run against a cloud KMS.** The provider dicts and
-  master-key shapes are unit-tested and share a code path with the local
-  rung, but *"constructs the right `master_key` document"* and *"works
-  against AWS"* are different claims and only the first is proven.
+- **Nothing has run against a hosted KMS.** KMIP is proven — a real
+  server over TLS, rotation, shredding, TLS options — and the hosted
+  providers (`Aws`, `Azure`, `Gcp`) share that code path. What is
+  unproven is vendor-specific: credential discovery, throttling, and
+  AWS `ScheduleKeyDeletion`'s 7-day minimum. See [`ISSUES.md`](ISSUES.md)
+  #1.
 - **The key cache is not a contract.** ~60s in one shape, >120s in another.
   Crypto erasure is eventually consistent and the window is not specified
   anywhere. Refusal is what covers it; see #6 for making it a number.

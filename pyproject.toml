@@ -7,7 +7,7 @@ license = { text = "MIT" }
 authors = [{ name = "Fabian Valle" }]
 requires-python = ">=3.11"
 keywords = [
-    "mongodb", "vector-search", "retrieval", "rag", "agent-memory",
+    "mongodb", "vector-search", "retrieval", "rag", "admission-control",
     "ttl", "expiry", "gdpr", "erasure", "audit-log",
 ]
 classifiers = [
@@ -42,7 +42,7 @@ app = [
 voyage = [
     "voyageai>=0.3.2",
 ]
-# The MCP server: four tools, so any agent runtime is a channel not a rival.
+# The MCP server: five tools, so a model runtime is a channel not a rival.
 mcp = [
     "mcp>=2.0",           # 2.x: FastMCP was renamed MCPServer
     "httpx>=0.27",

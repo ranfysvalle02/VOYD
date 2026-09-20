@@ -55,7 +55,7 @@ Act I ends here:
 
 ```
   5. Now ask the retrieval system a question. This is the call an
-     agent makes -- it queries the vector index, not Postgres.
+     This is the call retrieval makes -- it queries the vector index, not Postgres.
 
      -> returned 1 hit(s). Top hit:
         score   1.0000

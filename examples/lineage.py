@@ -7,9 +7,10 @@
 the failure that defeats the guarantee using the guarantee's own storage.
 
 An agent retrieves a document, summarises it, and writes the summary back into
-the same collection -- which is what an agent memory *is*. Later somebody asks
-for the source to be erased. ``revoke()`` honours that request perfectly,
-against the source. The summary, which quotes it, keeps scoring well forever.
+the same collection -- which is what retrieval that writes back *is*. Later
+somebody asks for the source to be erased. ``revoke()`` honours that request
+perfectly, against the source. The summary, which quotes it, keeps scoring
+well forever.
 
 The erasure is satisfied. The information is not gone. Every receipt in the
 system says the system worked.

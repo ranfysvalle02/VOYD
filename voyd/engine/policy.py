@@ -105,8 +105,8 @@ class PolicyInvalid(ValueError):
     Raised at load, which is boot, which is the one moment a policy error
     costs nothing. The alternative -- accepting it and enforcing whichever
     half compiled -- is the failure this module exists to prevent: a rule
-    that filters in the query and not per document leaks every
-    ``$vectorSearch`` hit, because those never went through a query.
+    that filters in the collection query and not per document leaks every
+    ``$vectorSearch`` hit, because those do not pass through that clause.
     """
 
     def __init__(self, detail: str, spec: Any = None):

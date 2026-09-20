@@ -11,10 +11,10 @@ whole point of this module:
               "This fact may not reach a prompt", answered on every read,
               before anything is returned.
 
-Nobody ships the second one, so the honest answer to "when was this
-forgotten?" is really "when did the sweeper get to it?" -- and in the gap
-between those two, a deleted document is still being returned as a
-well-scored result.
+Ordinary stacks do not make the second one structural, so the honest answer
+to "when was this forgotten?" is really "when did the sweeper get to it?" --
+and in the gap between those two, a deleted document is still being returned
+as a well-scored result.
 
 Re-checking a deadline on the way out is not hard, and an application that
 knows to do it will do it correctly in the read path it was thinking about
@@ -37,11 +37,12 @@ have to declare that you want the unsafe thing.
 **Two enforcement points, always both.** The rule is pushed into the query
 where the query can express it (cheap: the database does the work) *and*
 re-checked per document on the way out (authoritative). That is not
-belt-and-braces paranoia. A vector index cannot filter on a deadline without
-an unmigratable index change -- see ``search.py`` for the measurements -- so
-hits arriving from ``$vectorSearch`` have never been filtered by anything.
-``reachable()`` is what a search path calls, and it is the guarantee; the
-query clause is the optimisation.
+belt-and-braces paranoia. Adding a deadline filter to an existing vector index
+requires an unmigratable index change -- see ``search.py`` for the
+measurements -- and a ``$vectorSearch`` hit does not pass through the
+collection query. ``reachable()`` is what every search path calls, including
+the index-free cosine fallback, so it is the guarantee; either pushed-down
+filter is the optimisation.
 
 **More than one reason to forget.** A deadline is only the common one:
 
@@ -141,7 +142,7 @@ LIFT_BATCH = 1000
 #                 filter gets skipped.
 #   clause()      the same rule as a query fragment, or None when it cannot
 #                 be expressed server-side. An optimisation, never the
-#                 guarantee -- search hits never went through a query.
+#                 guarantee -- search hits do not pass through that clause.
 
 
 class Rule(Protocol):
@@ -1151,9 +1152,9 @@ class Admission:
         """The authoritative check, on the way out.
 
         The query above is an optimisation. *This* is the guarantee, and it is
-        the only one that holds for documents that never went through a query
-        -- every hit from ``$vectorSearch``, where the deadline is deliberately
-        not an index filter.
+        the only one that holds for documents that did not pass through that
+        query clause -- every hit from ``$vectorSearch``, where the deadline is
+        deliberately not an index filter.
         """
         if doc is None:
             return doc

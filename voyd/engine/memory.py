@@ -1,26 +1,31 @@
-"""Memory that forgets.
+"""A collection with a deadline, hybrid retrieval, and no unfiltered read.
 
-The default outcome of bolting a vector store onto an agent is a corpus that
-only grows. Yesterday's decision, the retracted fact and the stale config all
-keep scoring well forever, so retrieval quality decays while the bill rises.
-The usual fixes are a cron job nobody maintains and a relevance hack nobody
-trusts.
+This is a trait, not a product. It composes searchable + expiring +
+forgettable into one handle because that is a common shape: a scope whose
+facts must not outlive a deadline, recalled by meaning and by token.
+Admission is the guarantee. This trait is one way to hold it.
+
+The default outcome of bolting a vector index onto a retrieval path is a
+corpus that only grows. Yesterday's decision, the retracted fact and the
+stale config all keep scoring well forever, so retrieval quality decays
+while the bill rises. The usual fixes are a cron job nobody maintains and
+a relevance hack nobody trusts.
 
 Two primitives already in this engine compose into the actual answer:
 
     hybrid retrieval  +  TTL  =  recall with decay
 
-A memory carries its own expiry, so the database forgets on schedule and the
-vector goes with the document -- no orphaned embeddings, and no reaper process
-of your own to write (MongoDB's TTL monitor is the reaper).
-And because a null deadline means "keep forever" (the same property that lets
-one collection hold both ephemeral and permanent records), **pinning is the
-absence of a TTL** rather than a second storage path.
+A document carries its own expiry, so the database forgets on schedule and
+the vector goes with the row -- no orphaned embeddings, and no reaper
+process of your own to write (MongoDB's TTL monitor is the reaper).
+And because a null deadline means "keep forever" (the same property that
+lets one collection hold both ephemeral and permanent records), **pinning
+is the absence of a TTL** rather than a second storage path.
 
-Deliberately *not* included: an embedding provider. You pass vectors in. Which
-model to use, when to re-embed, and what to spend are decisions that belong to
-the application, and a memory layer that picks your model for you is a cage
-wearing a convenience label.
+Deliberately *not* included: an embedding provider. You pass vectors in.
+Which model to use, when to re-embed, and what to spend are decisions that
+belong to the application, and a trait that picks your model for you is a
+cage wearing a convenience label.
 """
 
 from __future__ import annotations
@@ -39,10 +44,10 @@ log = logging.getLogger("engine.memory")
 
 @dataclass(frozen=True)
 class MemorySpec:
-    """A declared memory store.
+    """A declared decaying collection.
 
-    ``default_ttl`` is what an agent's working memory decays after. ``None``
-    means memories are permanent unless a caller asks otherwise -- the safer
+    ``default_ttl`` is what a working scope decays after. ``None``
+    means documents are permanent unless a caller asks otherwise -- the safer
     default for a knowledge base, the wrong one for a scratchpad.
     """
 
@@ -126,13 +131,13 @@ class Memory:
                      kind: str | None = None) -> list[dict]:
         """Retrieve for a prompt: hybrid, scoped, and never stale.
 
-        ``text`` is worth passing. Agent memory is full of identifiers --
+        ``text`` is worth passing. Retrieval corpora are full of identifiers --
         error codes, ticket numbers, function names, config keys -- which is
         exactly what embeddings are worst at and lexical search is exact about.
         Supplying it moves recall to the fused tier.
 
         The check on the way out is not redundant with the TTL index:
-        MongoDB's TTL monitor runs roughly once a minute, so an expired memory
+        MongoDB's TTL monitor runs roughly once a minute, so an expired row
         stays readable for a short window. A forgotten fact must never
         reappear in a context window, so every hit goes through
         ``Admission`` -- which refuses an expired deadline, an unreadable
@@ -142,7 +147,7 @@ class Memory:
         search index, which costs something: expired hits are fetched and then
         discarded, so they spend part of the fetch budget. That budget used to
         be a fixed ``limit * 2``, and a fixed multiple is a guess -- 40
-        expired memories ahead of 6 live ones returned *nothing* for a
+        expired rows ahead of 6 live ones returned *nothing* for a
         ``limit=5`` recall, with all six indexed and on disk. ``saturate()``
         refills instead, and says so when it cannot fill the page; see its
         docstring.

@@ -1,9 +1,10 @@
 """VOYD as an MCP server: five tools, and forgetting is one of them.
 
-Agent runtimes are not the competition, they are the channel. AgentCore,
-Vertex and Claude managed agents all run agents and all hand the result back
-with nowhere to put it. This is the somewhere -- reachable as tools, because
-the caller is a model, not a person with a browser.
+The caller is a model, not a person with a browser. Agent runtimes are a
+channel for the same admission path the Python handle exposes -- not a
+memory product, and not a rival. AgentCore, Vertex and Claude managed
+agents all run agents and all hand the result back with nowhere that
+refuses. This is a somewhere that does.
 
     open_scope(ttl_seconds)     a vector index that expires
     add(documents)              text straight in
@@ -15,24 +16,24 @@ There is deliberately no ``delete`` tool, and ``forget`` is not one wearing a
 different name -- which is the distinction worth being precise about, because
 the surface looks similar and the promise is not.
 
-A delete tool would hand the agent a cleanup obligation, and an agent that has
-to remember to clean up is the failure this exists to remove. ``forget``
+A delete tool would hand the caller a cleanup obligation, and a caller that
+has to remember to clean up is the failure this exists to remove. ``forget``
 hands it no obligation at all: nothing is removed, nothing is scheduled,
 nothing needs a follow-up call. It changes *reachability*, and erasure stays
 where it already was -- on the scope's deadline.
 
 Which is why it costs nothing to add. Forgetting a fact is giving it a
 deadline in the past, the same ``expire_at`` the scope already runs on, so
-"the user asked me to forget that" and "the scope expired" are one mechanism
-collected by one TTL index. The agent gets the verb it actually needs and
-still cannot leave anything behind.
+"forget this now" and "the scope expired" are one mechanism collected by
+one TTL index. The model gets the verb it actually needs and still cannot
+leave anything behind.
 
 Run it over stdio::
 
     uv run --extra mcp python -m voyd.mcp
 
 It talks to a VOYD deployment over HTTP -- the same ``/v1`` API a human would
-curl -- so the agent needs a namespace URL and an API key, nothing else.
+curl -- so the caller needs a namespace URL and an API key, nothing else.
 """
 
 from __future__ import annotations

@@ -33,9 +33,9 @@ def utc(**kw) -> datetime:
 
 @pytest.fixture
 async def agent(core):
-    """An agent's backend: scoped memory that forgets. One engine.
+    """The memory trait as a caller uses it: scoped recall that refuses.
 
-    Built on ``core`` -- a bare Engine on a vanilla client -- so the agent view
+    Built on ``core`` -- a bare Engine on a vanilla client -- so the view
     is proven against the caller an agent actually is, not the HTTP service's
     pre-configured store."""
     e, db = core
@@ -194,7 +194,7 @@ async def test_a_memory_can_carry_the_callers_own_fields(core):
     """``meta`` is the escape hatch that keeps this from being a cage.
 
     Untested it read as a parameter nobody wanted; it is the difference
-    between a memory layer and a memory layer that decides your schema.
+    between a trait and a trait that decides your schema.
     """
     engine, db = core
     mem = engine.model("memories", tenant="session").memory(dimensions=8)

@@ -1,0 +1,137 @@
+{
+  "generated": "2026-09-19 23:21:22 -0400",
+  "env": {
+    "machine": "Darwin arm64",
+    "python": "3.12.11",
+    "pymongo": "4.18.1"
+  },
+  "cpu": {
+    "refusal_rate": 0.5,
+    "repeats": 2000,
+    "by_rule_set": {
+      "deadline+revoked": {
+        "1": {
+          "p50_us": 0.458,
+          "p95_us": 0.5,
+          "p99_us": 0.542
+        },
+        "10": {
+          "p50_us": 0.49160000000000004,
+          "p95_us": 0.5334,
+          "p99_us": 0.6584
+        },
+        "100": {
+          "p50_us": 0.4775,
+          "p95_us": 0.57167,
+          "p99_us": 0.69958
+        }
+      },
+      "deadline+revoked+quarantined": {
+        "1": {
+          "p50_us": 0.542,
+          "p95_us": 0.709,
+          "p99_us": 0.792
+        },
+        "10": {
+          "p50_us": 0.5375,
+          "p95_us": 0.5708,
+          "p99_us": 0.7541
+        },
+        "100": {
+          "p50_us": 0.5225,
+          "p95_us": 0.61666,
+          "p99_us": 0.77417
+        }
+      }
+    }
+  },
+  "overfetch": {
+    "limit": 10,
+    "corpus": 500,
+    "trials": 400,
+    "rounds_cap": 4,
+    "by_rate": {
+      "0.00/shuffled": {
+        "examined_per_admitted_p50": 2.0,
+        "examined_per_admitted_p99": 2.0,
+        "rounds_p50": 1.0,
+        "rounds_max": 1,
+        "starved_rate": 0.0
+      },
+      "0.00/worst": {
+        "examined_per_admitted_p50": 2.0,
+        "examined_per_admitted_p99": 2.0,
+        "rounds_p50": 1.0,
+        "rounds_max": 1,
+        "starved_rate": 0.0
+      },
+      "0.10/shuffled": {
+        "examined_per_admitted_p50": 2.0,
+        "examined_per_admitted_p99": 2.0,
+        "rounds_p50": 1.0,
+        "rounds_max": 1,
+        "starved_rate": 0.0
+      },
+      "0.10/worst": {
+        "examined_per_admitted_p50": 8.0,
+        "examined_per_admitted_p99": 8.0,
+        "rounds_p50": 2.0,
+        "rounds_max": 2,
+        "starved_rate": 0.0
+      },
+      "0.50/shuffled": {
+        "examined_per_admitted_p50": 2.0,
+        "examined_per_admitted_p99": 6.1,
+        "rounds_p50": 1.0,
+        "rounds_max": 2,
+        "starved_rate": 0.0
+      },
+      "0.50/worst": {
+        "examined_per_admitted_p50": 32.0,
+        "examined_per_admitted_p99": 32.0,
+        "rounds_p50": 3.0,
+        "rounds_max": 3,
+        "starved_rate": 0.0
+      },
+      "0.80/shuffled": {
+        "examined_per_admitted_p50": 7.6,
+        "examined_per_admitted_p99": 30.1,
+        "rounds_p50": 2.0,
+        "rounds_max": 3,
+        "starved_rate": 0.0
+      },
+      "0.80/worst": {
+        "examined_per_admitted_p50": 50.0,
+        "examined_per_admitted_p99": 50.0,
+        "rounds_p50": 4.0,
+        "rounds_max": 4,
+        "starved_rate": 0.0
+      },
+      "0.90/shuffled": {
+        "examined_per_admitted_p50": 15.1,
+        "examined_per_admitted_p99": 40.1,
+        "rounds_p50": 2.0,
+        "rounds_max": 4,
+        "starved_rate": 0.0
+      },
+      "0.90/worst": {
+        "examined_per_admitted_p50": 50.0,
+        "examined_per_admitted_p99": 50.0,
+        "rounds_p50": 4.0,
+        "rounds_max": 4,
+        "starved_rate": 0.0
+      }
+    }
+  },
+  "atlas": {
+    "model": "voyage-4",
+    "corpus": 120,
+    "limit": 10,
+    "requested_refusal_rate": 0.4,
+    "examined_per_admitted": 2.0,
+    "admitted": 10,
+    "starved": false,
+    "wall_ms_p50_incl_cloud_rtt": 175.84933299804106,
+    "wall_ms_p99_incl_cloud_rtt": 211.22291695792228
+  }
+}

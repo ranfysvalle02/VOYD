@@ -33,9 +33,10 @@ A subject asks to be forgotten. You revoke the source document. Your
 receipts are clean, your audit log is clean, and your lawyer is satisfied.
 
 Six weeks earlier, an agent read that document, wrote a two-line summary,
-and stored the summary in the same collection — because that is what agent
-memory *is*. The summary quotes the fact. It has its own id, its own
-embedding, and nothing connecting it to the thing you just erased.
+and stored the summary in the same collection — because that is what
+retrieval that writes back *is*. The summary quotes the fact. It has its
+own id, its own embedding, and nothing connecting it to the thing you just
+erased.
 
 It will keep answering queries for as long as the collection exists. The
 erasure request was honoured against the source and defeated by the

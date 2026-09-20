@@ -10,11 +10,11 @@ it shows what happens when a read path *forgets* to check the deadline.
 
 There are two deadlines in play, and that is the point:
 
-1. **Retrieval refuses an expired memory immediately.** MongoDB's TTL monitor
+1. **Retrieval refuses an expired document immediately.** MongoDB's TTL monitor
    runs about once a minute, so an expired row stays *on disk* for a window
    after its deadline. Most systems will happily serve it during that window --
    a deleted document still answering queries is the bug this exists to remove.
-   So ``recall()`` checks ``expire_at`` on every hit before returning it. The
+   So the read path checks ``expire_at`` on every hit before returning it. The
    deadline is enforced on read, not just by the janitor.
 
 2. **Then the reaper takes the row, and the vector goes with it.** One
@@ -143,7 +143,7 @@ async def main() -> None:
                 if not seen_gap and on_disk == 2:
                     # THE WINDOW: unreachable by recall, still physically present.
                     say("DEADLINE PASSED")
-                    say(f"recall -> {sorted(texts)}   <- expired memory is "
+                    say(f"recall -> {sorted(texts)}   <- expired document is "
                         "already unreachable")
                     say(f"on disk: {on_disk} rows                     "
                         "<- but the row is still here")
@@ -159,11 +159,11 @@ async def main() -> None:
             f"{await vectors(engine)} vector")
         survivors = await mem.recall(SESSION, vec(0.9))
         say(f"recall -> {sorted(h['text'] for h in survivors)}   "
-            "<- pinned memory untouched")
+            "<- pinned document untouched")
 
         gone = await engine.db.memories.count_documents(
             {"text": "the fault code is P0301"})
-        assert gone == 0, "the expired memory outlived its deadline"
+        assert gone == 0, "the expired document outlived its deadline"
         assert await vectors(engine) == 1, "a vector outlived its document"
 
         print("\n  the document and its embedding left together, because they "
