@@ -195,8 +195,8 @@ Cut to 75 and pinned by
 except `POLICY` (a constant referenced nowhere); the rest went from
 *promised* to *present*, still importable from the module that owns it.
 
-**What this does not fix.** The engine is 17 modules and ~10,600 lines, and
-a curated export list does not make it smaller — it makes the promise
+**What this does not fix.** A curated export list does not make the package
+smaller — it makes the promise
 honest. Whether the *concepts* have outgrown the project's own aesthetic is
 a separate question, and the honest answer is that nobody has yet sat down
 and asked which of the last five features would be missed.
