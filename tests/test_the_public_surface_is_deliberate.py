@@ -37,11 +37,14 @@ SURFACE = {
                   "ExpirySpec"},
     "rules": {"Deadline", "Marked", "revoked", "quarantined", "Clearance",
               "Restricted", "EmbeddedWith", "Unrecoverable", "Budget",
+              # The second set-relative reason. Public because declaring it
+              # is the whole interface: `admitting(..., Distinct("hash"))`.
+              "Distinct",
               "compile_policy"},
     "reasons": {"DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED",
                 "WRONG_MODEL", "NOT_CLEARED", "UNRECOVERABLE",
                 "KEY_UNAVAILABLE", "LIFTED", "REACHABLE", "REFUSED",
-                "UNKNOWN", "OVER_BUDGET", "UNCOSTED", "UNNAMED"},
+                "UNKNOWN", "OVER_BUDGET", "UNCOSTED", "UNNAMED", "REDUNDANT"},
     "proof": {"Ledger", "LedgerSpec", "GENESIS", "canonical", "digest"},
     "context": {"ContextIndex", "ContextIndexSpec", "ContextUse",
                 "DIRECT", "SOURCE"},

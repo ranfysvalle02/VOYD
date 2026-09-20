@@ -122,6 +122,18 @@ returning `None` stops being a degradation: it is a rule accurately
 reporting it has no server-side form, enforced anyway, at the layer that
 was always authoritative.
 
+And there is more than one. `Distinct` refuses a near-duplicate of
+something already in the page — `redundant` — which is set-relative for
+the same reason and equally unpushable. The two compose on one handle,
+each with its own per-read state, which makes this a **category** rather
+than one awkward example:
+
+| | decided by | has a query half |
+|---|---|---|
+| deadline, revoked, clearance, policy | the document | yes |
+| `over_budget` | how much room is left | no |
+| `redundant` | what is already in the room | no |
+
 The long version, including what policy engines *are* good at and the
 division of labour that follows, is
 [`policy-engines.md`](policy-engines.md).

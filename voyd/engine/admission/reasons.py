@@ -39,6 +39,15 @@ OVER_BUDGET = "over_budget"
 # but, unlike being over budget, it does not close the page: one uncostable
 # document says nothing about how much room is left.
 UNCOSTED = "uncosted"
+# A near-identical document was already admitted to this same read. The second
+# *set*-relative reason, and it is worth saying how it differs from the first:
+# ``over_budget`` is about how much room is left, ``redundant`` is about what
+# is already in the room. Neither is a property of the document -- both are
+# properties of the page it is joining -- which is why no index filter and no
+# per-object policy engine can express either. Counted apart from everything
+# above because a climbing ``redundant`` is a *chunking* problem, not a
+# forgetting one: the same passage was indexed several times.
+REDUNDANT = "redundant"
 
 # The three answers ``reachability_at`` can give. ``unknown`` is the one
 # worth having: a row the reaper took leaves nothing to answer from, and

@@ -34,6 +34,7 @@ from typing import Any, Callable, ClassVar, Protocol
 
 from ..time import aware, living, now
 from .reasons import (DEADLINE, NOT_CLEARED, OVER_BUDGET, QUARANTINED,
+                      REDUNDANT,
                       REVOKED, UNCOSTED, UNREADABLE, UNRECOVERABLE,
                       WRONG_MODEL)
 
@@ -167,6 +168,85 @@ class Tab:
             return False
         self.spent += cost
         return True
+
+
+class Tabs:
+    """Per-read state for *every* cumulative rule on a handle, not just one.
+
+    A cumulative rule needs somewhere to remember what this read has already
+    admitted, and that somewhere cannot be the rule (frozen, shared across
+    concurrent callers) or the handle (deduplicated per collection, cloned
+    per caller). ``Tab`` solved that for one rule. This solves it for several
+    without letting them touch each other's memory.
+
+    The reason it is not a plain ``dict`` is the read path. ``find`` and
+    ``saturate`` ask three questions of per-read state -- is the page closed,
+    how much was spent, out of what -- and neither should have to know which
+    of several rules owns a budget. So this answers those in aggregate and
+    hands each rule its own state by identity:
+
+    - ``exhausted`` is true if *any* rule closed the page. A page is closed
+      when one reason says stop; asking which is ``receipts()``'s job.
+    - ``spent`` / ``limit`` come from the one state that reports them. A rule
+      whose memory is a set of hashes has no meaningful ``spent``, and
+      summing it with a token count would produce a number that reads like
+      tokens and is not.
+
+    Keyed by ``id(rule)`` deliberately: two rules can be *equal* (frozen
+    dataclasses with the same fields) and still be two declarations the
+    caller wrote on purpose, and merging their state because they compared
+    equal would be one rule's limit silently governing the other -- the exact
+    failure the old "one cumulative rule per read" restriction existed to
+    prevent, reintroduced by a dict key.
+    """
+
+    __slots__ = ("_states",)
+
+    def __init__(self, states: dict[int, Any]):
+        self._states = states
+
+    def for_rule(self, rule) -> Any:
+        return self._states.get(id(rule))
+
+    def observe(self, docs: list[dict]) -> None:
+        """Show every state the candidate set, before any of it is admitted.
+
+        Set-relative rules split into two kinds and this is the difference.
+        A budget is *order*-relative: it charges as it goes and the answer
+        depends on what came before, so it needs no preview. A rule like
+        ``Distinct`` is *set*-relative: it compares a document against its
+        neighbours, and on a page whose order is relevance it cannot know
+        whether the thing it is about to admit has a better twin two rows
+        down.
+
+        Optional, so a state that does not implement it is unaffected, and
+        never a substitute for the per-document check -- ``why`` still runs
+        on every candidate. This only lets a rule *see* the set it is
+        relative to, which is the one thing a per-document predicate
+        structurally cannot discover for itself.
+        """
+        for state in self._states.values():
+            seen = getattr(state, "observe", None)
+            if callable(seen):
+                seen(docs)
+
+    @property
+    def exhausted(self) -> bool:
+        return any(getattr(s, "exhausted", False) for s in self._states.values())
+
+    @property
+    def spent(self) -> int:
+        for state in self._states.values():
+            if hasattr(state, "spent"):
+                return state.spent
+        return 0
+
+    @property
+    def limit(self) -> int:
+        for state in self._states.values():
+            if hasattr(state, "limit"):
+                return state.limit
+        return 0
 
 
 class CumulativeRule(Rule, Protocol):
@@ -503,6 +583,151 @@ class Restricted:
         return {self.field: {"$in": held}}
 
 
+class Kept:
+    """What ``Distinct`` remembers for one read: the set it is filtering.
+
+    Two collections, and the split is the point. ``best`` is filled by
+    ``observe`` before anything is admitted and says, for each cluster of
+    near-identical candidates, which one wins. ``taken`` is filled during the
+    read and stops a second member of a cluster slipping through if the
+    winner was itself refused by some *other* rule -- an expired twin does
+    not get to reserve the slot and then vacate it.
+
+    ``exhausted`` is always False and that is deliberate, not an oversight: a
+    redundant hit closes nothing. The page keeps filling, which is exactly
+    what a caller wants -- drop the duplicate and give me the next distinct
+    thing -- and it is why ``saturate`` refills past a ``redundant`` refusal
+    the same way it refills past a deadline.
+    """
+
+    __slots__ = ("best", "taken", "exhausted", "key")
+
+    def __init__(self, key):
+        self.key = key
+        self.best: dict[Any, Any] = {}
+        self.taken: set = set()
+        self.exhausted = False
+
+    def observe(self, docs: list[dict]) -> None:
+        """Pick one winner per cluster, from the whole candidate set.
+
+        Order matters and relevance order is the right one: the first
+        document with a given key is the best-ranked member of its cluster,
+        so it is the one kept. Doing this in ``observe`` rather than as the
+        read goes is the whole reason the hook exists -- mid-read, a rule
+        cannot know whether the row it is about to admit has a better twin
+        two positions down.
+        """
+        for doc in docs:
+            signature = self.key(doc)
+            if signature is None:
+                continue
+            self.best.setdefault(signature, id(doc))
+
+
+@dataclass(frozen=True)
+class Distinct:
+    """Refused because the same content is already in this prompt.
+
+    The second *set*-relative reason, and the one that shows the first was
+    not a special case. A retrieval index returns what ranked; if a document
+    was chunked twice, or the same passage appears in a policy PDF and the
+    wiki page quoting it, the ranker will return both -- correctly, because
+    both *are* relevant. Relevance has no opinion about redundancy.
+
+    What that costs is not abstract. Duplicate passages spend the same
+    context room a ``Budget`` is trying to protect, and they bias the model:
+    a claim repeated three times in a prompt reads as corroborated by three
+    sources. The usual fix is a de-duplication pass bolted on after
+    retrieval, outside whatever governs the read -- which is the second
+    enforcement point this package exists to abolish.
+
+        docs = engine.model("notes").admitting(
+            Deadline(), revoked(), Budget(limit=8000), Distinct("chunk_hash"))
+
+    ``on`` is the identity of the content, not of the row: a hash a pipeline
+    already computed, or any callable over the document. It is required and
+    has no default, because guessing that two documents are "the same" is
+    precisely the judgement a library should not make on a caller's behalf.
+
+    **Why this cannot be an index filter or a policy rule.** Whether this
+    document is redundant depends on which *other* documents are in the same
+    page. ``$vectorSearch`` decides each candidate before the page exists,
+    and ``enforce(subject, object, action)`` has no argument for the rest of
+    the set -- so the same document is admitted alone and refused in company.
+    See ``docs/policy-engines.md``.
+    """
+
+    on: Any = None
+    reason: str = REDUNDANT
+    needs_tab: ClassVar[bool] = True
+    # Observes the page; never spends anything. That is what puts this ahead
+    # of a budget in the asking order -- see ``why_refused``.
+    charges: ClassVar[bool] = False
+    # Not a reason the fact is forgotten, so break-glass may see it: an
+    # auditor asking what was reachable wants the duplicates too.
+    bypassable: ClassVar[bool] = True
+
+    def __post_init__(self) -> None:
+        if self.on is None:
+            raise ValueError(
+                "Distinct(on=...) must name the field or callable that says "
+                "two documents are the same content. There is no safe "
+                "default: guessing it is how a de-duplicator silently drops "
+                "a document somebody needed")
+        if not callable(self.on) and not isinstance(self.on, str):
+            raise TypeError("Distinct.on must be a field name or a callable")
+
+    def _key_of(self, doc: dict) -> Any:
+        value = self.on(doc) if callable(self.on) else doc.get(self.on)
+        try:
+            hash(value)
+        except TypeError:
+            return None          # unhashable: treated as having no identity
+        return value
+
+    def new_tab(self) -> Kept:
+        return Kept(self._key_of)
+
+    def why(self, doc: dict, *, when: datetime | None = None,
+            tab: Any = None) -> str | None:
+        """Admit the cluster's winner; refuse the rest.
+
+        Never raises, like every rule here: a document with no computable
+        identity is admitted rather than refused, and that direction is
+        deliberate even though it is the open one. The other reasons on this
+        handle fail *closed* because they answer "may this reach a prompt";
+        this one answers "is this a duplicate", and a document whose identity
+        cannot be computed is not evidence that it is one. Failing closed
+        here would delete content over a missing hash field.
+        """
+        if tab is None:
+            return None                      # not a set read: nothing to say
+        signature = self._key_of(doc)
+        if signature is None:
+            return None
+        if signature in tab.taken:
+            return self.reason
+        winner = tab.best.get(signature)
+        if winner is not None and winner != id(doc):
+            return self.reason
+        tab.taken.add(signature)
+        return None
+
+    def clause(self) -> dict | None:
+        """None, and not for want of trying.
+
+        There is no server-side half. A query predicate is evaluated against
+        one document with no knowledge of the others the same query will
+        return, so "is there already one of these in the result" is not a
+        thing a filter can ask. ``$group`` could collapse duplicates in an
+        aggregation, but that is a different pipeline shape with different
+        ranking, not this rule pushed down -- and it would not apply to the
+        ``$vectorSearch`` leg at all.
+        """
+        return None
+
+
 @dataclass(frozen=True)
 class Budget:
     """Refused because the read's context-token budget was spent.
@@ -555,6 +780,11 @@ class Budget:
     cost_field: str = "tokens"
     reason: str = OVER_BUDGET
     needs_tab: ClassVar[bool] = True
+    # Spends the tab as a side effect, so this is asked after every
+    # other rule -- including other cumulative ones. A budget charged
+    # for a document another reason then refuses makes `Page.spent` a
+    # number that is not the sum of what was admitted.
+    charges: ClassVar[bool] = True
     bypassable: ClassVar[bool] = True
 
     def __post_init__(self) -> None:

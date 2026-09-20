@@ -100,11 +100,12 @@ from .core import AdmissionCore  # noqa: F401
 from .handle import Admission
 from .reasons import (DEADLINE, KEY_UNAVAILABLE, LIFTED, LIFT_BATCH,
                       NOT_CLEARED, OVER_BUDGET, QUARANTINED, REACHABLE,
+                      REDUNDANT,
                       REFUSED, REVOKED, UNCOSTED, UNKNOWN, UNNAMED,
                       UNREADABLE, UNRECOVERABLE, WRONG_MODEL)
 from .receipts import Page, Receipts
-from .rules import (Budget, Clearance, Deadline, EmbeddedWith, Marked,
-                    Restricted,
+from .rules import (Budget, Clearance, Deadline, Distinct, EmbeddedWith,
+                    Marked, Restricted,
                     Rule,  # noqa: F401
                     Unrecoverable, quarantined, revoked)
 from .spec import AdmissionSpec, why_refused
@@ -112,9 +113,10 @@ from .spec import AdmissionSpec, why_refused
 __all__ = [
     "Admission", "AdmissionSpec", "Page", "Receipts", "why_refused",
     "Deadline", "Marked", "Unrecoverable", "EmbeddedWith", "Clearance",
-    "Restricted", "Budget", "revoked", "quarantined",
+    "Restricted", "Budget", "Distinct", "revoked", "quarantined",
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
     "NOT_CLEARED", "UNRECOVERABLE", "KEY_UNAVAILABLE", "REACHABLE",
     "REFUSED", "UNKNOWN", "LIFTED", "LIFT_BATCH", "OVER_BUDGET", "UNCOSTED",
+    "REDUNDANT",
     "UNNAMED",
 ]

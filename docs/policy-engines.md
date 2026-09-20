@@ -134,6 +134,70 @@ Whole thing: [`examples/policy_engine.py`](../examples/policy_engine.py).
 VOYD does not depend on Casbin and will not; the argument is that these are
 two layers, and a dependency would be the opposite claim.
 
+## One rule is an anecdote; two is a category
+
+A single awkward example invites a single patch. So the honest next question
+was whether a token budget is a curiosity or the first member of something,
+and the test is whether a *second* rule of the same kind exists that nobody
+would call contrived.
+
+**Near-duplicate suppression.** A passage was chunked twice, or it appears in
+a policy PDF and again in the wiki page quoting it. The ranker returns both,
+correctly — both *are* relevant. Relevance has no opinion about redundancy.
+What it costs is not abstract: duplicate passages spend the same context room
+the budget is protecting, and they bias the model, because a claim repeated
+three times in a prompt reads as corroborated by three sources.
+
+```python
+docs = engine.model("notes").admitting(
+    Deadline(), revoked(), Budget(limit=8000), Distinct("chunk_hash"))
+```
+
+`Distinct` is set-relative for exactly the same reason `Budget` is: whether
+this document is redundant depends on which *other* documents are in the page.
+Same document, admitted alone, refused in company. `clause()` returns `None`,
+and not for want of trying — a query predicate is evaluated against one
+document with no knowledge of the others the same query will return.
+
+So there is a category, and it has a name worth using:
+
+| | decided by | has a query half |
+|---|---|---|
+| deadline, revoked, clearance, compiled policy | the document | yes |
+| `over_budget` | how much room is left | no |
+| `redundant` | what is already in the room | no |
+
+The second column is the whole distinction. A **document-relative** reason
+gives the same answer every time you ask it about the same row, which is what
+lets it become a filter. A **set-relative** reason does not, which is why no
+filter and no `enforce(subject, object, action)` can hold one.
+
+## What composing them cost, and what that taught
+
+Allowing two cumulative rules on one handle was a construction error in this
+codebase until recently, and the error message was right about the hazard:
+one shared running total meant the first rule's limit silently governed the
+second. The fix was to stop sharing — per-read state is now keyed by rule
+identity, deliberately not by value, because two `Budget(limit=50)` objects
+compare *equal* as frozen dataclasses and merging them would restore the bug
+through a dict key.
+
+Then composition immediately found a second bug that one rule could never
+have exposed. Asked in declaration order, `Budget` charges for a document
+that `Distinct` is about to refuse. Nothing raises. `Page.spent` just stops
+being the sum of what was admitted, and four copies of one passage report
+`over_budget` for content that never reached the page.
+
+The repository already had the principle written down, one level up — a
+budget "must be asked only for documents every pure rule already admitted."
+It just had not needed the second level yet. So `charges` is now a class
+contract and the asking order is pure rules, then observing cumulative rules,
+then charging ones. Declaration order does not decide it, because getting
+that right is the engine's job rather than the next caller's.
+
+Both rules, composed, in
+[`tests/test_a_reason_can_be_about_the_page_not_the_document.py`](../tests/test_a_reason_can_be_about_the_page_not_the_document.py).
+
 ## What the budget actually proves
 
 [`AHA.md`](AHA.md) derives, from the fact that a `$vectorSearch` hit never

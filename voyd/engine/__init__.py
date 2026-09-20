@@ -88,10 +88,11 @@ from .context import (DIRECT, SOURCE, ContextIndex,
                       ContextIndexSpec, ContextUse)
 from .expiry import Expiry, ExpirySpec
 from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED, UNNAMED,
-                        OVER_BUDGET, QUARANTINED,
+                        OVER_BUDGET, QUARANTINED, REDUNDANT,
                         REACHABLE, REFUSED, REVOKED, UNCOSTED, UNKNOWN,
                         UNREADABLE, UNRECOVERABLE, WRONG_MODEL,
-                        Budget, Clearance, Deadline, EmbeddedWith, Page,
+                        Budget, Clearance, Deadline, Distinct,
+                        EmbeddedWith, Page,
                          Restricted,
                          Admission, AdmissionSpec, Marked, Unrecoverable,
                          quarantined, revoked, why_refused)
@@ -556,12 +557,14 @@ __all__ = [
     # ---- reasons a fact may not reach a prompt: the rules you construct ----
     "Deadline", "Marked", "revoked", "quarantined",
     "Clearance", "Restricted", "EmbeddedWith", "Unrecoverable", "Budget",
+    "Distinct",
     "compile_policy",
 
     # ---- and the reasons you read back out of receipts() ----
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
     "NOT_CLEARED", "UNRECOVERABLE", "KEY_UNAVAILABLE", "LIFTED",
     "REACHABLE", "REFUSED", "UNKNOWN", "OVER_BUDGET", "UNCOSTED", "UNNAMED",
+    "REDUNDANT",
 
     # ---- proof ----
     "Ledger", "LedgerSpec", "GENESIS", "canonical", "digest",

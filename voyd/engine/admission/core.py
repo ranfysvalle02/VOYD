@@ -22,14 +22,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Self, Iterable
+from typing import Any, Iterable, Self
 
 from ..errors import CallerRequired, require_tenant
 from ..authority import AUDIT, AuthorityRequired, NotAuthorised
 from ..time import aware
 from .reasons import UNNAMED
 from .receipts import Receipts
-from .rules import Rule, Tab
+from .rules import Rule, Tabs
 from .spec import AdmissionSpec, why_refused
 
 log = logging.getLogger("engine.admission")
@@ -454,7 +454,7 @@ class AdmissionCore:
         at_instant = getattr(rule, "clause_at", None)
         return at_instant(self._as_of) if at_instant else None
 
-    def _open_tab(self) -> Tab | None:
+    def _open_tab(self) -> Tabs | None:
         """A fresh budget for one read, or ``None`` if no cumulative rule.
 
         One tab per read, never stored on the handle: the handle is shared
@@ -469,17 +469,18 @@ class AdmissionCore:
         mean somebody bypassed construction, so this method stays small rather
         than inventing a second policy.
         """
+        states: dict[int, Any] = {}
         for rule in self.rules:
             if (getattr(rule, "needs_tab", False)
                     and (not self._include
                          or not getattr(rule, "bypassable", True))):
                 new_tab = getattr(rule, "new_tab", None)
                 if callable(new_tab):
-                    return new_tab()
-        return None
+                    states[id(rule)] = new_tab()
+        return Tabs(states) if states else None
 
     def _admit(self, doc: dict | None, *, when: datetime | None = None,
-               tally: dict[str, int] | None = None, tab=None):
+               tally: dict[str, int] | None = None, tab: Tabs | None = None):
         """The authoritative check, on the way out.
 
         The query above is an optimisation. *This* is the guarantee, and it is
@@ -652,6 +653,12 @@ class AdmissionCore:
         """
         self._begin_read()
         tab = self._open_tab()
+        docs = list(docs)
+        if tab is not None:
+            # Set-relative rules see the candidates before any are admitted.
+            # A no-op for order-relative ones like Budget; the per-document
+            # check still decides every hit either way.
+            tab.observe(docs)
         kept = [d for d in docs
                 if self._admit(d, when=when, tab=tab) is not None]
         # Redactions are counted into ``receipts()`` by ``_admit`` already;
@@ -662,7 +669,7 @@ class AdmissionCore:
 
     def _classify(self, docs: list[dict], *, when: datetime | None = None,
                   max_kept: int | None = None
-                  ) -> tuple[list[dict], dict[str, int], Tab | None, int]:
+                  ) -> tuple[list[dict], dict[str, int], Tabs | None, int]:
         """Admit a candidate set without recording anything yet.
 
         Returns the tab as well, so ``saturate`` can read how much budget was
@@ -682,6 +689,11 @@ class AdmissionCore:
         tab = self._open_tab()
         tally: dict[str, int] = {}
         kept: list[dict] = []
+        if tab is not None:
+            # Each refill round re-classifies the whole superset from the
+            # top against a fresh tab, so a set-relative rule sees the
+            # *current* candidate set rather than a stale first round.
+            tab.observe(docs)
         for doc in docs:
             admitted = self._admit(doc, when=when, tally=tally, tab=tab)
             if admitted is not None:

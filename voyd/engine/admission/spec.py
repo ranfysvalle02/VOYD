@@ -104,12 +104,13 @@ class AdmissionSpec:
         spec = self if self.rules else replace(self, rules=default_rules)
         cumulative = [r for r in spec.rules
                       if getattr(r, "needs_tab", False)]
-        if len(cumulative) > 1:
-            names = [getattr(r, "reason", type(r).__name__) for r in cumulative]
-            raise ValueError(
-                f"{self.collection}: one read may declare one cumulative rule, "
-                f"got {names}. They cannot share a running total: the first "
-                f"rule's limit would silently govern the rest")
+        # Several cumulative rules are allowed, and the sentence that used to
+        # be here said why they were not: "they cannot share a running total,
+        # the first rule's limit would silently govern the rest." That was
+        # true of one shared `Tab` and is the whole reason `Tabs` keys state
+        # by `id(rule)` -- a budget and a de-duplicator have nothing to say to
+        # each other, and now they cannot. What has not changed is that each
+        # one must bring its own state, which is the check below.
         if spec.subjects is not None and not spec.subjects.strip():
             raise ValueError(
                 f"{self.collection}: subjects= must name a field, not an "
@@ -170,7 +171,11 @@ def _ask(rule, doc: dict, *, when: datetime | None,
     if getattr(rule, "needs_caller", False):
         kwargs["caller"] = caller
     if getattr(rule, "needs_tab", False):
-        kwargs["tab"] = tab
+        # `Tabs` holds one state per cumulative rule; anything else is a bare
+        # state passed straight through, which is what a caller building a
+        # spec by hand and calling `why_refused(tab=...)` in a test does.
+        pick = getattr(tab, "for_rule", None)
+        kwargs["tab"] = pick(rule) if callable(pick) else tab
     why = getattr(rule, "why", None)
     if callable(why):
         return why(doc, **kwargs)
@@ -190,13 +195,22 @@ def why_refused(doc: dict, spec: AdmissionSpec,
     expired, because the two demand different responses.
 
     **Cumulative rules (``needs_tab``) are asked last, whatever the declared
-    order.** A budget charges its ``Tab`` as a side effect, so asking it before
-    a deadline would spend room on a document that was going to be refused
-    anyway -- and it must be asked only for documents every pure rule already
-    admitted. Ordering that correctly is not the rule author's job to
-    remember (this package's whole complaint about conventions), so it is done
-    here: ``sorted`` is stable, so pure rules keep their declared order and
-    the cumulative ones follow.
+    order, and the ones that *charge* are asked last of all.** A budget
+    charges its ``Tab`` as a side effect, so asking it before a deadline
+    would spend room on a document that was going to be refused anyway -- it
+    must be asked only for documents every other rule already admitted.
+    Ordering that correctly is not the rule author's job to remember (this
+    package's whole complaint about conventions), so it is done here:
+    ``sorted`` is stable, so each group keeps its declared order.
+
+    The second half of that key arrived with the second cumulative rule and
+    is the same argument one level in. ``Distinct`` refuses a duplicate
+    without charging anything; ``Budget`` charges. Declared the other way
+    round, a budget spends real room on a document ``Distinct`` is about to
+    drop, and then ``Page.spent`` is no longer the sum of what was admitted
+    -- which is exactly what ``Tab.charge`` promises. Four copies of one
+    passage would report ``over_budget`` for content that never reached the
+    page. So ``charges`` is a class contract, not a declaration order.
 
     Never raises, whatever a rule does. A rule that throws is treated as a
     refusal and named, because an exception inside a filter is how the
@@ -204,7 +218,8 @@ def why_refused(doc: dict, spec: AdmissionSpec,
     must not come back through a third-party rule.
     """
     rules = sorted(spec.with_defaults().rules,
-                   key=lambda r: getattr(r, "needs_tab", False))
+                   key=lambda r: (getattr(r, "needs_tab", False),
+                                  getattr(r, "charges", False)))
     for rule in rules:
         if only_unbypassable and getattr(rule, "bypassable", True):
             continue

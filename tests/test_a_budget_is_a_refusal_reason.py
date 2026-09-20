@@ -293,13 +293,49 @@ async def test_a_cost_callable_that_raises_fails_closed_as_uncosted():
     assert page.spent == 0
 
 
-def test_two_cumulative_rules_are_refused_at_construction():
-    """One running total cannot honestly serve two limits. The old shape let
-    the first rule's tab silently govern the second; now the declaration is
-    rejected before a read can lie."""
-    with pytest.raises(ValueError, match="one cumulative rule"):
-        Admission(None, AdmissionSpec(
-            "notes", rules=(Budget(limit=10), Budget(limit=20))))
+async def test_two_cumulative_rules_each_keep_their_own_running_total():
+    """Two limits, two tabs, and the tighter one decides -- which is what a
+    caller who declared both meant.
+
+    This test used to assert the opposite: declaring two cumulative rules was
+    a construction error, because there was one ``Tab`` per read and the
+    first rule's limit would silently govern the second. That was an honest
+    response to a real hazard and the wrong fix for it -- the hazard was
+    *shared* state, not *several* rules, and refusing the declaration meant a
+    token budget and a de-duplicator could never appear on one handle even
+    though they have nothing to say to each other.
+
+    ``Tabs`` keys state by ``id(rule)``, so the sharing is gone and the
+    restriction with it. Two equal-but-distinct ``Budget`` objects are the
+    sharpest case: they compare equal as frozen dataclasses, so anything
+    keyed by value would merge them back into the bug.
+    """
+    tight, loose = Budget(limit=10), Budget(limit=1000)
+    docs = [{"_id": 1, "tokens": 8}, {"_id": 2, "tokens": 8}]
+
+    page, _ = await _saturate([loose, tight], docs, limit=2)
+    # 8 fits in both. 16 fits in `loose` and not in `tight`, so the tighter
+    # limit closes the page -- and it could only do that with its own total.
+    assert [d["_id"] for d in page] == [1]
+    assert page.refused == {OVER_BUDGET: 1}
+
+
+def test_a_cumulative_rule_must_still_bring_its_own_state():
+    """Lifting the two-rule restriction did not lift this one: `needs_tab`
+    without `new_tab()` is still a boot error, because the rule would be
+    handed ``None`` and quietly stop enforcing."""
+    class Broken:
+        reason = "broken_cumulative"
+        needs_tab = True
+
+        def refuses(self, doc, **kw):
+            return False
+
+        def clause(self):
+            return None
+
+    with pytest.raises(TypeError, match="new_tab"):
+        Admission(None, AdmissionSpec("notes", rules=(Broken(),)))
 
 
 def test_a_cumulative_rule_without_a_tab_factory_is_refused_at_construction():
