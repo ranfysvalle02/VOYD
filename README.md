@@ -1,72 +1,18 @@
 # VOYD
 
-**Your vector index is still serving documents you deleted.**
+**Ranking is not permission.**
 
-Admission control for retrieval: a read path that *cannot* return a fact it has
-forgotten — expired, revoked, quarantined, legally held, or embedded by a model
-you replaced last quarter. Built for RAG on MongoDB Atlas Vector Search, and
-ported to pgvector and Qdrant to show the idea is not one vendor's feature.
+Your retrieval answers with a confident score and no idea whether that hit was
+allowed to be there — an expired row the sweeper has not reached, a fact
+somebody revoked, a vector from the embedding model you swapped last quarter, a
+document a detector just flagged. An index decides what is *relevant*. Nothing
+in the ordinary read path was asked the other question:
 
----
+> **may this fact reach a prompt?** — answered on every read, immediately,
+> whatever the sweeper is doing.
 
-## The incident
-
-Six read paths against a collection with a deadline. One of them forgot the
-filter.
-
-Nothing broke. No error, no alert, no failed request — the read returned a
-confident, well-scored, *expired* document, and a model wrote it into an answer
-somebody believed. The defect was not that one filter was wrong. It was that
-remembering the filter was a thing a person had to do, six times, forever,
-including the next person to open the file.
-
-It generalises past deadlines. A document you deleted, a credential somebody
-revoked, a fact a customer asked you to erase under GDPR Art. 17 — your storage
-layer agrees it is gone. Your index has not heard. A TTL monitor sweeps about
-once a minute (measured here: 60.0s); an S3 lifecycle rule runs about once a
-day. Until they catch up, ranking keeps answering a question nobody asked it:
-
-> An index decides what is **relevant**. Nothing in the ordinary read path was
-> asked the other question — **may this fact reach a prompt?**
-
-Deletion is a storage event on a storage clock. Retrieval is a read on a
-different one. **Delete is a wish. Refuse is a contract.**
-
----
-
-## Do you have this bug? Find out before installing anything
-
-One stdlib file. No database, no credentials, nothing to install — and you
-point it at *your* repository, not this one:
-
-```bash
-python scanner/voyd_scan path/to/your/repo
-```
-
-```
-scanned 1 file(s).
-1 collection(s) carry a deadline or mark: notes
-2 of 3 read(s) against them do not filter the mark:
-
-  app/store.py:5  notes  (filter does not name the mark)
-  app/store.py:8  notes  (filter does not name the mark)
-```
-
-A collection counts as deadline-bearing only when your own code says so — a
-write or index that names a mark field, or a read that already filters on it.
-Every hit is then a read that can serve a document your own schema calls gone.
-
-The number is built to be defensible rather than alarming. It parses source
-with `ast`, so ORM layers, dynamically named collections and filters assembled
-by a helper are reported as *indeterminate*, never counted as leaks; the file's
-header is specific about what it cannot see. It undercounts on purpose.
-
-**Zero means you do not need this.** Anything else is the gap, and the rest of
-this page is about closing it structurally instead of one filter at a time.
-
----
-
-## The fix, in the diff you would actually write
+That question is the product. VOYD answers it at the one place every retrieval
+path passes through on the way out: a read handle with no unfiltered read on it.
 
 ```python
 docs = engine.model("notes").forgettable()
@@ -79,102 +25,29 @@ await docs.revoke({"_id": x}, reason="credential leaked")
 # unreachable on the next read. The row is still on disk. That is the proof.
 ```
 
-That handle has **no unfiltered `find` and no unfiltered `search`**, which is
-the entire trick. Safety stops being something the next author remembers and
-becomes something they would have to actively ask for. The failure mode is
-inverted: you used to have to remember to be safe; now you declare that you
-want the unsafe thing, in a word a reviewer can grep for.
+There is **no unfiltered `find` and no unfiltered `search`** on that handle, so
+refusal doesn't depend on the next author remembering it. The failure mode is
+inverted: you used to have to remember to be safe; now you have to declare that
+you want the unsafe thing, in a word a reviewer can grep for — and that word is
+not a free pass. `including_refused()` asks an `AUDIT` grant where an authority
+is installed on every read, then increments `including_refused_total` and
+records the actor/time in `receipts()`, so a cached break-glass handle is a
+door with an alarm rather than a permanent pass.
 
-And that word is not a free pass. `including_refused()` asks an `AUDIT` grant
-on every read where an authority is installed, increments
-`including_refused_total`, and records actor and time in `receipts()` — so a
-cached break-glass handle is a door with an alarm, not a permanent key.
-
-Multi-tenancy is one argument away — `model("notes", tenant="tenant_id")` —
-after which the tenant field is *required* in every read, so `find({"tenant_id":
-t})` rather than `find({})`. The [quickstart](examples/quickstart.py) runs both.
-
-**This is not a framework, and adopting it is not a migration.** One
-collection, one read path, under ten substantive lines, your existing code left
-alone — a limit that is enforced by a test rather than promised in prose.
-[`ADOPTING.md`](ADOPTING.md) is the first hour, and is just as specific about
-what you still do not get when you stop there.
-
----
-
-## Watch it refuse
-
-```bash
-docker compose up -d mongo
-uv run python examples/forget.py
-```
-
-A document expires and becomes unreachable *while its row is still on disk*;
-then the reaper takes the row and its vector together. A pinned document beside
-it is untouched. No API key, no vendor, no account. Call it five minutes with
-the image pull — the ten-second version is the leak scan above, which needs
-none of this.
-
-<details>
-<summary><b>More proofs, each executable</b> — the counter-argument, the pilot, the abstraction</summary>
-
-**The counter-argument**, which is also runnable:
-
-```bash
-uv run --extra drift python drift/exhibit.py
-```
-
-Postgres holds the row, Qdrant holds the vector, MinIO holds the bytes, and a
-cron is supposed to keep the three agreeing. Four clocks, three ways to drift.
-The deleted document answers the query.
-
-**The pilot**, on synthetic data against a real MongoDB, filling in its own
-report. A revoked credential still reaches a prompt through the raw read and
-through an unfiltered candidate producer; the handle refuses it on both, and so
-does the summary an agent wrote from it. It runs no vector index — it calls
-`reachable()` directly, to isolate the same per-hit egress boundary
-`$vectorSearch` uses:
-
-```bash
-uv run python bench/pilot.py            # writes bench/results/pilot.md
-```
-
-Every line of the [`PILOT.md`](PILOT.md) report is filled from that run except
-the one only a real team can answer: *kept after two weeks*. A proof of the
-mechanism is not evidence of demand, and the report says so itself.
-
-**The abstraction**, for anyone thinking this is a soft-delete flag with extra
-steps. Soft-delete, a TTL, a feature flag, row-level security and a token
-budget, written as five rules on **one** handle and enforced together on both
-halves — `deleted=true` is the smallest of the five.
-
-```bash
-uv run python examples/rosetta.py
-```
-
-</details>
-
----
-
-## Honest status
-
-The mechanism is checked by 878 tests against real `mongod` and real `mongot`
-on every commit, with no mock tier. That is evidence the mechanism works. It is
-**not** evidence that anyone needs it: there are no production users yet, the
-package is not on PyPI yet, and [`ISSUES.md`](docs/ISSUES.md) lists what is
-wrong, unproven or imprecise in what already ships. Read that before trusting
-anything above it.
-
----
+Multi-tenant is one argument away — `model("notes", tenant="tenant_id")` — and
+then the tenant field is required in every read, so `find({"tenant_id": t})`
+rather than `find({})`. The [quickstart](examples/quickstart.py) runs both.
 
 ## Refusal is the product; the stack is around it
 
-*"So make the sweeper faster."* It would not help, and that is the part worth
-sitting with. The contract is the point, not the latency: even with an
-instantaneous reaper the index and the row are still different systems with
-different clocks, and a hit that was ranked a moment ago is still a hit that
-was never asked whether it was allowed. Shrinking the window is not the same
-as having an answer inside it.
+The sharpest instance is deletion. Deletion is a *storage* event, and storage
+events are eventually consistent: a TTL monitor sweeps about once a minute
+(measured here: 60.0s), an S3 lifecycle rule runs about once a day. In that
+window your vector index keeps returning a deleted document as a normal,
+well-scored result, with nothing logged and nothing to page on. **Delete is a
+wish. Refuse is a contract** — but the contract is the point, not the sweeper.
+The idea would still be true with an instant sweeper, because the index and the
+row are different systems with different clocks.
 
 So the erasure machinery is exactly that — machinery *around* refusal. A TTL
 deadline collects the row; crypto-shredding makes the copies in backups and
@@ -207,13 +80,69 @@ forces: **a rule that can express itself in a query or index filter but not per
 document is not a slower rule, it is a silent hole.** [`AHA.md`](docs/AHA.md)
 derives it in five steps, with the measurements.
 
-And the converse, which is what makes the egress check the *only* complete
-place rather than the safer of two: **some rules cannot have a query half at
-all.** A token budget refuses a document because of the other documents in the
-same read, so no index filter and no `enforce(subject, object, action)` can
-express it — the same pair has two answers.
-[`policy-engines.md`](docs/policy-engines.md) proves it against a real Casbin
-enforcer, and shows the division of labour that does work.
+---
+
+## See it, in ten seconds
+
+```bash
+docker compose up -d mongo
+uv run python examples/forget.py
+```
+
+A document expires, becomes unreachable *while its row is still on disk*, then
+the reaper takes the row and its vector together. A pinned document beside it
+is untouched. No API key, no vendor.
+
+The smallest adoption — refusal on one collection, in the handful of lines a
+team actually adds — is [`examples/quickstart.py`](examples/quickstart.py):
+`find`-only on plain MongoDB first, then the same guarantee on the Atlas
+`$vectorSearch` path where the server owns the embedding.
+
+Then the counter-argument, which is also executable:
+
+```bash
+uv run --extra drift python drift/exhibit.py
+```
+
+Postgres holds the row, Qdrant holds the vector, MinIO holds the bytes, and a
+cron is supposed to keep them agreeing. Four owners, four clocks, four ways to drift. The
+deleted document answers the query.
+
+Then the pilot, run on synthetic data against a real MongoDB, filling its own
+report — a revoked credential still reaches a prompt through the raw read and
+an unfiltered candidate producer, the handle refuses it on both, and so does
+the summary an agent wrote from it. It does not run a vector index; it calls
+`reachable()` directly to isolate the same per-hit egress boundary
+`$vectorSearch` uses:
+
+```bash
+uv run python bench/pilot.py            # writes bench/results/pilot.md
+```
+
+Every line of the [`PILOT.md`](PILOT.md) report is filled from that run except
+the one only a real team can answer: kept after two weeks. A proof of the
+mechanism is not evidence of demand, and the report says so.
+
+And before installing anything, run it against **your own** repository — one
+stdlib file, no database, no credentials:
+
+```bash
+python scanner/voyd_scan path/to/your/repo
+```
+
+It reports your own floor: reads that hit a collection your code marks with a
+deadline or soft-delete field, without filtering on it. Every one is a read
+that can serve a document your own schema says is gone. The header is honest
+about what a source scan cannot see.
+
+And to see why this is more than a soft-delete flag, run
+[`examples/rosetta.py`](examples/rosetta.py): soft-delete, TTL, a feature flag,
+row-level security and a token budget written as five rules on **one** handle,
+enforced together on both halves — `deleted=true` is the smallest of them.
+
+```bash
+uv run python examples/rosetta.py
+```
 
 ---
 
@@ -250,9 +179,10 @@ document a deadline was going to refuse anyway.
 The count is caller-owned, not guessed: by default each document supplies a
 non-negative integer `tokens` field, or `cost=` supplies a callable. Missing,
 fractional, negative and boolean costs fail closed as `uncosted`; VOYD does not
-pretend `len(text) // 4` is Voyage's tokenizer. One cumulative rule is allowed
-per collection — declaring two raises at construction rather than letting one
-rule's running total silently govern the other. Budgeted `find()` requires an
+pretend `len(text) // 4` is Voyage's tokenizer. Several cumulative rules may be
+declared on one handle; each gets its own state, keyed by *identity* rather
+than by value, because two `Budget(limit=50)` declarations compare equal and
+merging their totals would let one rule's limit silently govern the other. Budgeted `find()` requires an
 explicit `sort`; strict-prefix admission over MongoDB's natural order would
 change policy after compaction or failover. `Page.spent` is the amount
 reserved by the selected prefix; over-fetched candidates below a full page do
@@ -320,7 +250,7 @@ claim:
 | [`engine/search.py`](voyd/engine/search.py) | the measurements behind *not* pushing deadlines into the vector index |
 
 Start with `admission/core.py`; its own package docstring lists the other
-ten modules in dependency order. If the module docstrings and this README
+twelve modules in dependency order. If the module docstrings and this README
 ever disagree, the docstrings are right.
 
 ---
@@ -350,9 +280,9 @@ rotation and shredding are exercised against something that can refuse.
 Enterprise key custody is not a synonym for one cloud vendor's managed
 service, and the open standard for it can be started in a subprocess.
 
-What remains unproven is narrow, and [`ISSUES.md`](docs/ISSUES.md) names it:
-the three *hosted* key providers share every line of that code path, so what
-is untested about them is vendor-specific rather than structural.
+And [`ISSUES.md`](docs/ISSUES.md) lists what is wrong, unproven or imprecise in what
+already ships — now narrowly: the three *hosted* providers share every line of
+that code path, and what is unproven about them is vendor-specific.
 
 ---
 
@@ -402,38 +332,76 @@ await notes.shred("alice")               # noise, in every copy that exists
 
 ---
 
+## What is new here, and what is not
+
+Worth stating plainly, because a reader is entitled to ask and the honest
+answer is a stronger position than novelty would be.
+
+**Not new.** Making an unsafe operation unnameable is object-capability
+security, and it is from the 1960s. Filtering rows at read time is row-level
+security. Views-and-grants is SQL 101. Checking at the endpoint rather than in
+the pipe is the end-to-end argument (Saltzer, Reed and Clark, 1984). Every
+component here is well known, and a design that needed a new primitive to work
+would be a worse design.
+
+**New, and load-bearing:**
+
+- **The unification.** Expiry, revocation, quarantine, legal hold, erasure
+  under GDPR Art. 17, a vector from a model you replaced, a spent token budget
+  and a duplicate passage are treated everywhere else as eight features. They
+  are one primitive — the same `refuses()` call, the same receipt, the same
+  break-glass door. Collapsing apparently-unrelated things into one mechanism
+  is the signature of an abstraction that is load-bearing rather than tidy.
+- **The inversion of authority.** The instinct is that the query filter is the
+  real enforcement and the per-document check is belt-and-braces. It is the
+  other way round: the per-document check is authoritative and the clause is a
+  discardable optimisation. The asymmetry behind that — egress-only is slower
+  and safe, clause-only is a silent hole — is the whole argument, and
+  [`AHA.md`](docs/AHA.md) derives it.
+- **The placement.** Nobody had put a capability boundary on retrieval egress,
+  which is the path that now feeds a model rather than a person who could
+  notice a stale result.
+
+[`gold.md`](docs/gold.md) argues that the second and third of those make the
+*protocol* the thing worth owning, and that this repository currently markets
+the object instead.
+
+---
+
 ## Read more
 
 Three shelves, in the order a new reader should take them. The root holds the
-front door, the on-ramp and the pilot; everything else is reference material
-in [`docs/`](docs), and every file there has exactly one job.
+front door, the on-ramp and the pilot; everything else is reference material in
+[`docs/`](docs), where each file has exactly one job.
 
-**Start here** — how to use it, and why it is shaped this way.
+**Start here** — the idea, and how to use it.
 
 | | |
 |---|---|
-| [`ADOPTING.md`](ADOPTING.md) | the first hour: one collection, one read path, under ten lines — and what you do *not* get by stopping there |
 | [`AHA.md`](docs/AHA.md) | the one idea, derived in five steps with the measurements. Everything else is downstream |
-| [`PILOT.md`](PILOT.md) | the smallest honest trial: refusal on one collection, exit criteria and a report template — plus `bench/pilot.py`, the same flow run against a real MongoDB with the report already filled |
+| [`ADOPTING.md`](ADOPTING.md) | the first hour: one collection, one read path, under ten lines — and what you do *not* get by stopping there |
+| [`PILOT.md`](PILOT.md) | the smallest honest trial: exit criteria and a report template — plus `bench/pilot.py`, the same flow against a real MongoDB with the report already filled |
 
-**The argument** — why this is a real problem, at length and executable.
+**The argument** — why it is a real problem, at length and executable.
 
 | | |
 |---|---|
 | [`blog.md`](docs/blog.md) | the long version: the three times the same bug came back, and the two bugs in the proof |
 | [`policy-engines.md`](docs/policy-engines.md) | the converse of the one idea: a retrieval rule no index filter and no policy engine can express, checked against a live Casbin enforcer |
-| [`PORTABILITY.md`](docs/PORTABILITY.md) | the guarantee is portable; its *enforcement* is not. Three engines measured, the pattern to copy, and the rung most vector databases cannot reach |
+| [`gold.md`](docs/gold.md) | the handle is the demo; the protocol is the product — three members, five attributes, and a theory of set-relative rules |
+| [`PORTABILITY.md`](docs/PORTABILITY.md) | the guarantee is portable; its *enforcement* is not. Three engines measured, and the rung most vector databases cannot reach |
 | [`drift/`](drift/README.md) | the counter-argument, executable — including the whole thesis ported to pgvector with no MongoDB in the file |
-| [`examples/`](examples/) | runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
+| [`examples/`](examples/) | thirteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
 | [`scanner/`](scanner/README.md) | `voyd-scan`: one stdlib file, zero dependencies, pointed at *your* repository — the count this whole argument is about |
 
-**What is wrong with it** — read this before trusting any of the above.
+**What is wrong with it, and what happens next** — read this before trusting any of the above.
 
 | | |
 |---|---|
 | [`ISSUES.md`](docs/ISSUES.md) | defects, unproven claims, and operational caveats |
 | [`ideas.md`](docs/ideas.md) | what is worth building next, and what is deliberately not |
-| [`CONSIDERATIONS.md`](docs/CONSIDERATIONS.md) | what will bite you while working on it: the traps, what each one cost, and which guard now catches it |
+| [`opportunities.md`](docs/opportunities.md) | what is worth *doing*, ranked — mostly not code, and honest about the one number that is still zero |
+| [`CONSIDERATIONS.md`](docs/CONSIDERATIONS.md) | what will bite you while working on it: the traps, what each cost, and which guard now catches it |
 | [`BUG.md`](docs/BUG.md) | an upstream defect this repository found and filed, kept because a test still depends on the fallback it forced |
 
 MIT.
