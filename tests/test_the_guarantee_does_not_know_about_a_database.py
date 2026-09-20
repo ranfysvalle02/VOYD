@@ -1,4 +1,4 @@
-"""The 487 lines that decide what may reach a prompt must not know MongoDB.
+"""The 460 lines that decide what may reach a prompt must not know MongoDB.
 
 ``docs/PORTABILITY.md`` measures a property of this package's import graph
 and then argues from it: the *decision* layer of ``voyd/engine/admission/``

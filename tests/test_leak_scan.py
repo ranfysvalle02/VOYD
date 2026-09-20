@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from voyd_scan import analyze, collect_sources
+import pytest
+
+from voyd_scan import (EXIT_ERROR, EXIT_MAX, ScanError, analyze,
+                       collect_sources, main)
 
 
 def _leaks(report):
@@ -184,3 +187,42 @@ def test_collect_sources_honours_allow(tmp_path: Path):
     got = collect_sources([tmp_path], allow=[tmp_path / "audit"])
     names = {Path(p).name for p in got}
     assert names == {"svc.py"}, "the audit module must be excluded"
+
+
+# The two ways an instrument lies about its own result. Neither is about
+# classification -- both are about the scanner reporting "clean" when it has
+# not actually established anything, which is the defect it exists to find,
+# committed by the tool.
+
+def test_a_path_that_does_not_exist_is_an_error_not_a_clean_bill():
+    """`voyd-scan ./scr` for `./src` must not print a clean result.
+
+    ``Path.rglob`` on a missing directory yields nothing rather than
+    raising, so the natural implementation scans zero files, finds zero
+    leaks, and exits 0 -- confidently, and about nothing. A stranger's first
+    run is exactly where a typo is likely and a false all-clear is fatal to
+    the only thing this tool has, which is credibility.
+    """
+    with pytest.raises(ScanError):
+        collect_sources([Path("no/such/directory")], allow=[])
+
+    assert main(["no/such/directory"]) == EXIT_ERROR
+
+
+def test_the_exit_code_cannot_wrap_around_to_success():
+    """256 leaks must not exit 0.
+
+    The exit status is one byte, and the documented contract is "the exit
+    code is the number of candidate leaks, so it drops into CI". Unclamped,
+    the single worst repository this tool could be pointed at reports
+    success -- nothing wrong enough to notice, which is this project's whole
+    complaint. So the count is clamped and the real number is printed.
+    """
+    src = ("def f(db):\n"
+           "    db.notes.insert_one({'expire_at': 1})\n"
+           + "".join(f"    db.notes.find({{'i': {i}}})\n" for i in range(300)))
+    report = analyze({"a.py": src})
+    assert len(report.leaks) == 300                      # all of them counted
+    assert min(len(report.leaks), EXIT_MAX) == EXIT_MAX  # none of them lost
+    assert EXIT_MAX & 0xFF != 0, "an exit code that wraps to 0 reads as clean"
+    assert EXIT_MAX < EXIT_ERROR, "a full count must not be read as a failure"

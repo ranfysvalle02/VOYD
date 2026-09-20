@@ -110,10 +110,12 @@ Six distinct driver methods across the whole package — `find`, `find_one`,
 `insert_many`, `update_many`, `count_documents`, `create_index`. Fourteen
 distinct query operators, twelve of them concentrated in one file.
 
-**The guarantee is 487 executable lines**: `reasons.py` (19), `rules.py`
-(294), `spec.py` (83), `receipts.py` (91), counted as statements rather than
-file length, because the rest of those 1,411 lines is the argument for them.
-Those 487 lines decide whether a fact may reach a prompt, and they would run
+**The guarantee is 460 lines of code** — `reasons.py` (18), `rules.py` (269),
+`spec.py` (87), `receipts.py` (86) — or **367 statements**, if you prefer the
+stricter measure. Both are counted with `ast`, excluding blank lines, comments
+and docstring bodies, because the rest of those 1,411 file lines is the
+argument for the code rather than the code. Those 460 lines decide whether a
+fact may reach a prompt, and they would run
 identically against a Postgres row, a Parquet shard, a dict from Redis, or a
 list literal in a test — because they have never been shown a database.
 
@@ -245,7 +247,7 @@ thing it is arguing against.
   `Engine`. The portability claim has executable evidence that the *pattern*
   travels, and zero evidence that *this package* does.
 
-- **Structural purity is not runtime purity.** Those 487 lines cannot today be
+- **Structural purity is not runtime purity.** Those 460 lines cannot today be
   imported without `pymongo` installed, because importing anything under
   `voyd.engine.admission` executes the package `__init__`, which pulls
   `handle` → `core` → `errors` → `bson`. The decision layer's *own* import
@@ -297,7 +299,7 @@ so. This is now
 
 **Make the purity real, not just structural.** Splitting the package
 `__init__` so the decision layer can be imported without the handle would let
-those 487 lines be exercised with no MongoDB installed at all — which is also
+those 460 lines be exercised with no MongoDB installed at all — which is also
 the fastest suite in the repository and the one a contributor could run before
 reading anything. Not done.
 

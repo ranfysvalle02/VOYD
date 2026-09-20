@@ -39,7 +39,10 @@ or a filter whose keys do not, is a candidate leak.
 
 So the output is a floor, not a census. A non-zero floor is still the fastest
 way to turn "refusal is a real problem" from a claim into your own incident.
-Exit code is the number of candidate leaks, so it drops into CI.
+
+Exit code is the number of candidate leaks -- clamped to 254, because an exit
+status is one byte and 256 leaks exiting 0 would be this tool committing the
+defect it looks for. 255 means the scan could not run at all.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,6 +70,16 @@ MARKS = frozenset({
     "expireat", "expireafterseconds", "forgotten", "revoked", "tombstone",
     "deleted", "isdeleted", "deletedat", "softdeleted", "removedat",
 })
+
+
+# The exit code carries the count so this drops into CI, and a process exit
+# status is one byte. Unclamped, a repository with exactly 256 candidate
+# leaks exits 0 -- the worst possible reading, delivered to the tool whose
+# entire argument is that nothing is ever wrong enough to notice. So the
+# count is clamped, 255 is reserved for "the scan could not run", and the
+# real number is always printed rather than inferred from the status.
+EXIT_MAX = 254
+EXIT_ERROR = 255
 
 
 def _norm(key: str) -> str:
@@ -287,8 +301,27 @@ def analyze(sources: dict[str, str]) -> Report:
     return report
 
 
+class ScanError(Exception):
+    """The scan could not be performed, as opposed to finding nothing.
+
+    The distinction is the whole reason this class exists. A tool whose
+    output is "you are clean" must never say it because it read nothing --
+    a mistyped path reporting a clean bill of health is the same defect
+    this scanner exists to find, committed by the instrument.
+    """
+
+
 def collect_sources(paths: list[Path], allow: list[Path]) -> dict[str, str]:
-    """Read ``*.py`` under ``paths``, skipping anything under ``allow``."""
+    """Read ``*.py`` under ``paths``, skipping anything under ``allow``.
+
+    Raises ``ScanError`` if a path does not exist. ``rglob`` on a missing
+    directory returns an empty iterator rather than raising, so without this
+    check ``voyd-scan ./scr`` (for ``./src``) prints a clean result and exits
+    zero -- confidently, and about nothing.
+    """
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        raise ScanError(f"no such path: {', '.join(missing)}")
     allow_resolved = [a.resolve() for a in allow]
     out: dict[str, str] = {}
     for p in paths:
@@ -318,11 +351,25 @@ def main(argv: list[str] | None = None) -> int:
                     help="emit the full report as JSON on stdout")
     args = ap.parse_args(argv)
 
-    report = analyze(collect_sources(args.paths, args.allow))
+    try:
+        sources = collect_sources(args.paths, args.allow)
+    except ScanError as exc:
+        print(f"voyd-scan: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    report = analyze(sources)
 
     if args.json:
         print(json.dumps(report.as_dict(), indent=2))
-        return len(report.leaks)
+        return min(len(report.leaks), EXIT_MAX)
+
+    if not report.files:
+        # Distinct from "scanned files, found no marked collection". The
+        # paths existed and held no Python at all, which is a result about
+        # the invocation, not about the code.
+        print(f"scanned 0 files: {', '.join(str(p) for p in args.paths)} "
+              f"contains no .py to read. Nothing was checked.")
+        return 0
 
     if not report.bearing:
         print(f"scanned {report.files} file(s); found no collection that "
@@ -360,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
               "is a real result for the paths this can see, and the header "
               "says what it cannot -- ORM layers, dynamically named "
               "collections, and the filters listed above as unjudged.")
-    return len(leaks)
+    return min(len(leaks), EXIT_MAX)
 
 
 if __name__ == "__main__":

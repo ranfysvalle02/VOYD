@@ -19,12 +19,29 @@ scanned 1 file(s).
   app/store.py:8  notes  (filter does not name the mark)
 ```
 
-Exit code is the number of candidate leaks, so it drops into CI.
-
 ```bash
 python scanner/voyd_scan --json app/ services/ > leak_scan.json
 python scanner/voyd_scan --allow app/admin/ src/     # exempt an audit module
 ```
+
+## Exit codes
+
+It drops into CI, so the status has to mean something precise:
+
+| code | meaning |
+|---|---|
+| `0` | no candidate leak found in what could be read |
+| `1`–`254` | that many candidate leaks — **`254` means 254 or more** |
+| `255` | the scan could not run (a path that does not exist) |
+
+Two of those rows are corrections rather than decoration. An exit status is
+one byte, so an unclamped count means a repository with exactly 256 leaks —
+the worst one this tool could be pointed at — exits `0` and reads as clean.
+And `rglob` on a missing directory returns nothing rather than raising, so
+`voyd-scan ./scr` (for `./src`) would otherwise print a clean bill of health
+about a directory that does not exist. Both are the failure this scanner
+exists to find, committed by the scanner. The real count is always printed,
+never inferred from the status.
 
 ## Why it is a separate package
 
@@ -72,7 +89,8 @@ calls gone. Route it through a filter on the mark — and if you would rather
 that be enforced structurally than remembered by every person who opens the
 file, that is what [VOYD](../README.md) is for.
 
-The classifier's four judgements are pinned by `tests/test_leak_scan.py` in
+The classifier's judgements -- and the two ways it could lie about its own
+result -- are pinned by `tests/test_leak_scan.py` in
 the parent repository, because an instrument that hands a stranger "you have
 N leaks" earns nothing if N is noise.
 

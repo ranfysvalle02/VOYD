@@ -161,6 +161,37 @@ jobs:
               assert needed in paths, f'{needed} missing from the built wheel: {sorted(paths)}'
           print('wheel[app]: service imports and the API surface is intact')"
 
+      - name: voyd-scan installs with nothing, because that is its whole claim
+        # `scanner/` is a second distribution and the first thing a stranger
+        # runs. Its pitch is that it costs them nothing -- no database, no
+        # credentials, and above all no `pymongo` arriving as a dependency of
+        # a tool that is only supposed to read their source. That is a claim
+        # a build can falsify, so it does.
+        #
+        # The import check is the load-bearing half. A dependency-free
+        # `pyproject.toml` proves nothing if the module reaches for `voyd`
+        # at runtime: the number this prints has to be independent of the
+        # library it makes a case for, or it is not evidence.
+        run: |
+          uv build --wheel scanner --out-dir dist-scanner
+          uv venv /tmp/scancheck
+          VIRTUAL_ENV=/tmp/scancheck uv pip install dist-scanner/*.whl
+          /tmp/scancheck/bin/python -c "
+          import sys, voyd_scan
+          for forbidden in ('pymongo', 'bson', 'voyd'):
+              assert forbidden not in sys.modules, f'voyd-scan imported {forbidden}'
+          print('voyd-scan: imports clean, no driver, no voyd')"
+          mkdir -p /tmp/scandemo
+          printf 'def f(db):\n    db.n.insert_one({\"expire_at\": 1})\n    return db.n.find({})\n' > /tmp/scandemo/s.py
+          # `run:` is `bash -e`, and both invocations below are *expected* to
+          # exit non-zero -- that is the assertion. So each one captures its
+          # status with `|| rc=$?` rather than being allowed to abort the step.
+          rc=0; /tmp/scancheck/bin/voyd-scan /tmp/scandemo || rc=$?
+          test "$rc" -ne 0 || { echo "FAIL: a repo with a leak exited 0"; exit 1; }
+          rc=0; /tmp/scancheck/bin/voyd-scan /tmp/nope || rc=$?
+          test "$rc" -eq 255 || { echo "FAIL: a missing path exited $rc, not 255"; exit 1; }
+          echo "voyd-scan: finds the leak, and refuses to bless a path that is not there"
+
       - name: No agent tool can leave a cleanup obligation
         # The pitch is that a scope collects itself. An agent that has to
         # remember to clean up is the failure this exists to remove.

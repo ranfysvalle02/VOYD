@@ -32,7 +32,11 @@ ROOT = Path(__file__).resolve().parents[1]
 # broke in the move is exactly the rot this file exists to catch.
 DOCS = (sorted(ROOT.glob("*.md"))
         + sorted(ROOT.glob("docs/*.md"))
-        + [ROOT / "drift" / "README.md"])
+        + [ROOT / "drift" / "README.md",
+           # `scanner/` is a second distribution with its own front
+           # door, and it is the first page a stranger reads. A dead
+           # link there costs more than one anywhere else here.
+           ROOT / "scanner" / "README.md"])
 
 # Things that have been deleted. A mention of one is a doc that was not
 # updated when the code was -- and each entry here is a grave marker: it
