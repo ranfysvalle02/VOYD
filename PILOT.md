@@ -171,7 +171,9 @@ honestly.
 ## Report template
 
 Fill this in at the end of the trial. It is the evidence
-[`DECISION.md`](docs/DECISION.md) draws on for what to build next.
+[`ideas.md`](docs/ideas.md) draws on for what to build next -- and the one
+line that decides anything is **kept after two weeks**, which no self-run can
+answer.
 
 ```
 Pilot report
@@ -194,5 +196,5 @@ Incidents the handle would have caused / prevented during the trial:
 Kept after two weeks?                          yes / no
 In our own words, why:
 
-Friction worth fixing upstream (feeds DECISION.md):
+Friction worth fixing upstream (feeds docs/ideas.md):
 ```

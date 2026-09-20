@@ -40,7 +40,7 @@ One stdlib file. No database, no credentials, nothing to install — and you
 point it at *your* repository, not this one:
 
 ```bash
-python tools/leak_scan.py path/to/your/repo
+python scanner/voyd_scan path/to/your/repo
 ```
 
 ```
@@ -404,9 +404,9 @@ await notes.shred("alice")               # noise, in every copy that exists
 
 ## Read more
 
-Four shelves, in the order a new reader should take them. The reference
-material lives in [`docs/`](docs); the root holds only the front door, the
-on-ramp and the pilot.
+Three shelves, in the order a new reader should take them. The root holds the
+front door, the on-ramp and the pilot; everything else is reference material
+in [`docs/`](docs), and every file there has exactly one job.
 
 **Start here** — how to use it, and why it is shaped this way.
 
@@ -414,17 +414,18 @@ on-ramp and the pilot.
 |---|---|
 | [`ADOPTING.md`](ADOPTING.md) | the first hour: one collection, one read path, under ten lines — and what you do *not* get by stopping there |
 | [`AHA.md`](docs/AHA.md) | the one idea, derived in five steps with the measurements. Everything else is downstream |
-| [`TLDR.md`](docs/TLDR.md) | the short versions, the pitches by room, and why the approach reads as strange |
+| [`PILOT.md`](PILOT.md) | the smallest honest trial: refusal on one collection, exit criteria and a report template — plus `bench/pilot.py`, the same flow run against a real MongoDB with the report already filled |
 
 **The argument** — why this is a real problem, at length and executable.
 
 | | |
 |---|---|
-| [`pain.md`](docs/pain.md) | eight failures whose signature is a plausible answer. Mostly real incidents from this repository |
 | [`blog.md`](docs/blog.md) | the long version: the three times the same bug came back, and the two bugs in the proof |
 | [`policy-engines.md`](docs/policy-engines.md) | the converse of the one idea: a retrieval rule no index filter and no policy engine can express, checked against a live Casbin enforcer |
+| [`PORTABILITY.md`](docs/PORTABILITY.md) | the guarantee is portable; its *enforcement* is not. Three engines measured, the pattern to copy, and the rung most vector databases cannot reach |
 | [`drift/`](drift/README.md) | the counter-argument, executable — including the whole thesis ported to pgvector with no MongoDB in the file |
-| [`examples/`](examples/) | thirteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
+| [`examples/`](examples/) | runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
+| [`scanner/`](scanner/README.md) | `voyd-scan`: one stdlib file, zero dependencies, pointed at *your* repository — the count this whole argument is about |
 
 **What is wrong with it** — read this before trusting any of the above.
 
@@ -433,19 +434,6 @@ on-ramp and the pilot.
 | [`ISSUES.md`](docs/ISSUES.md) | defects, unproven claims, and operational caveats |
 | [`ideas.md`](docs/ideas.md) | what is worth building next, and what is deliberately not |
 | [`CONSIDERATIONS.md`](docs/CONSIDERATIONS.md) | what will bite you while working on it: the traps, what each one cost, and which guard now catches it |
-
-**Whether anyone will use it** — positioning, not engineering.
-
-| | |
-|---|---|
-| [`PROPOSAL.md`](docs/PROPOSAL.md) | three directions, ranked. **Direction 1 — admission for the prompt — is the live one**; the handle is the identity, the other two are frozen until a pilot |
-| [`PILOT.md`](PILOT.md) | the smallest honest trial: refusal on one collection, exit criteria and a report template — plus `bench/pilot.py`, the same flow run against a real MongoDB with the report already filled |
-| [`DECISION.md`](docs/DECISION.md) | what to build next, pre-registered — each API waits on pilot evidence |
-| [`appendix.md`](docs/appendix.md) | the sell decomposed, the ceiling of the pitch, and the compliance vendors |
-
-Working notes rather than landing-page copy, kept because they record how the
-thinking went: [`copy.md`](docs/copy.md) (the family-court register — a
-mnemonic for the team, not a public sell) and [`mongodb.md`](docs/mongodb.md)
-(a memo for one MongoDB conversation, not the project's identity).
+| [`BUG.md`](docs/BUG.md) | an upstream defect this repository found and filed, kept because a test still depends on the fallback it forced |
 
 MIT.

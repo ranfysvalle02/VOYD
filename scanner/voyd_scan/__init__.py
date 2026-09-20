@@ -1,16 +1,21 @@
 """Your own number: reads that can serve a forgotten fact, from your source.
 
-    python tools/leak_scan.py path/to/your/repo
-    python tools/leak_scan.py --json app/ services/ > leak_scan.json
-    python tools/leak_scan.py --allow app/admin/ src/
+    python scanner/voyd_scan path/to/your/repo
+    python scanner/voyd_scan --json app/ services/ > leak_scan.json
+    python scanner/voyd_scan --allow app/admin/ src/
+
+This is a separate, dependency-free package on purpose. It ships apart from
+``voyd`` because the first thing a stranger runs must cost them nothing: no
+install, no database, no credentials, no import of the library it is trying
+to make a case for. One stdlib file -- this one -- which you may also simply
+copy into your own repository and run there.
 
 VOYD's founding incident was a count: six read paths against a collection with
 a deadline, and one of them forgot the filter. This turns that count outward.
 Point it at a repository -- yours, not this one -- and it reports how many
 reads hit a collection that carries a deadline or a soft-delete mark *without*
 filtering on it. That is the number the pitch is about, computed from code you
-already have, with no database, no credentials, and nothing to install: it is
-one stdlib file you can copy.
+already have.
 
 **How it decides.** A collection is "deadline-bearing" if the repo's own code
 treats it as one -- a write or index that names a mark field, or a read that
@@ -29,7 +34,8 @@ or a filter whose keys do not, is a candidate leak.
   not manufacture a number it cannot stand behind.
 - It never connects to a database. It cannot tell you the leak *fired*; it
   tells you the read *could*. The live version needs someone's production
-  credentials, which is a different kind of responsibility (see ``docs/ideas.md``).
+  credentials, which is a different kind of responsibility (see
+  ``docs/ideas.md``).
 
 So the output is a floor, not a census. A non-zero floor is still the fastest
 way to turn "refusal is a real problem" from a claim into your own incident.

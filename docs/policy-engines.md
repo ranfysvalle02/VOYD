@@ -241,4 +241,6 @@ paths, one of them missing the filter, nothing wrong enough to page anyone.
 ---
 
 **Further:** [`AHA.md`](AHA.md) for the derivation, [`blog.md`](blog.md) for
-the long argument, [`pain.md`](pain.md) for the failures that motivated it.
+the long argument and the failures that motivated it, and
+[`PORTABILITY.md`](PORTABILITY.md) for why a rule with no query half is also
+the thing that made the guarantee portable.

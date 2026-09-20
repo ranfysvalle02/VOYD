@@ -230,7 +230,8 @@ repository stops being a pile of features and becomes consequences:
   the prompt's room is spent is the same shape as a deadline, which is the
   evidence the protocol is a primitive rather than a compliance feature
 
-Read [`TLDR.md`](TLDR.md) for the pitches, [`pain.md`](pain.md) for the
-failures, [`policy-engines.md`](policy-engines.md) for the rule no index or
-policy engine can express, [`blog.md`](blog.md) for the long argument, and
+Read [`blog.md`](blog.md) for the long argument and the failures that
+motivated it, [`policy-engines.md`](policy-engines.md) for the rule no index
+or policy engine can express, [`PORTABILITY.md`](PORTABILITY.md) for what
+survives a change of database and what does not, and
 [`ISSUES.md`](ISSUES.md) for what is still wrong.

@@ -1,0 +1,45 @@
+# A second, deliberately separate distribution.
+#
+# `voyd-scan` is the first thing a stranger runs, so it must cost them
+# nothing: no database, no credentials, and -- the reason this file is not
+# a section of the root `pyproject.toml` -- no `pymongo`. A scanner that
+# pulls a driver in order to tell you that you have a problem has already
+# asked for more trust than its finding is worth.
+#
+# It therefore has no dependencies at all, and it does not depend on `voyd`.
+# The direction matters: the scanner may never import the library it makes a
+# case for, or the number it reports stops being independent evidence.
+
+[project]
+name = "voyd-scan"
+version = "0.1.0"
+description = "Count the reads in your own repository that can serve a document your schema says is gone."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Fabian Valle" }]
+requires-python = ">=3.11"
+keywords = ["mongodb", "static-analysis", "ttl", "soft-delete", "rag", "audit"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+# Empty, and it stays empty. See the header.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ranfysvalle02/VOYD"
+Source = "https://github.com/ranfysvalle02/VOYD/tree/main/scanner"
+
+[project.scripts]
+voyd-scan = "voyd_scan:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["voyd_scan"]

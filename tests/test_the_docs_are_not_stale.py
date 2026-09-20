@@ -131,11 +131,20 @@ def test_a_claimed_test_count_is_not_lower_than_the_real_one():
                 f"sentence did not")
 
 
+# The canon. `docs/` was cut from eighteen files to eight because a reader
+# who cannot tell which three to read reads none of them, and the ones that
+# went were a thinking journal rather than documentation -- they are in the
+# git history, which is where working notes belong. Each survivor has one
+# job, and the README must still point at the load-bearing ones.
+FRONT_DOOR = ("blog.md", "ISSUES.md", "ideas.md", "PORTABILITY.md",
+              "policy-engines.md")
+
+
 def test_the_front_door_points_at_documents_that_exist():
     """The README's table of contents is the first thing anybody uses and
     the last thing anybody updates."""
     readme = (ROOT / "README.md").read_text()
-    for name in ("pain.md", "blog.md", "ISSUES.md", "ideas.md"):
+    for name in FRONT_DOOR:
         target = f"docs/{name}"
         assert f"({target})" in readme, f"README no longer links {target}"
         assert (ROOT / target).exists()

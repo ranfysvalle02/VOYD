@@ -25,7 +25,9 @@ project whose public surface has already overgrown once ([`ISSUES.md`](ISSUES.md
 item 8). Listed here so the reasoning below is not mistaken for a queue:
 
 - **The HTTP namespace as the first surface** -- still owes an authorization
-  story for the verbs that change reachability. See [`DECISION.md`](DECISION.md).
+  story for the verbs that change reachability, which is the third time that
+  one unanswered question has blocked something. It waits on a pilot
+  promoting the surface, not on taste.
 - **MCP as an identity** -- a channel a model calls, not the category. A demo,
   not a listing in an agent-memory marketplace.
 - **A TypeScript client** (item 9) -- reach, not proof.
@@ -257,7 +259,7 @@ Nobody buys a guarantee until they see their own number, and the number is
 never zero. There are two versions of that instrument, and the cheap one is
 now built.
 
-**Shipped: the source scan.** `tools/leak_scan.py` reads a repository with
+**Shipped: the source scan.** `scanner/voyd_scan/__init__.py` reads a repository with
 `ast` — no database, no credentials, one stdlib file a stranger can copy — and
 reports how many reads hit a collection its own code marks with a deadline or
 soft-delete field *without* filtering on it. It is the AST walker in

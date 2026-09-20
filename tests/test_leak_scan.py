@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tools.leak_scan import analyze, collect_sources
+from voyd_scan import analyze, collect_sources
 
 
 def _leaks(report):

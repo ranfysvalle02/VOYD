@@ -233,8 +233,7 @@ backup" from "this database will forget on the reaper's schedule".
 
 ## 10. ~~`including_refused()` was ungated and uncounted~~ — closed
 
-**Severity: closed.** [`appendix.md`](appendix.md) named the one hole in the
-escape hatch: it turned the guarantee off, and it was neither gated nor
+**Severity: closed.** A review named the one hole in the escape hatch: it turned the guarantee off, and it was neither gated nor
 counted, so the 2am use to "just fix a bug" needed no permission and left no
 trace.
 
@@ -273,6 +272,80 @@ exception in the counter: it is ordering the read path as pure admission →
 decryption → cumulative admission, with refill after either refusal. Until
 that exists, failing at construction is the only honest composition.
 
+## 12. Destroying the derived encoding is a silent no-op on an auto-embedding collection
+
+**Severity: a reader would be wrong about the second guarantee, not the first.**
+
+`AdmissionSpec.derived_fields` defaults to `("embedding",)`, and
+`marks.py` nulls every one of them inside the same update that writes an
+irreversible mark — with a comment arguing why: *"the vector beside an erased
+document is a copy of it in a coat."*
+
+On an `auto_embed` collection **there is no embedding field in the document.**
+Nothing in this process ever computes one; the vector lives inside mongot. So
+`mark_set["embedding"] = None` sets a field that does not exist, and the lossy
+encoding of the erased text stays in the index. It is not re-embedded away
+either, because `revoke()` deliberately does not change the text — the row
+stays on disk until the reaper takes it, which is the whole design.
+
+Be precise about the size of this:
+
+- The **refusal guarantee is intact.** The per-document check still catches
+  the document on the way out; nothing reaches a prompt.
+- What is lost is the **second** guarantee — destroy the derived encoding
+  immediately rather than on the reaper's schedule — which this codebase
+  advertises, implements, and argues for in a comment.
+- It is lost **silently.** No warning at declaration, and nothing on
+  `health()` saying "derived-field destruction is a no-op here."
+
+`Engine._refuse_sealed_autoembed()` already refuses the neighbouring
+contradiction (a field both sealed and embedded by the server) at `ensure()`,
+and does not cover this one.
+
+**What would close it.** The minimum fix is loud: refuse, or warn, at
+`ensure()` when a spec declares both `auto_embed` and non-empty
+`derived_fields`. The honest fix is to work out what erasure means when a
+third-party index holds the lossy copy — and that question is not
+MongoDB-specific. It is true of every hosted embedding index, which makes it
+a [`drift/`](../drift) exhibit rather than a patch.
+
+---
+
+## 13. A nested `$vectorSearch` child filter has no per-document counterpart
+
+**Severity: this is the one condition this repository calls fatal, present in
+one place.**
+
+[`PORTABILITY.md`](PORTABILITY.md) and [`AHA.md`](AHA.md) both rest on the
+asymmetry: a rule may be *egress only* (slower, safe), but a rule that exists
+only as a query clause is a silent hole — one read path prunes correctly and
+another admits the same document.
+
+`AdmissionSpec.subjects` and `subject_key` made the boundary able to *see*
+subdocuments, and `ensure()` refuses a nested vector index on a collection
+that never named its subjects. What they did **not** do is make a server-side
+child filter expressible as a rule. A nested `$vectorSearch` filter therefore
+prunes at the index with no per-document check behind it, which is the shape
+the rest of the package exists to forbid.
+
+Two smaller gaps sit behind it, and both are plumbing rather than design now
+that subjects have stable names:
+
+- `lineage` is still an array of `_id`s, so a summary derived from chapter 3
+  can name the book and not the chapter. `(parent_id, path, key)` already
+  renders to a string; nothing carries it yet.
+- `receipt_for` commits to parent ids only. `ContextRef` already carries a
+  typed `kind`, and a third kind for an embedded subject is the obvious shape.
+
+**What would close it.** The cheap interim is to refuse at `ensure()` when an
+admitting collection carries a nested vector index at all — turning a silent
+hole into a loud one, which is the move this repository makes everywhere else.
+The real fix is marks and deadlines on array elements, which means array-filter
+updates in `marks.py`, a composite identity through `lineage.py`, and
+re-derived `Page` accounting.
+
+---
+
 ## Operational caveats
 
 Not defects — known trades, written down so they are not rediscovered as
@@ -302,3 +375,10 @@ surprises.
   (`test_atlas_search`, `test_an_expired_void_is_gone`). Both pass in
   isolation and have never failed in CI. Recorded rather than dismissed:
   the last two flakes chased in this repository were both real bugs.
+- **`auto_embed_definition()` does not set `numDimensions`, `similarity` or
+  `quantization`.** The server's defaults apply, which is fine until they are
+  not what a deployment wanted and nothing said so.
+- **Assumptions about vendor behaviour are recorded, not all observed.**
+  `voyd/engine/assumptions.py` and `voyd/assumptions.py` exist so that every
+  belief about software this package does not ship has a recorded check, and
+  some of those checks are documentation rather than a cluster.

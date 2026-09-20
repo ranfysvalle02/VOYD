@@ -64,7 +64,7 @@ as leaky as it was this morning. The handle guarantees its own path, not the
 collection. Which brings us to the honest way to measure the gap:
 
 ```bash
-python tools/leak_scan.py path/to/your/repo
+python scanner/voyd_scan path/to/your/repo
 ```
 
 Run it before hour one and after. The number that matters is not how many

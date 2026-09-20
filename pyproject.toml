@@ -186,7 +186,11 @@ follow_imports = "skip"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["."]
+# ``scanner`` is a second distribution (zero dependencies, no import of
+# ``voyd``) and is not installed into this venv. Putting it on the path
+# here is what lets ``tests/test_leak_scan.py`` pin its classifier without
+# the two packages depending on each other.
+pythonpath = [".", "scanner"]
 
 [dependency-groups]
 dev = [
