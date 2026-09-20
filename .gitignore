@@ -148,7 +148,19 @@ activemq-data/
 *.sage.py
 
 # Environments
+#
+# ``.env`` alone was not enough: it left ``.env.local``, ``.env.production``
+# and every other suffixed variant committable, and the one that leaks is
+# always the one nobody thought to list. So the rule is every ``.env.*`` and
+# the template is the single named exception -- which is the same fail-closed
+# direction the read path takes, applied to the repository.
+#
+# ``.env.example`` must stay tracked: it is the Quickstart's second line and
+# the first step of CI, and ``tests/test_the_documented_first_run_works.py``
+# fails if it goes missing.
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
