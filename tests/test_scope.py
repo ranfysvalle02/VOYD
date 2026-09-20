@@ -205,11 +205,11 @@ async def test_an_expired_scope_takes_its_documents_and_vectors_with_it(
 
 
 async def test_a_past_deadline_is_accepted_and_simply_collects(
-        client, app, scope, reaper_paused):
+        client, app, scope, reaper_disarmed):
     """A zero/negative TTL is not an error -- it is a scope that is already
     over. It must not linger just because the reaper has not run yet.
 
-    ``reaper_paused`` because the row this reads back is expired the instant
+    ``reaper_disarmed`` because the row this reads back is expired the instant
     it is written, so the TTL monitor is entitled to delete it between the
     POST and the ``find_one`` -- a narrow window, but one that turns a real
     assertion into a ``NoneType`` traceback roughly whenever a sweep lands

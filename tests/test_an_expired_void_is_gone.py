@@ -24,9 +24,12 @@ about VOYD was wrong on those runs; the test was racing the server for the
 document it was about to make a claim about, and the winner was decided by how
 warm the machine happened to be.
 
-So ``reaper_paused`` below removes MongoDB's cleanup from the experiment. That
-makes the claim stronger rather than weaker: with nothing deleting anything,
-a document that does not come back came back from nowhere except the filter.
+So ``reaper_disarmed`` below removes MongoDB's cleanup from the experiment,
+by taking the TTL indexes off this test's own database rather than by
+switching the server's monitor off -- see the fixture for why that distinction
+is the whole design. Either way the claim gets stronger, not weaker: with
+nothing deleting anything, a document that does not come back came back from
+nowhere except the filter.
 """
 
 from __future__ import annotations
@@ -60,7 +63,7 @@ async def owner_on(app, slug: str, email: str) -> dict:
 
 
 @pytest.fixture(autouse=True)
-async def _the_row_must_stay_on_disk(reaper_paused):
+async def _the_row_must_stay_on_disk(reaper_disarmed):
     """Every test in this module needs an expired row to stay on disk.
 
     Autouse rather than named per test, because the requirement is a property
@@ -69,8 +72,8 @@ async def _the_row_must_stay_on_disk(reaper_paused):
     that forgot to ask for this would not fail -- it would pass until the
     machine got slow, which is the failure mode this module is about.
 
-    The body is ``reaper_paused`` in conftest.py; this exists only to make it
-    unconditional here.
+    The body is ``reaper_disarmed`` in conftest.py; this exists only to make
+    it unconditional here.
     """
     yield
 
