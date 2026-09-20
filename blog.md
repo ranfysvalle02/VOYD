@@ -1034,7 +1034,7 @@ hold documents of different sensitivity without becoming four boundaries. And
 a reason declares whether it can be taken back, so a hold is an investigation
 rather than a graveyard, and an erasure stays an erasure.
 
-553 tests, six skipped, run against real `mongot` rather than a mock.
+568 tests, six skipped, run against real `mongot` rather than a mock.
 Three bugs found in the proof, one found by writing an example, three
 silent no-ops found by asking whether a refusal should be undoable, and two
 more found by chasing flakes instead of retrying them. Every number in this

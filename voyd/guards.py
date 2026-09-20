@@ -28,7 +28,7 @@ class Guard:
     @staticmethod
     def require_passcode() -> GuardSpec:
         """Require a passcode at void creation, and on every read of the scope."""
-        return GuardSpec(kind="require_passcode", params={})
+        return GuardSpec(kind="require_passcode")
 
 
 def hash_passcode(passcode: str) -> str:

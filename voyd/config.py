@@ -8,7 +8,7 @@ engine can stay dependency-light and easy to test.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 GuardKind = Literal["require_passcode"]
@@ -48,7 +48,14 @@ class VoyageConfig:
 
 @dataclass(frozen=True)
 class GuardSpec:
-    """A composable guard, stamped onto new voyds/voids as policy data."""
+    """A composable guard, stamped onto new voyds/voids as policy data.
+
+    There used to be a ``params: dict`` here for guards that take
+    arguments. No guard ever did: it was constructed as ``{}`` at the only
+    call site and read by nothing. A field written on every scope and read
+    by nobody is a schema somebody later feels obliged to keep, which is
+    this package's complaint about other people's data models -- so it is
+    gone, and the guard that needs arguments can add it back with a reader.
+    """
 
     kind: GuardKind
-    params: dict = field(default_factory=dict)
