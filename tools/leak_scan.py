@@ -29,7 +29,7 @@ or a filter whose keys do not, is a candidate leak.
   not manufacture a number it cannot stand behind.
 - It never connects to a database. It cannot tell you the leak *fired*; it
   tells you the read *could*. The live version needs someone's production
-  credentials, which is a different kind of responsibility (see ``ideas.md``).
+  credentials, which is a different kind of responsibility (see ``docs/ideas.md``).
 
 So the output is a floor, not a census. A non-zero floor is still the fastest
 way to turn "refusal is a real problem" from a claim into your own incident.
@@ -141,6 +141,47 @@ def _filter_args(call: ast.Call) -> list[ast.AST]:
     return [a for a in args if isinstance(a, (ast.Dict, ast.List, ast.Tuple))]
 
 
+# Keys whose *value* is itself a filter rather than a value to compare
+# against. If one of those is computed, the literal we can see is a shell
+# around a sub-filter we cannot.
+SUBFILTER_KEYS = frozenset({"$match", "$and", "$or", "$nor", "$not", "$expr"})
+
+_LITERAL = (ast.Dict, ast.List, ast.Tuple, ast.Constant)
+
+
+def _delegates_filter(node: ast.AST) -> bool:
+    """Is part of this literal filter built somewhere this scanner cannot see?
+
+    A literal argument is not the same as a *visible* filter. Three shapes
+    hand the real constraint to an expression:
+
+    - ``{**base_filter(), "tenant": t}`` -- unpacking, which ``ast`` records
+      as a dict key of ``None``;
+    - ``{"$match": handle.match({...})}`` -- an operator whose value is a
+      sub-filter returned by a call;
+    - ``[stage(), {"$group": ...}]`` -- a pipeline assembled from helpers.
+
+    In all three the keys we can read are a shell, so calling the read a leak
+    would be inventing a number. ``{"_id": some_var}`` is deliberately *not*
+    included: a variable *value* leaves the keys fully visible, and keys are
+    what the mark check reads.
+    """
+    for child in ast.walk(node):
+        if isinstance(child, ast.Dict):
+            for key, value in zip(child.keys, child.values):
+                if key is None:                       # ``**helper()``
+                    return True
+                if (isinstance(key, ast.Constant)
+                        and isinstance(key.value, str)
+                        and key.value in SUBFILTER_KEYS
+                        and not isinstance(value, _LITERAL)):
+                    return True
+        elif isinstance(child, (ast.List, ast.Tuple)):
+            if any(isinstance(el, ast.Call) for el in child.elts):
+                return True
+    return False
+
+
 @dataclass
 class Read:
     file: str
@@ -221,6 +262,9 @@ def analyze(sources: dict[str, str]) -> Report:
                             kw.arg in ("filter", "pipeline")
                             for kw in node.keywords):
                         status, why = "leak", "no filter"
+                elif any(_delegates_filter(a) for a in dict_args):
+                    status, why = ("indeterminate",
+                                   "filter is partly built elsewhere")
                 else:
                     keys = set().union(*(_dict_keys(a) for a in dict_args))
                     if any(_is_mark(k) for k in keys):
@@ -286,17 +330,30 @@ def main(argv: list[str] | None = None) -> int:
     print(f"scanned {report.files} file(s).")
     print(f"{len(report.bearing)} collection(s) carry a deadline or mark: "
           f"{', '.join(sorted(report.bearing))}")
-    print(f"{len(leaks)} of {considered} read(s) against them do not filter "
-          f"the mark:\n")
-    for r in leaks:
-        print(f"  {r.file}:{r.line}  {r.collection}  ({r.why})")
+    if leaks:
+        print(f"{len(leaks)} of {considered} read(s) against them do not "
+              f"filter the mark:\n")
+        for r in leaks:
+            print(f"  {r.file}:{r.line}  {r.collection}  ({r.why})")
+    else:
+        print(f"0 of {considered} read(s) against them are unfiltered.")
     if report.indeterminate:
         print(f"\n{len(report.indeterminate)} read(s) had a non-literal filter "
               "and could not be judged; inspect them by hand.")
-    print("\nEach leak is a read that can serve a document the collection's "
-          "own mark says is gone. Route it through a filter on the mark -- or, "
-          "if you want that enforced structurally rather than remembered, "
-          "that is what VOYD is for.")
+    # A clean result has to *read* as clean. The closing paragraph used to
+    # explain "each leak" to a reader who had none, which makes a passing
+    # scan look like a broken one -- the wrong impression for the first
+    # thing a stranger runs.
+    if leaks:
+        print("\nEach leak is a read that can serve a document the "
+              "collection's own mark says is gone. Route it through a filter "
+              "on the mark -- or, if you want that enforced structurally "
+              "rather than remembered, that is what VOYD is for.")
+    else:
+        print("\nNo unfiltered read found against a marked collection. That "
+              "is a real result for the paths this can see, and the header "
+              "says what it cannot -- ORM layers, dynamically named "
+              "collections, and the filters listed above as unjudged.")
     return len(leaks)
 
 

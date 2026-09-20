@@ -6,7 +6,7 @@ service, MCP server, crypto erasure, or perimeter — those are later, and only
 if this earns them. The goal is to find out, in your environment, whether the
 handle is nicer to keep than a filter is to remember.
 
-The idea it rests on is one sentence, derived in [`AHA.md`](AHA.md): the
+The idea it rests on is one sentence, derived in [`AHA.md`](docs/AHA.md): the
 per-document check on the way *out* is the guarantee, so refusal binds a
 handle, not a collection. Everything below follows from that.
 
@@ -171,7 +171,7 @@ honestly.
 ## Report template
 
 Fill this in at the end of the trial. It is the evidence
-[`DECISION.md`](DECISION.md) draws on for what to build next.
+[`DECISION.md`](docs/DECISION.md) draws on for what to build next.
 
 ```
 Pilot report

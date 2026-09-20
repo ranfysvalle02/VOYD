@@ -67,7 +67,7 @@ DERIVE = "derive"
 # Prying the guarantee open to read what was forgotten. ``including_refused()``
 # is the handle that does it, and it is a verb like the others because "who
 # may see the erased rows" is exactly the question the other verbs made
-# askable -- and leaving it ungated was the one hole appendix.md named.
+# askable -- and leaving it ungated was the one hole docs/appendix.md named.
 AUDIT = "audit"
 
 # The granting direction: operations that put a forgotten fact back in front

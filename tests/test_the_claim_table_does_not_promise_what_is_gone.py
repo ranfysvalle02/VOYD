@@ -34,7 +34,7 @@ NOT_IDENTIFIERS = {
 
 
 def _claim_rows() -> list[str]:
-    readme = (ROOT / "blog.md").read_text()
+    readme = (ROOT / "docs" / "blog.md").read_text()
     start = readme.index("| Claim | How |")
     table = readme[start:]
     table = table[:table.index("\n\n")]

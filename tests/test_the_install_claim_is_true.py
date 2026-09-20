@@ -35,7 +35,9 @@ PUBLISHED_TO_PYPI = False
 # caveat -- is fine and is not scanned, because it is not inside a fence.
 PIP_INSTALL_VOYD = re.compile(r"""^\s*pip install\s+['"]?voyd""", re.MULTILINE)
 
-DOCS = sorted(ROOT.glob("*.md"))
+# Prose lives in ``docs/`` now, not the root, so the glob has to reach it
+# or the guard quietly stops guarding the sixteen documents that moved.
+DOCS = sorted(ROOT.glob("*.md")) + sorted(ROOT.glob("docs/*.md"))
 
 
 def _fenced_code(text: str) -> str:

@@ -65,6 +65,56 @@ def test_a_non_literal_filter_is_indeterminate_never_a_leak():
     assert report.indeterminate[0].why == "filter is not a literal"
 
 
+def test_a_filter_built_partly_by_a_helper_is_indeterminate():
+    """The shape that produced a false positive on this repository's own code.
+
+    ``{"$match": handle.match({...})}`` is a literal dict, so the old
+    classifier read its keys -- ``$match``, ``$group`` -- saw no mark, and
+    called it a leak. The keys it could see were a shell around a sub-filter
+    returned by a call. The header promises a helper-built filter is never
+    counted as a leak, and an instrument that overstates on the repository it
+    ships from is worth less than no instrument.
+    """
+    report = analyze({"a.py": (
+        "def f(db, handle):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    return db.notes.aggregate([\n"
+        "        {'$match': handle.match({'tenant': 't'})},\n"
+        "        {'$group': {'_id': '$indexed'}},\n"
+        "    ])\n"
+    )})
+    assert report.bearing == {"notes"}
+    assert report.leaks == []
+    assert len(report.indeterminate) == 1
+    assert report.indeterminate[0].why == "filter is partly built elsewhere"
+
+
+def test_unpacking_a_base_filter_is_indeterminate():
+    """``{**base(), ...}`` is the other way the visible keys are a shell."""
+    report = analyze({"a.py": (
+        "def f(db, base):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    return db.notes.find({**base(), 'tenant': 't'})\n"
+    )})
+    assert report.leaks == []
+    assert len(report.indeterminate) == 1
+
+
+def test_a_variable_value_still_leaves_the_keys_visible():
+    """The limit of the rule above, pinned so it cannot swallow the signal.
+
+    ``{'tenant': t}`` has a computed *value* and fully visible *keys*, and
+    keys are what the mark check reads. If this ever became indeterminate the
+    scanner would report nothing and look reassuring.
+    """
+    report = analyze({"a.py": (
+        "def f(db, t):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    return db.notes.find({'tenant': t})\n"
+    )})
+    assert _leaks(report) == {("a.py", 3)}
+
+
 def test_a_collection_with_no_mark_is_not_counted():
     """No accusation without evidence the collection carries a deadline."""
     report = analyze({"a.py": (

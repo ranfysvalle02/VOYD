@@ -12,6 +12,15 @@ you still **do not** get by stopping there.
 Nothing on this page deletes anything. `revoke()` makes a fact unreachable on
 the next read; the row stays on disk. That is the proof, not a limitation.
 
+| | you add | you get | you still don't have |
+|---|---|---|---|
+| **hour one** | a handle in front of one `find` | that path cannot serve an expired or revoked row | every *other* read on that collection |
+| **hour two** | the same handle on `search` | the guarantee on `$vectorSearch`, where a query filter cannot reach | rules beyond expired-or-revoked |
+| **hour three** | named rules instead of the preset | clearance, quarantine, model drift, token budget — on both halves | nothing you asked for; this is the full read path |
+| **later** | an extra: `app`, `crypto`, `mcp` | a surface other callers can reach | — and none of it is the on-ramp |
+
+Each step is additive, and each is reversible by deleting the lines you added.
+
 ---
 
 ## Hour one: one collection, `find` only

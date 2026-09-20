@@ -27,7 +27,12 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCS = sorted(ROOT.glob("*.md")) + [ROOT / "drift" / "README.md"]
+# The root holds the front door and the pilot report; everything else is
+# reference material under ``docs/``. Both are checked -- a link that
+# broke in the move is exactly the rot this file exists to catch.
+DOCS = (sorted(ROOT.glob("*.md"))
+        + sorted(ROOT.glob("docs/*.md"))
+        + [ROOT / "drift" / "README.md"])
 
 # Things that have been deleted. A mention of one is a doc that was not
 # updated when the code was -- and each entry here is a grave marker: it
@@ -83,7 +88,7 @@ def test_every_link_resolves(doc):
 def test_every_source_path_named_in_prose_exists(doc):
     """`engine/admission.py` in a sentence is a promise about the tree."""
     named = set(re.findall(
-        r"`((?:voyd|tests|examples|drift|bench)/[\w./]+\.(?:py|md|yml))`",
+        r"`((?:voyd|tests|examples|drift|bench|docs|tools)/[\w./]+\.(?:py|md|yml))`",
         doc.read_text()))
     missing = sorted(p for p in named if not (ROOT / p).exists())
     assert not missing, f"{doc.name} names paths that do not exist: {missing}"
@@ -131,5 +136,6 @@ def test_the_front_door_points_at_documents_that_exist():
     the last thing anybody updates."""
     readme = (ROOT / "README.md").read_text()
     for name in ("pain.md", "blog.md", "ISSUES.md", "ideas.md"):
-        assert f"({name})" in readme, f"README no longer links {name}"
-        assert (ROOT / name).exists()
+        target = f"docs/{name}"
+        assert f"({target})" in readme, f"README no longer links {target}"
+        assert (ROOT / target).exists()

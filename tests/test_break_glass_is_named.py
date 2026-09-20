@@ -3,7 +3,7 @@
 ``including_refused()`` turns the guarantee off. It has to exist -- audit and
 administration need an unfiltered read -- and it is named for exactly that
 reason: a review can grep the phrase and find every place the guarantee was
-set aside. But a named hole is still a hole, and appendix.md called out the
+set aside. But a named hole is still a hole, and docs/appendix.md called out the
 two things missing from it: it was ungated and uncounted, so the 2am use to
 "just fix a bug" left no trace and needed no permission.
 

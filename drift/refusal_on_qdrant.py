@@ -10,7 +10,7 @@ database itself refuses to serve the unfiltered rows. That is refusal as a
 property of the engine, not of the caller's memory.
 
 This file asks whether that third act is even possible on a vector database
-with no rows -- Qdrant -- because [`ideas.md`](README.md) pre-registered it as
+with no rows -- Qdrant -- because [`ideas.md`](../docs/ideas.md) pre-registered it as
 the more interesting target: "Qdrant has no rows at all: refusal has to live
 in the payload filter, and whether that is *enforceable* or merely
 *conventional* is a genuinely open question. If it turns out to be

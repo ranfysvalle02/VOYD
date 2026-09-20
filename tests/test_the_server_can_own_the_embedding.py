@@ -11,7 +11,7 @@ Atlas Local is not such a deployment. Measured against
 ``autoEmbed`` validates field by field and then answers ``supported models
 are: []``: the capability is absent rather than misconfigured, with no
 credential to supply and no registration command to call. That finding is
-written up in BUG.md.
+written up in docs/BUG.md.
 
 So this file tests the half that is real here, which is the more important
 half anyway: **declaring it must be safe on a deployment that cannot honour
@@ -101,7 +101,7 @@ async def test_a_deployment_that_cannot_embed_says_so_and_carries_on(declared):
     assert "docs" in se.auto_embed_declined, (
         "Atlas Local registers no models, so this must have fallen back -- "
         "if it did not, either the image gained the capability (good news, "
-        "update BUG.md) or the refusal was swallowed")
+        "update docs/BUG.md) or the refusal was swallowed")
     assert "docs" not in se.auto_embed_active
     assert se.embeds_itself("docs") is False
 

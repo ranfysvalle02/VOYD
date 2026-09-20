@@ -1,18 +1,72 @@
 # VOYD
 
-**Ranking is not permission.**
+**Your vector index is still serving documents you deleted.**
 
-Your retrieval answers with a confident score and no idea whether that hit was
-allowed to be there — an expired row the sweeper has not reached, a fact
-somebody revoked, a vector from the embedding model you swapped last quarter, a
-document a detector just flagged. An index decides what is *relevant*. Nothing
-in the ordinary read path was asked the other question:
+Admission control for retrieval: a read path that *cannot* return a fact it has
+forgotten — expired, revoked, quarantined, legally held, or embedded by a model
+you replaced last quarter. Built for RAG on MongoDB Atlas Vector Search, and
+ported to pgvector and Qdrant to show the idea is not one vendor's feature.
 
-> **may this fact reach a prompt?** — answered on every read, immediately,
-> whatever the sweeper is doing.
+---
 
-That question is the product. VOYD answers it at the one place every retrieval
-path passes through on the way out: a read handle with no unfiltered read on it.
+## The incident
+
+Six read paths against a collection with a deadline. One of them forgot the
+filter.
+
+Nothing broke. No error, no alert, no failed request — the read returned a
+confident, well-scored, *expired* document, and a model wrote it into an answer
+somebody believed. The defect was not that one filter was wrong. It was that
+remembering the filter was a thing a person had to do, six times, forever,
+including the next person to open the file.
+
+It generalises past deadlines. A document you deleted, a credential somebody
+revoked, a fact a customer asked you to erase under GDPR Art. 17 — your storage
+layer agrees it is gone. Your index has not heard. A TTL monitor sweeps about
+once a minute (measured here: 60.0s); an S3 lifecycle rule runs about once a
+day. Until they catch up, ranking keeps answering a question nobody asked it:
+
+> An index decides what is **relevant**. Nothing in the ordinary read path was
+> asked the other question — **may this fact reach a prompt?**
+
+Deletion is a storage event on a storage clock. Retrieval is a read on a
+different one. **Delete is a wish. Refuse is a contract.**
+
+---
+
+## Do you have this bug? Find out before installing anything
+
+One stdlib file. No database, no credentials, nothing to install — and you
+point it at *your* repository, not this one:
+
+```bash
+python tools/leak_scan.py path/to/your/repo
+```
+
+```
+scanned 1 file(s).
+1 collection(s) carry a deadline or mark: notes
+2 of 3 read(s) against them do not filter the mark:
+
+  app/store.py:5  notes  (filter does not name the mark)
+  app/store.py:8  notes  (filter does not name the mark)
+```
+
+A collection counts as deadline-bearing only when your own code says so — a
+write or index that names a mark field, or a read that already filters on it.
+Every hit is then a read that can serve a document your own schema calls gone.
+
+The number is built to be defensible rather than alarming. It parses source
+with `ast`, so ORM layers, dynamically named collections and filters assembled
+by a helper are reported as *indeterminate*, never counted as leaks; the file's
+header is specific about what it cannot see. It undercounts on purpose.
+
+**Zero means you do not need this.** Anything else is the gap, and the rest of
+this page is about closing it structurally instead of one filter at a time.
+
+---
+
+## The fix, in the diff you would actually write
 
 ```python
 docs = engine.model("notes").forgettable()
@@ -25,29 +79,102 @@ await docs.revoke({"_id": x}, reason="credential leaked")
 # unreachable on the next read. The row is still on disk. That is the proof.
 ```
 
-There is **no unfiltered `find` and no unfiltered `search`** on that handle, so
-refusal doesn't depend on the next author remembering it. The failure mode is
-inverted: you used to have to remember to be safe; now you have to declare that
-you want the unsafe thing, in a word a reviewer can grep for — and that word is
-not a free pass. `including_refused()` asks an `AUDIT` grant where an authority
-is installed on every read, then increments `including_refused_total` and
-records the actor/time in `receipts()`, so a cached break-glass handle is a
-door with an alarm rather than a permanent pass.
+That handle has **no unfiltered `find` and no unfiltered `search`**, which is
+the entire trick. Safety stops being something the next author remembers and
+becomes something they would have to actively ask for. The failure mode is
+inverted: you used to have to remember to be safe; now you declare that you
+want the unsafe thing, in a word a reviewer can grep for.
 
-Multi-tenant is one argument away — `model("notes", tenant="tenant_id")` — and
-then the tenant field is required in every read, so `find({"tenant_id": t})`
-rather than `find({})`. The [quickstart](examples/quickstart.py) runs both.
+And that word is not a free pass. `including_refused()` asks an `AUDIT` grant
+on every read where an authority is installed, increments
+`including_refused_total`, and records actor and time in `receipts()` — so a
+cached break-glass handle is a door with an alarm, not a permanent key.
+
+Multi-tenancy is one argument away — `model("notes", tenant="tenant_id")` —
+after which the tenant field is *required* in every read, so `find({"tenant_id":
+t})` rather than `find({})`. The [quickstart](examples/quickstart.py) runs both.
+
+**This is not a framework, and adopting it is not a migration.** One
+collection, one read path, under ten substantive lines, your existing code left
+alone — a limit that is enforced by a test rather than promised in prose.
+[`ADOPTING.md`](ADOPTING.md) is the first hour, and is just as specific about
+what you still do not get when you stop there.
+
+---
+
+## Watch it refuse
+
+```bash
+docker compose up -d mongo
+uv run python examples/forget.py
+```
+
+A document expires and becomes unreachable *while its row is still on disk*;
+then the reaper takes the row and its vector together. A pinned document beside
+it is untouched. No API key, no vendor, no account. Call it five minutes with
+the image pull — the ten-second version is the leak scan above, which needs
+none of this.
+
+<details>
+<summary><b>More proofs, each executable</b> — the counter-argument, the pilot, the abstraction</summary>
+
+**The counter-argument**, which is also runnable:
+
+```bash
+uv run --extra drift python drift/exhibit.py
+```
+
+Postgres holds the row, Qdrant holds the vector, MinIO holds the bytes, and a
+cron is supposed to keep the three agreeing. Four clocks, three ways to drift.
+The deleted document answers the query.
+
+**The pilot**, on synthetic data against a real MongoDB, filling in its own
+report. A revoked credential still reaches a prompt through the raw read and
+through an unfiltered candidate producer; the handle refuses it on both, and so
+does the summary an agent wrote from it. It runs no vector index — it calls
+`reachable()` directly, to isolate the same per-hit egress boundary
+`$vectorSearch` uses:
+
+```bash
+uv run python bench/pilot.py            # writes bench/results/pilot.md
+```
+
+Every line of the [`PILOT.md`](PILOT.md) report is filled from that run except
+the one only a real team can answer: *kept after two weeks*. A proof of the
+mechanism is not evidence of demand, and the report says so itself.
+
+**The abstraction**, for anyone thinking this is a soft-delete flag with extra
+steps. Soft-delete, a TTL, a feature flag, row-level security and a token
+budget, written as five rules on **one** handle and enforced together on both
+halves — `deleted=true` is the smallest of the five.
+
+```bash
+uv run python examples/rosetta.py
+```
+
+</details>
+
+---
+
+## Honest status
+
+The mechanism is checked by 878 tests against real `mongod` and real `mongot`
+on every commit, with no mock tier. That is evidence the mechanism works. It is
+**not** evidence that anyone needs it: there are no production users yet, the
+package is not on PyPI yet, and [`ISSUES.md`](docs/ISSUES.md) lists what is
+wrong, unproven or imprecise in what already ships. Read that before trusting
+anything above it.
+
+---
 
 ## Refusal is the product; the stack is around it
 
-The sharpest instance is deletion. Deletion is a *storage* event, and storage
-events are eventually consistent: a TTL monitor sweeps about once a minute
-(measured here: 60.0s), an S3 lifecycle rule runs about once a day. In that
-window your vector index keeps returning a deleted document as a normal,
-well-scored result, with nothing logged and nothing to page on. **Delete is a
-wish. Refuse is a contract** — but the contract is the point, not the sweeper.
-The idea would still be true with an instant sweeper, because the index and the
-row are different systems with different clocks.
+*"So make the sweeper faster."* It would not help, and that is the part worth
+sitting with. The contract is the point, not the latency: even with an
+instantaneous reaper the index and the row are still different systems with
+different clocks, and a hit that was ranked a moment ago is still a hit that
+was never asked whether it was allowed. Shrinking the window is not the same
+as having an answer inside it.
 
 So the erasure machinery is exactly that — machinery *around* refusal. A TTL
 deadline collects the row; crypto-shredding makes the copies in backups and
@@ -77,72 +204,8 @@ rule, but only if every read path, fallback and future caller supplies it.
 
 Everything else here is downstream of that — including the invariant it
 forces: **a rule that can express itself in a query or index filter but not per
-document is not a slower rule, it is a silent hole.** [`AHA.md`](AHA.md)
+document is not a slower rule, it is a silent hole.** [`AHA.md`](docs/AHA.md)
 derives it in four steps, with the measurements.
-
----
-
-## See it, in ten seconds
-
-```bash
-docker compose up -d mongo
-uv run python examples/forget.py
-```
-
-A document expires, becomes unreachable *while its row is still on disk*, then
-the reaper takes the row and its vector together. A pinned document beside it
-is untouched. No API key, no vendor.
-
-The smallest adoption — refusal on one collection, in the handful of lines a
-team actually adds — is [`examples/quickstart.py`](examples/quickstart.py):
-`find`-only on plain MongoDB first, then the same guarantee on the Atlas
-`$vectorSearch` path where the server owns the embedding.
-
-Then the counter-argument, which is also executable:
-
-```bash
-uv run --extra drift python drift/exhibit.py
-```
-
-Postgres holds the row, Qdrant holds the vector, MinIO holds the bytes, and a
-cron is supposed to keep them agreeing. Four clocks, three ways to drift. The
-deleted document answers the query.
-
-Then the pilot, run on synthetic data against a real MongoDB, filling its own
-report — a revoked credential still reaches a prompt through the raw read and
-an unfiltered candidate producer, the handle refuses it on both, and so does
-the summary an agent wrote from it. It does not run a vector index; it calls
-`reachable()` directly to isolate the same per-hit egress boundary
-`$vectorSearch` uses:
-
-```bash
-uv run python bench/pilot.py            # writes bench/results/pilot.md
-```
-
-Every line of the [`PILOT.md`](PILOT.md) report is filled from that run except
-the one only a real team can answer: kept after two weeks. A proof of the
-mechanism is not evidence of demand, and the report says so.
-
-And before installing anything, run it against **your own** repository — one
-stdlib file, no database, no credentials:
-
-```bash
-python tools/leak_scan.py path/to/your/repo
-```
-
-It reports your own floor: reads that hit a collection your code marks with a
-deadline or soft-delete field, without filtering on it. Every one is a read
-that can serve a document your own schema says is gone. The header is honest
-about what a source scan cannot see.
-
-And to see why this is more than a soft-delete flag, run
-[`examples/rosetta.py`](examples/rosetta.py): soft-delete, TTL, a feature flag,
-row-level security and a token budget written as five rules on **one** handle,
-enforced together on both halves — `deleted=true` is the smallest of them.
-
-```bash
-uv run python examples/rosetta.py
-```
 
 ---
 
@@ -279,9 +342,9 @@ rotation and shredding are exercised against something that can refuse.
 Enterprise key custody is not a synonym for one cloud vendor's managed
 service, and the open standard for it can be started in a subprocess.
 
-And [`ISSUES.md`](ISSUES.md) lists what is wrong, unproven or imprecise in what
-already ships — now narrowly: the three *hosted* providers share every line of
-that code path, and what is unproven about them is vendor-specific.
+What remains unproven is narrow, and [`ISSUES.md`](docs/ISSUES.md) names it:
+the three *hosted* key providers share every line of that code path, so what
+is untested about them is vendor-specific rather than structural.
 
 ---
 
@@ -333,40 +396,46 @@ await notes.shred("alice")               # noise, in every copy that exists
 
 ## Read more
 
-Four shelves, in the order a new reader should take them.
+Four shelves, in the order a new reader should take them. The reference
+material lives in [`docs/`](docs); the root holds only the front door, the
+on-ramp and the pilot.
 
-**Start here** — the idea, in ninety seconds and in one page.
-
-| | |
-|---|---|
-| [`AHA.md`](AHA.md) | the one idea, derived in four steps with the measurements. Everything else is downstream |
-| [`TLDR.md`](TLDR.md) | the short versions, the pitches by room, and why the approach reads as strange |
-
-**The argument** — why it is a real problem, at length and executable.
+**Start here** — how to use it, and why it is shaped this way.
 
 | | |
 |---|---|
-| [`pain.md`](pain.md) | eight failures whose signature is a plausible answer. Mostly real incidents from this repository |
-| [`blog.md`](blog.md) | the long version: the three times the same bug came back, and the two bugs in the proof |
+| [`ADOPTING.md`](ADOPTING.md) | the first hour: one collection, one read path, under ten lines — and what you do *not* get by stopping there |
+| [`AHA.md`](docs/AHA.md) | the one idea, derived in four steps with the measurements. Everything else is downstream |
+| [`TLDR.md`](docs/TLDR.md) | the short versions, the pitches by room, and why the approach reads as strange |
+
+**The argument** — why this is a real problem, at length and executable.
+
+| | |
+|---|---|
+| [`pain.md`](docs/pain.md) | eight failures whose signature is a plausible answer. Mostly real incidents from this repository |
+| [`blog.md`](docs/blog.md) | the long version: the three times the same bug came back, and the two bugs in the proof |
 | [`drift/`](drift/README.md) | the counter-argument, executable — including the whole thesis ported to pgvector with no MongoDB in the file |
 | [`examples/`](examples/) | twelve runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
 
-**What is wrong with it** — read before trusting any of the above.
+**What is wrong with it** — read this before trusting any of the above.
 
 | | |
 |---|---|
-| [`ISSUES.md`](ISSUES.md) | defects, unproven claims, and operational caveats |
-| [`ideas.md`](ideas.md) | what is worth building next, and what is deliberately not |
+| [`ISSUES.md`](docs/ISSUES.md) | defects, unproven claims, and operational caveats |
+| [`ideas.md`](docs/ideas.md) | what is worth building next, and what is deliberately not |
 
 **Whether anyone will use it** — positioning, not engineering.
 
 | | |
 |---|---|
-| [`PROPOSAL.md`](PROPOSAL.md) | three directions, ranked. **Direction 1 — admission for the prompt — is the live one**; the handle is the identity, the other two are frozen until a pilot |
+| [`PROPOSAL.md`](docs/PROPOSAL.md) | three directions, ranked. **Direction 1 — admission for the prompt — is the live one**; the handle is the identity, the other two are frozen until a pilot |
 | [`PILOT.md`](PILOT.md) | the smallest honest trial: refusal on one collection, exit criteria and a report template — plus `bench/pilot.py`, the same flow run against a real MongoDB with the report already filled |
-| [`DECISION.md`](DECISION.md) | what to build next, pre-registered — each API waits on pilot evidence |
-| [`appendix.md`](appendix.md) | the sell decomposed, the ceiling of the pitch, and the compliance vendors |
+| [`DECISION.md`](docs/DECISION.md) | what to build next, pre-registered — each API waits on pilot evidence |
+| [`appendix.md`](docs/appendix.md) | the sell decomposed, the ceiling of the pitch, and the compliance vendors |
 
-Internal, not landing-page copy: [`copy.md`](copy.md) (the family-court register — a mnemonic for the team, not a public sell) and [`mongodb.md`](mongodb.md) (a memo for a MongoDB conversation, not the project's identity).
+Working notes rather than landing-page copy, kept because they record how the
+thinking went: [`copy.md`](docs/copy.md) (the family-court register — a
+mnemonic for the team, not a public sell) and [`mongodb.md`](docs/mongodb.md)
+(a memo for one MongoDB conversation, not the project's identity).
 
 MIT.

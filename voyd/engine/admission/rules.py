@@ -527,7 +527,7 @@ class Budget:
 
     **No query half, and there never can be one.** ``clause()`` is ``None``: a
     running total is not something a per-document query can express. Per
-    ``AHA.md`` that is the safe asymmetry -- per-document-only is slower, not a
+    ``docs/AHA.md`` that is the safe asymmetry -- per-document-only is slower, not a
     hole; a clause-only rule would be the hole -- and ``Unrecoverable`` is the
     existing precedent for a rule that lives entirely on egress.
 

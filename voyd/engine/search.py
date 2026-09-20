@@ -346,7 +346,7 @@ class SearchEngine:
         edition ``localDev``): ``autoEmbed`` validates field by field and then
         reports ``supported models are: []`` -- the capability is absent, not
         misconfigured, and no credential or registration command exists to fix
-        it. See BUG.md. So the fallback is the normal path locally and in CI
+        it. See docs/BUG.md. So the fallback is the normal path locally and in CI
         today, and the same code takes the auto path wherever models exist.
         """
         from pymongo.operations import SearchIndexModel

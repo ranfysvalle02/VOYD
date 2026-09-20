@@ -4,7 +4,7 @@
 query is text, and nothing in this process ever computes an embedding. The
 companion file test_the_server_can_own_the_embedding.py proves that
 *declaring* it is safe on a deployment that cannot honour it -- Atlas Local
-registers no models at all, so it falls back, loudly (see BUG.md).
+registers no models at all, so it falls back, loudly (see docs/BUG.md).
 
 This file is the other half, skipped unless handed a cluster:
 
