@@ -40,7 +40,7 @@ import uuid
 
 from pymongo import AsyncMongoClient
 
-from voyd.engine import Budget, Engine, Restricted
+from voyd.engine import Budget, Distinct, Engine, Restricted
 
 MODEL = """
 [request_definition]
@@ -138,6 +138,18 @@ async def part_b(engine):
           f"{sorted(d['doc_id'] for d in whole)}")
     print(f"    refused, by reason            -> "
           f"{docs.receipts()['refused_by_reason']}")
+    # And it is not one awkward example. `Distinct` is set-relative for the
+    # same reason: whether this row is redundant depends on which other rows
+    # are in the page. Two cumulative rules, one handle, separate state.
+    deduped = engine.model("chunks").admitting(
+        Budget(limit=100, cost_field="tokens"), Distinct("chunk"))
+    page = await deduped.find({}, sort=[("rank", 1)])
+    print("\n    four chunks, two of them the same passage")
+    print(f"    admitted                      -> "
+          f"{[d['doc_id'] for d in page]}")
+    print(f"    refused, by reason            -> "
+          f"{deduped.receipts()['refused_by_reason']}")
+
     print("\n    `enforce(sub, obj, act)` takes a subject and an object.")
     print("    There is no argument for 'the rest of the page', so no")
     print("    matcher can return both of those answers. Nor can an index")
@@ -164,6 +176,12 @@ async def main():
         await client[name].budgeted.insert_many([
             {"doc_id": "big", "tokens": 95},
             {"doc_id": "small", "tokens": 10},
+        ])
+        await client[name].chunks.insert_many([
+            {"doc_id": "a1", "chunk": "h1", "tokens": 30, "rank": 1},
+            {"doc_id": "b1", "chunk": "h2", "tokens": 30, "rank": 2},
+            {"doc_id": "a2", "chunk": "h1", "tokens": 30, "rank": 3},
+            {"doc_id": "c1", "chunk": "h3", "tokens": 30, "rank": 4},
         ])
         await part_a(engine, casbin_enforcer)
         await part_b(engine)

@@ -25,7 +25,11 @@ that was a construction error until it was not.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
+
+from voyd.engine import now
 
 from voyd.engine.admission import (Admission, AdmissionSpec, Budget, Deadline,
                                    Distinct, OVER_BUDGET, REDUNDANT, revoked)
@@ -63,6 +67,29 @@ def test_the_same_document_is_admitted_alone_and_refused_in_company():
     assert Distinct("chunk").clause() is None, (
         "a set-relative rule must report no server-side half rather than a "
         "wrong one -- a query cannot ask what else the query will return")
+
+
+def test_a_live_copy_survives_an_expired_one_that_ranked_above_it():
+    """The regression that killed the first design, and the sharpest test here.
+
+    A passage is indexed twice and the higher-ranked copy has expired. The
+    obvious implementation pre-scans the candidates to pick a winner per
+    cluster -- and that pre-scan runs before ``Deadline`` has refused
+    anything, so it awards the slot to the expired copy. The live copy is
+    then ``redundant`` behind a document that never reached the page, and
+    the caller gets an empty result with two refusals and no error.
+
+    Losing a live document silently is the failure this whole package
+    exists to remove, so the rule fills its set *during* admission: only a
+    document that actually got through can claim a slot.
+    """
+    h = handle(Deadline(), Distinct("chunk"))
+    past, future = now() - timedelta(hours=1), now() + timedelta(hours=1)
+    docs = [{"_id": "stale", "chunk": "a", "expire_at": past},
+            {"_id": "live", "chunk": "a", "expire_at": future}]
+
+    assert [d["_id"] for d in h.reachable(docs)] == ["live"]
+    assert h.receipts()["refused_by_reason"] == {"deadline": 1}
 
 
 def test_the_best_ranked_member_of_a_cluster_is_the_one_kept():

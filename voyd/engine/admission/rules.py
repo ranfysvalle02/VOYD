@@ -61,8 +61,8 @@ log = logging.getLogger("engine.admission")
 class Rule(Protocol):
     """One reason a document may not reach a prompt.
 
-    Four optional class attributes change how a rule is treated, and all
-    four default to the behaviour of the original rules:
+    Five optional class attributes change how a rule is treated, and all
+    five default to the behaviour of the original rules:
 
     ``needs_caller``  the rule compares the document against *who is asking*,
                       so it is handed the caller's claims. A rule without it
@@ -79,6 +79,14 @@ class Rule(Protocol):
                       waive: an auditor is entitled to read what was
                       forgotten, and entitled to nothing above their own
                       clearance.
+    ``charges``       the rule *spends* its per-read state rather than only
+                      reading it, so it is asked after every other rule
+                      including the other cumulative ones. Only meaningful
+                      alongside ``needs_tab``. A budget charged for a
+                      document that a later rule then refuses makes
+                      ``Page.spent`` stop being the sum of what was
+                      admitted, which is the one thing ``Tab.charge``
+                      promises.
     ``reversible``    present *at all* means somebody imposes this reason
                       with a verb -- it reads a mark on ``field`` that an
                       operator sets. Its value says whether that verb has an
@@ -87,7 +95,7 @@ class Rule(Protocol):
                       vector from the wrong model -- do not declare it, and
                       ``impose()``/``lift()`` will not target them.
 
-    That last one carries the reversibility policy of the whole system, so
+    ``reversible`` carries the reversibility policy of the whole system, so
     it is worth saying why it lives on the rule rather than on the verb.
 
     ``Marked`` is one class serving two operationally opposite jobs. A
@@ -207,28 +215,6 @@ class Tabs:
 
     def for_rule(self, rule) -> Any:
         return self._states.get(id(rule))
-
-    def observe(self, docs: list[dict]) -> None:
-        """Show every state the candidate set, before any of it is admitted.
-
-        Set-relative rules split into two kinds and this is the difference.
-        A budget is *order*-relative: it charges as it goes and the answer
-        depends on what came before, so it needs no preview. A rule like
-        ``Distinct`` is *set*-relative: it compares a document against its
-        neighbours, and on a page whose order is relevance it cannot know
-        whether the thing it is about to admit has a better twin two rows
-        down.
-
-        Optional, so a state that does not implement it is unaffected, and
-        never a substitute for the per-document check -- ``why`` still runs
-        on every candidate. This only lets a rule *see* the set it is
-        relative to, which is the one thing a per-document predicate
-        structurally cannot discover for itself.
-        """
-        for state in self._states.values():
-            seen = getattr(state, "observe", None)
-            if callable(seen):
-                seen(docs)
 
     @property
     def exhausted(self) -> bool:
@@ -584,45 +570,30 @@ class Restricted:
 
 
 class Kept:
-    """What ``Distinct`` remembers for one read: the set it is filtering.
+    """What ``Distinct`` remembers for one read: the identities it admitted.
 
-    Two collections, and the split is the point. ``best`` is filled by
-    ``observe`` before anything is admitted and says, for each cluster of
-    near-identical candidates, which one wins. ``taken`` is filled during the
-    read and stops a second member of a cluster slipping through if the
-    winner was itself refused by some *other* rule -- an expired twin does
-    not get to reserve the slot and then vacate it.
+    Filled *during* admission, never before it, and that ordering is the
+    whole correctness argument. An earlier draft pre-scanned the candidate
+    set to pick a winner per cluster, which reads as the more thorough
+    design and is wrong: the pre-scan sees documents the other rules have
+    not refused yet, so an expired copy ranking above a live one would be
+    named the winner, and then *both* would be lost -- the live one as
+    ``redundant`` behind a document that never reached the page. Filling the
+    set as documents are admitted means only a document that actually got
+    through can claim the slot.
 
     ``exhausted`` is always False and that is deliberate, not an oversight: a
-    redundant hit closes nothing. The page keeps filling, which is exactly
-    what a caller wants -- drop the duplicate and give me the next distinct
-    thing -- and it is why ``saturate`` refills past a ``redundant`` refusal
-    the same way it refills past a deadline.
+    redundant hit closes nothing. The page keeps filling, which is what a
+    caller wants -- drop the duplicate, give me the next distinct thing --
+    and it is why ``saturate`` refills past a ``redundant`` refusal the same
+    way it refills past a deadline.
     """
 
-    __slots__ = ("best", "taken", "exhausted", "key")
+    __slots__ = ("taken", "exhausted")
 
-    def __init__(self, key):
-        self.key = key
-        self.best: dict[Any, Any] = {}
+    def __init__(self) -> None:
         self.taken: set = set()
         self.exhausted = False
-
-    def observe(self, docs: list[dict]) -> None:
-        """Pick one winner per cluster, from the whole candidate set.
-
-        Order matters and relevance order is the right one: the first
-        document with a given key is the best-ranked member of its cluster,
-        so it is the one kept. Doing this in ``observe`` rather than as the
-        read goes is the whole reason the hook exists -- mid-read, a rule
-        cannot know whether the row it is about to admit has a better twin
-        two positions down.
-        """
-        for doc in docs:
-            signature = self.key(doc)
-            if signature is None:
-                continue
-            self.best.setdefault(signature, id(doc))
 
 
 @dataclass(frozen=True)
@@ -687,11 +658,15 @@ class Distinct:
         return value
 
     def new_tab(self) -> Kept:
-        return Kept(self._key_of)
+        return Kept()
 
     def why(self, doc: dict, *, when: datetime | None = None,
             tab: Any = None) -> str | None:
-        """Admit the cluster's winner; refuse the rest.
+        """Admit the first copy that survives every other rule; refuse the rest.
+
+        "First" is the read's own order, which is relevance on ``search`` and
+        the caller's mandatory ``sort`` on ``find`` -- so the copy kept is the
+        best-ranked one, without this rule needing an opinion about ranking.
 
         Never raises, like every rule here: a document with no computable
         identity is admitted rather than refused, and that direction is
@@ -707,9 +682,6 @@ class Distinct:
         if signature is None:
             return None
         if signature in tab.taken:
-            return self.reason
-        winner = tab.best.get(signature)
-        if winner is not None and winner != id(doc):
             return self.reason
         tab.taken.add(signature)
         return None

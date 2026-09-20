@@ -653,12 +653,6 @@ class AdmissionCore:
         """
         self._begin_read()
         tab = self._open_tab()
-        docs = list(docs)
-        if tab is not None:
-            # Set-relative rules see the candidates before any are admitted.
-            # A no-op for order-relative ones like Budget; the per-document
-            # check still decides every hit either way.
-            tab.observe(docs)
         kept = [d for d in docs
                 if self._admit(d, when=when, tab=tab) is not None]
         # Redactions are counted into ``receipts()`` by ``_admit`` already;
@@ -689,11 +683,6 @@ class AdmissionCore:
         tab = self._open_tab()
         tally: dict[str, int] = {}
         kept: list[dict] = []
-        if tab is not None:
-            # Each refill round re-classifies the whole superset from the
-            # top against a fresh tab, so a set-relative rule sees the
-            # *current* candidate set rather than a stale first round.
-            tab.observe(docs)
         for doc in docs:
             admitted = self._admit(doc, when=when, tally=tally, tab=tab)
             if admitted is not None:
