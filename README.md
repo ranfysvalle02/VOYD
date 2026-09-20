@@ -139,9 +139,15 @@ The tests are written as arguments. A few that carry more than their weight:
 - **`test_the_public_surface_is_deliberate.py`** pins `__all__`, so a new
   public name is a line somebody justifies.
 
+Including the custody ladder's external rung: a **real KMIP server** runs in
+the suite, so the data key is wrapped by a key the process does not hold, and
+rotation and shredding are exercised against something that can refuse.
+Enterprise key custody is not a synonym for one cloud vendor's managed
+service, and the open standard for it can be started in a subprocess.
+
 And [`ISSUES.md`](ISSUES.md) lists what is wrong, unproven or imprecise in what
-already ships — including the one that costs something: the enterprise KMS path
-has never been run against a real KMS.
+already ships — now narrowly: the three *hosted* providers share every line of
+that code path, and what is unproven about them is vendor-specific.
 
 ---
 

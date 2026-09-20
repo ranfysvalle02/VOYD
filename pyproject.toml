@@ -80,6 +80,12 @@ dev = [
     # to remember to run is a suggestion, which is this project's whole
     # complaint about conventions.
     "ruff>=0.5",   # rule set is pinned in [tool.ruff.lint], so the tool may float
+    # A conformant KMIP server, so the custody ladder's *external* rung is
+    # checked against real infrastructure rather than asserted as a shape.
+    # Enterprise key custody is not a synonym for one cloud vendor's
+    # managed service -- KMIP is the open standard the category runs on,
+    # and unlike any hosted KMS it can be started in a subprocess.
+    "pykmip>=0.10",
 ]
 
 [project.urls]

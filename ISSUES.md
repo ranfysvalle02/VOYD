@@ -13,48 +13,46 @@ Severity is about *what a reader would be wrong about*, not about effort.
 
 ---
 
-## 1. Nothing has ever run against a cloud KMS
+## 1. ~~Nothing has ever run against a real KMS~~ — closed, and the framing was the bug
 
-**Severity: high — it is the difference between a claim and a demonstration.**
+This was carried as the project's one honestly-unmet standard for a long
+time, on an assumption that turned out to be wrong: that closing it needed
+a cloud account and CI secrets.
 
-`custody.py` ships `Aws`, `Azure`, `Gcp` and `Kmip`. The provider names and
-master-key documents are unit-tested, match the driver's documented
-contract, and share a code path with the local rung that *is* exercised
-against a live server on every commit.
+**Enterprise key custody is not a synonym for one vendor's managed
+service.** KMIP is the open standard the category actually runs on —
+Thales, Fortanix, Entrust, HSM appliances — and a large share of
+deployments choose it *because* they will not put keys in a public cloud.
+It is also, unlike any hosted KMS, runnable: a conformant server starts in
+a subprocess in eight seconds.
 
-That proves the shape. It does not prove it works. "Constructs the right
-`master_key` document" and "works against AWS" are different claims, and
-only the first is currently true.
+So `tests/test_an_external_kms_holds_the_key.py` runs against a real KMIP
+server over TLS. The data key is wrapped by a key this process does not
+hold, the stored document records `masterKey.provider = "kmip"`, and three
+claims that had only ever been shapes are exercised against something that
+can refuse:
 
-**Most likely to break, in order:**
+- **rotation.** `rewrap_many_data_key` had never run against a real
+  master. A key that cannot be re-wrapped is one that gets copied instead,
+  and a copied key cannot be destroyed.
+- **shredding**, with the wrapping key held elsewhere.
+- **TLS options reaching the driver** — a KMIP appliance without mutual
+  TLS is a key server on the open network, and nothing checked the options
+  survived the trip from custody to the driver.
 
-- **On-demand credentials may need a package that is not declared.**
-  `Aws(access_key_id=None)` returns `{}` to select the credential chain,
-  which is the correct production shape on EKS or an instance profile. It
-  works in this repository's environment — but `boto3` is installed here
-  only by accident, pulled in by the unrelated `drift` extra. If the
-  driver's credential lookup needs it, `pip install voyd[crypto]` plus
-  instance-profile auth fails on a clean machine and the extra is missing a
-  dependency.
-- **Latency and throttling.** Every cold decrypt becomes a KMS round trip.
-  The key-cache window stops being trivia and becomes load-bearing, and
-  KMS request-rate limits are reachable by a single page of cold
-  documents.
-- **`rewrap_many_data_key` against a real CMK.** Untested, and it is the
-  operation that makes destruction credible over time.
-- **The error taxonomy gets exercised for real.** Throttling, expired STS
-  tokens, an IAM change — see issue 2, which is now fixed but has only
-  ever been tested against a simulated failure.
+**What is genuinely left**, stated narrowly now that the category claim is
+proven: the three *hosted* providers — `Aws`, `Azure`, `Gcp` — construct
+provider-shaped master keys that are unit-tested and share every line of
+the code path now exercised against KMIP. What is unproven is
+vendor-specific: credential discovery (`Aws(access_key_id=None)` selects
+the driver's chain and may need a package this project does not declare),
+throttling behaviour under a cold page, and the fact that AWS
+`ScheduleKeyDeletion` has a 7-day minimum pending window, so *master*-key
+destruction there is not the immediate operation that shredding a data key
+is.
 
-**Closing it needs more than one run.** This project's standard is that a
-claim is checked against real infrastructure in CI rather than asserted.
-Holding that for KMS means credentials in CI, which means org secrets,
-which means forks cannot run the suite in full. The honest resolution is
-probably an opt-in job gated on secrets that **skips loudly** — the
-pattern already used for `crypt_shared`. A one-off manual run is worth
-doing first, and is not the same thing.
-
----
+That is a smaller and more honest claim than "nothing has run against a
+KMS", and the difference is the one the framing was hiding.
 
 ## 2. ~~A failed KMS call looked like a shredded key~~ — fixed
 

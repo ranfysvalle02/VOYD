@@ -60,6 +60,17 @@ jobs:
       - name: Sync (Engine + all extras + dev)
         run: uv sync --all-extras
 
+      - name: An external key server is actually reachable
+        # The suite skips the KMIP tests when pykmip is absent, and a skip
+        # that is always a skip is a test nobody has ever run. This is the
+        # one rung of the custody ladder that can be stood up without a
+        # cloud account, so it is the one CI must not let slide.
+        run: |
+          uv run --no-sync python -c "
+          import kmip
+          from kmip.services.server import KmipServer
+          print('pykmip available:', KmipServer.__name__)"
+
       - name: The encryption stack is actually present
         # Asserted rather than assumed, because the failure mode of the step
         # above is a skip, and a skipped correctness test looks exactly like
