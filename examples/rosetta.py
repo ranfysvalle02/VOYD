@@ -163,17 +163,17 @@ async def part_b(db) -> None:
     print("    a document, it is a total across the read, so there is nothing to")
     print("    push into a query. It lives entirely on the egress check.")
 
-    async def fetch(n: int) -> list[dict]:
-        return [d async for d in db.prompts.find({}).sort("_id", 1).limit(n)]
-
-    page = await budgeted.saturate(fetch, limit=5)
-    print("    asked for 5 chunks at 40 tokens each, budget 100:")
+    # A cumulative rule needs a deterministic order, and the handle refuses
+    # the read without one: "the first 100 tokens" is only a fact about an
+    # *ordered* page, so an unordered one would charge the budget against
+    # whichever documents the server happened to return first.
+    page = await budgeted.find({}, sort=[("_id", 1)])
+    print("    four chunks at 40 tokens each, budget 100:")
     print(f"      admitted {len(page)}, spent {page.spent}, "
-          f"refused {dict(page.refused)}, starved {page.starved}")
+          f"refused {dict(page.refused)}")
     assert len(page) == 2, "two 40-token chunks fit in 100"
     assert page.spent == 80
     assert "over_budget" in page.refused
-    assert page.starved is False, "a budget-complete page is complete, not starved"
     print("    -> the page stopped at the token ceiling. No boolean field, no")
     print("       deadline, no caller could express that -- and it is the same")
     print("       Rule protocol, refusing for a fifth kind of reason.")

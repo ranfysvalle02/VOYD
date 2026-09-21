@@ -94,16 +94,16 @@ class ReadPath(_Composed):
         if tab is not None and sort is None:
             raise ValueError(
                 f"{self.collection}: a cumulative rule needs a deterministic "
-                "find order; pass sort=(field, direction), or use search() "
-                "whose relevance ranking already defines the prefix")
+                "find order, because 'the first 100 tokens' is only a fact "
+                "about an ordered read. Pass sort=(field, direction)")
         cur = self.db[self.collection].find(self._query(filters), *args, **kw)
         if sort is not None:
             cur = cur.sort(*sort) if isinstance(sort, tuple) else cur.sort(sort)
-        # A budget applies here too -- special-casing which read enforces a
-        # rule is how two enforcement points drift. A budget-truncated find is
-        # short; the WARNING and the ``over_budget`` count in ``receipts()``
-        # are the visibility, and ``search``/``saturate`` carry ``spent`` in
-        # band for a caller who needs it there.
+        # A budget applies here too -- special-casing which read enforces
+        # a rule is how two enforcement points drift. A budget-truncated
+        # page is short, and short is indistinguishable from "that is all
+        # there was" unless the page says so, which is what ``spent`` and
+        # ``refused`` below are for.
         admitted: list[dict] = []
         async for doc in cur:
             kept = self._admit(doc, when=evaluated_at, tab=tab)
@@ -134,8 +134,14 @@ class ReadPath(_Composed):
         # because this path passes no tally -- so this only rescues the
         # count that has to ride on the page.
         admitted, redacted = self._harvest(admitted)
+        # Carried on the page rather than left in the log. A caller holding
+        # a short page has to be able to tell "the budget stopped it" from
+        # "there were only two", and a WARNING in somebody's aggregator is
+        # not an answer the caller can act on.
         return Page(admitted, evaluated_at=evaluated_at, redacted=redacted,
                     policy_revision=self.spec.policy_revision,
+                    spent=tab.spent if tab is not None else 0,
+                    refused=dict(self.receipts_log.refused),
                     snapshot_complete=True)
 
     def match(self, filters: dict | None = None) -> dict:

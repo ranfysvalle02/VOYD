@@ -220,26 +220,6 @@ class Page(list):
                   second one changes what a caller is holding without changing
                   the length of the page, which is exactly the kind of quiet
                   edit that has to be counted out loud.
-    ``starved``   the page is short and the search **gave up before running
-                  out of candidates**. That is the only state in which the
-                  caller was told less than the truth. A page cut short by a
-                  spent budget is *not* starved: it is complete, because
-                  nothing further down the ranking had room anyway.
-
-    ``starved`` is the field worth wiring to an alert, and its definition is
-    narrower than it first looks. It is not "short", and it is not "short and
-    something was refused" -- that was the first definition here and it was
-    wrong, and the deployment check shipped alongside it caught the mistake
-    within the hour: it flagged a page that asked for 50, got 1, and was *complete*: one live document existed, the rest were
-    expired, and nothing further down the ranking was being withheld. A short
-    answer over an exhausted candidate list is the whole truth, however many
-    refusals it took to establish. Flagging it would have trained whoever
-    reads the field to ignore it, which costs more than not having it.
-
-    So ``starved`` means: ``rounds`` ran out, or the search tier's own
-    ceiling did, while candidates remained. There is more, and this page
-    could not reach it -- the one thing a bare list cannot say.
-
     Three more fields exist for one reason: a use recorded against this page
     (see ``record_use``) has to commit to *when* the policy was evaluated and
     *which* policy it was, and it must refuse to persist a page that cannot
@@ -259,11 +239,11 @@ class Page(list):
                            rather than a hope.
     """
 
-    __slots__ = ("refused", "examined", "starved", "spent", "redacted",
+    __slots__ = ("refused", "examined", "spent", "redacted",
                  "evaluated_at", "policy_revision", "snapshot_complete")
 
     def __init__(self, hits: Iterable[dict] = (), *, refused: dict | None = None,
-                 examined: int = 0, starved: bool = False, spent: int = 0,
+                 examined: int = 0, spent: int = 0,
                  redacted: int = 0,
                  evaluated_at: datetime | None = None,
                  policy_revision: str | None = None,
@@ -271,7 +251,6 @@ class Page(list):
         super().__init__(hits)
         self.refused: dict[str, int] = dict(refused or {})
         self.examined = examined
-        self.starved = starved
         self.spent = spent
         self.redacted = redacted
         self.evaluated_at = evaluated_at
@@ -297,5 +276,4 @@ class Page(list):
             "examined": self.examined,
             "spent": self.spent,
             "redacted": self.redacted,
-            "starved": self.starved,
         }
