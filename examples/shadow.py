@@ -52,6 +52,7 @@ application behaviour changes in this file.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from datetime import timedelta
 
@@ -61,7 +62,10 @@ from voyd import Engine
 from voyd.engine import Deadline, revoked
 from voyd.engine.time import now
 
-URI = "mongodb://localhost:27018/?directConnection=true"
+# The examples all read the same variable, so one export points every
+# one of them at Atlas instead of the local container.
+URI = os.getenv("VOYD_MONGO_URI",
+                "mongodb://localhost:27018/?directConnection=true")
 
 LEAK = "aws key AKIA-EXAMPLE-LEAKEDKEY-9c1f"
 

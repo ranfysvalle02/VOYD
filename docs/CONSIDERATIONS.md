@@ -267,7 +267,8 @@ Each one exists because the thing it checks went wrong at least once.
 | [`the_admission_layers_do_not_invert`](../tests/test_the_admission_layers_do_not_invert.py) | a module importing its own layer or below, or two mixins importing each other |
 | [`no_module_reaches_past_the_handle`](../tests/test_no_module_reaches_past_the_handle.py) | anything but the read path calling the engine's search primitive |
 | [`nothing_in_the_package_is_orphaned`](../tests/test_nothing_in_the_package_is_orphaned.py) | a definition in `voyd/` with no caller and no allowlist entry giving a reason |
-| [`the_docs_are_not_stale`](../tests/test_the_docs_are_not_stale.py) | a dead link, a renamed anchor, a source path that moved, a stale test count |
+| [`the_docs_are_not_stale`](../tests/test_the_docs_are_not_stale.py) | a dead link, a renamed anchor, a source path that moved, a stale count of tests or of anything in `COUNTED` |
+| [`every_example_still_runs`](../tests/test_every_example_still_runs.py) | an example that stopped running, or a new one nobody listed as exempt |
 | [`engine_standalone`](../tests/test_engine_standalone.py) | app vocabulary appearing in `voyd/engine/`, including in a comment |
 | [`the_documented_first_run_works`](../tests/test_the_documented_first_run_works.py) | the quickstart's commands drifting from what exists |
 | [`the_engine_pins_its_own_settings`](../tests/test_the_engine_pins_its_own_settings.py) | the engine inheriting the caller's environment or codecs |

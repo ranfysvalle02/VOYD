@@ -59,6 +59,19 @@ _available: bool | None = None
 # A sweep that destroys a concurrent tool's data is worse than an orphaned
 # index. bench/measure.py collects its own leftovers instead, where the
 # knowledge that no other benchmark is running actually lives.
+# Only names this suite creates. The examples deliberately do **not** match:
+# they name databases `voyd_example_*` and drop their own in a `finally`.
+#
+# They used to be `core_*`, which matched -- and `_abandoned` drops a matching
+# name whose first segment is not a timestamp, on the grounds that it predates
+# the current scheme. An example's name never has one, so every running demo
+# was classified abandoned the instant a suite started beside it and had its
+# database deleted underneath it. Not a race with a window: a certainty, for
+# six of the fourteen examples, every time.
+#
+# The footgun note below already contemplated "a demo run during the suite".
+# This was the other half of that, and the worse half, because the TTL
+# collision is loud and this one looks like a demo that simply broke.
 _TEST_DB_PREFIXES = ("voyd_test_", "core_")
 
 # How long a test database may live before the sweep is willing to call it
@@ -122,7 +135,12 @@ def _abandoned(name: str, *, now_: float) -> bool:
 #    prefixes above, so two concurrent runs deleted each other's data
 #    mid-test. It now reads the timestamp in the name and leaves young
 #    databases alone; see ``throwaway_db_name``.
-# 2. **Contained, not fixed.** ``test_the_deadline_is_enforced_twice.py``
+# 2. **Fixed.** The sweep also dropped every *example* database on sight --
+#    they matched ``core_`` and carry no timestamp -- so starting a suite
+#    beside a running demo deleted the demo's data. Examples now own
+#    ``voyd_example_`` and the sweep does not touch it; see the prefix note
+#    above.
+# 3. **Contained, not fixed.** ``test_the_deadline_is_enforced_twice.py``
 #    turns ``ttlMonitorSleepSecs`` down to 1 for about thirty seconds, and so
 #    do examples/forget.py and examples/why_this_belongs_in_the_database.py.
 #    It is a server-global and there is no per-database equivalent, so a

@@ -36,6 +36,7 @@ query half by nature. Not a stronger flag; a different kind of predicate.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from datetime import timedelta
 
@@ -43,7 +44,10 @@ from pymongo import AsyncMongoClient
 
 from voyd.engine import Budget, Deadline, Engine, Restricted, now
 
-URI = "mongodb://localhost:27018/?directConnection=true"
+# The examples all read the same variable, so one export points every
+# one of them at Atlas instead of the local container.
+URI = os.getenv("VOYD_MONGO_URI",
+                "mongodb://localhost:27018/?directConnection=true")
 
 
 # ---- two mechanisms, written as a stranger would, against the protocol ----
@@ -180,7 +184,7 @@ async def part_b(engine) -> None:
 async def main() -> None:
     print(__doc__.split("\n\n")[0])
     client = AsyncMongoClient(URI)
-    name = f"core_rosetta_{uuid.uuid4().hex[:8]}"
+    name = f"voyd_example_rosetta_{uuid.uuid4().hex[:8]}"
     engine = Engine(client, client[name])
     await engine.connect()
     try:

@@ -27,6 +27,7 @@ that order, because the reverse order is the bug.
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import uuid
 
@@ -34,7 +35,10 @@ from pymongo import AsyncMongoClient
 
 from voyd.engine import Engine
 
-URI = "mongodb://localhost:27018/?directConnection=true"
+# The examples all read the same variable, so one export points every
+# one of them at Atlas instead of the local container.
+URI = os.getenv("VOYD_MONGO_URI",
+                "mongodb://localhost:27018/?directConnection=true")
 DIMS = 8
 
 SECRET = "the admin password is hunter2"
@@ -48,7 +52,7 @@ def vec(seed: int) -> list[float]:
 
 async def main() -> None:
     client = AsyncMongoClient(URI)
-    name = f"core_refuse_{uuid.uuid4().hex[:8]}"
+    name = f"voyd_example_refuse_{uuid.uuid4().hex[:8]}"
     engine = Engine(client, client[name])
     await engine.connect()
 

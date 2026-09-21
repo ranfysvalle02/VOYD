@@ -27,8 +27,10 @@ from pymongo import AsyncMongoClient
 
 from voyd.engine import Clearance, Deadline, Engine, revoked
 
-URI = os.environ.get("VOYD_TEST_MONGO_URI",
-                     "mongodb://localhost:27018/?directConnection=true")
+# The examples all read the same variable, so one export points every
+# one of them at Atlas instead of the local container.
+URI = os.getenv("VOYD_MONGO_URI",
+                "mongodb://localhost:27018/?directConnection=true")
 DIMS = 8
 LEVELS = ("public", "internal", "secret")
 
@@ -51,7 +53,7 @@ def head(text: str) -> None:
 
 async def main() -> None:
     client = AsyncMongoClient(URI)
-    db_name = f"core_clearance_{uuid.uuid4().hex[:8]}"
+    db_name = f"voyd_example_clearance_{uuid.uuid4().hex[:8]}"
     engine = Engine(client, client[db_name])
 
     notes = engine.model("notes", tenant="team")

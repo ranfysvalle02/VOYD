@@ -33,6 +33,7 @@ That is the argument for having both rather than choosing:
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 
 from pymongo import AsyncMongoClient
@@ -41,7 +42,10 @@ from voyd.engine import Engine
 from voyd.engine.custody import from_env
 from voyd.engine.keyring import available
 
-URI = "mongodb://localhost:27018/?directConnection=true"
+# The examples all read the same variable, so one export points every
+# one of them at Atlas instead of the local container.
+URI = os.getenv("VOYD_MONGO_URI",
+                "mongodb://localhost:27018/?directConnection=true")
 SECRET = "alice was treated for a stress fracture in March"
 KEPT = "the fault code is P0301"
 PATIENCE = 120
@@ -56,7 +60,7 @@ async def main() -> None:
         return
 
     client = AsyncMongoClient(URI)
-    name = f"core_shred_{uuid.uuid4().hex[:8]}"
+    name = f"voyd_example_shred_{uuid.uuid4().hex[:8]}"
     engine = Engine(client, client[name])
     await engine.connect()
 

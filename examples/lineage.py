@@ -25,13 +25,17 @@ query reaches the whole subtree at any depth.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 
 from pymongo import AsyncMongoClient
 
 from voyd.engine import Deadline, DerivationBroken, Engine, revoked
 
-URI = "mongodb://localhost:27018/?directConnection=true"
+# The examples all read the same variable, so one export points every
+# one of them at Atlas instead of the local container.
+URI = os.getenv("VOYD_MONGO_URI",
+                "mongodb://localhost:27018/?directConnection=true")
 
 DIAGNOSIS = "alice was treated for a stress fracture in March"
 SUMMARY = "patient summary: one orthopaedic episode, resolved"
@@ -41,7 +45,7 @@ UNRELATED = "the fault code is P0301"
 
 async def main() -> None:
     client = AsyncMongoClient(URI)
-    name = f"core_lineage_{uuid.uuid4().hex[:8]}"
+    name = f"voyd_example_lineage_{uuid.uuid4().hex[:8]}"
     engine = Engine(client, client[name])
     await engine.connect()
 
