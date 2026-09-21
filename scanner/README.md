@@ -146,10 +146,52 @@ about a directory that does not exist. Both are the failure this scanner
 exists to find, committed by the scanner. The real count is always printed,
 never inferred from the status.
 
+## If your data access is wrapped — read this one
+
+Most teams do not call the driver directly. They have a repository class, a
+`Store`, a `fetch_all`. **To those teams this tool is blind**, and a blind
+tool that prints "nothing to check" is committing the exact defect it exists
+to find.
+
+So it does not print that. When it recognises no read at all, it says so, and
+says it is a fact about the scanner rather than about your code:
+
+```
+scanned 340 file(s) and recognised no database read at all.
+
+That is a fact about this scanner, not about your code. [...]
+Until it finds a read, treat this as unmeasured rather than clean.
+```
+
+The remedy is one flag, and the inference works identically through a wrapper
+because it never cared what the method was called — only what the filters
+agree on:
+
+```bash
+python scanner/voyd_scan --read-verb fetch_all --write-verb save src/
+```
+
+## Reviewing the claims
+
+`--claims` lists every `# voyd:` assertion in the tree with its reason. This
+is the static half of what `including_refused()` does at runtime: the point of
+break-glass was never to forbid the unsafe thing, it was to make sure somebody
+can *see* it happened. Without this list, anyone can write
+`# voyd: audit -- needed for the report` and the finding leaves the count for
+good — reviewed once by whoever approved that diff, and never again.
+
+```bash
+python scanner/voyd_scan --claims src/
+```
+
+Read it the way you would read the break-glass column of an audit log, because
+that is what it is. `git blame` supplies the author and the date.
+
 ## Other flags
 
 ```bash
 python scanner/voyd_scan --json app/ services/ > leak_scan.json
+python scanner/voyd_scan --all src/                      # every finding, not the first few
 python scanner/voyd_scan --allow app/admin/ src/         # exempt an audit module
 python scanner/voyd_scan --convention-threshold 0.8 src/ # stricter inference
 ```
@@ -157,6 +199,16 @@ python scanner/voyd_scan --convention-threshold 0.8 src/ # stricter inference
 The JSON carries the evidence for every mark — which field, by what route, on
 what support — so an inferred finding can be argued with on its evidence
 rather than accepted on faith.
+
+**On a large repository the report groups rather than enumerates.** This was a
+real defect, not a nicety: on a 2,000-file tree it printed 1,682 findings
+whose message bodies were, every one of them, the same sentence. The inference
+genuinely does get stronger with scale and the printout got proportionally
+less usable — true of the analysis, false of the thing a person reads. Now the
+shared reason and the shared path prefix are stated once, findings are grouped
+by directory worst-first so a thousand leaks read as the one module they
+usually are, and the same scan prints 32 lines instead of 1,690. `--all` still
+lists everything.
 
 ## Why it is a separate package
 

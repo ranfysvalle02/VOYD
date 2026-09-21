@@ -3,6 +3,8 @@
     python scanner/voyd_scan path/to/your/repo
     python scanner/voyd_scan --json app/ services/ > leak_scan.json
     python scanner/voyd_scan --strict app/          # unjudged reads fail too
+    python scanner/voyd_scan --claims app/          # every break-glass, reviewable
+    python scanner/voyd_scan --read-verb fetch_all app/   # your wrapper's verbs
 
 This is a separate, dependency-free package on purpose. It ships apart from
 ``voyd`` because the first thing a stranger runs must cost them nothing: no
@@ -64,7 +66,11 @@ cannot be.
 
 - It reads source with ``ast``. Dynamically named collections
   (``db[name]`` where ``name`` is a variable), ORM layers, query builders and
-  raw-driver wrappers are invisible. False negatives are expected.
+  raw-driver wrappers are invisible. False negatives are expected. When it
+  recognises *no* read at all -- the usual outcome for a team with a
+  repository class -- it says so and names ``--read-verb`` rather than
+  printing a reassuring nothing, because "I found no problem" and "I could
+  not see anything" are the same output and different facts.
 - It inspects *filter keys only*, and only in literal ``dict``/``list``
   arguments. A filter built by a helper is reported as indeterminate, not as
   a leak -- it will not manufacture a number it cannot stand behind.
@@ -91,14 +97,17 @@ import sys
 import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 
 # Reads that can hand a document to a caller. Writes are elsewhere: a write
 # does not return a forgotten fact to a prompt.
-READ_VERBS = {"find", "find_one", "aggregate", "distinct", "count_documents"}
+READ_VERBS = frozenset({"find", "find_one", "aggregate", "distinct",
+                        "count_documents"})
 # Writes and index declarations, used only to learn which collections carry a
 # mark field -- never reported as leaks themselves.
-WRITE_VERBS = {"insert_one", "insert_many", "update_one", "update_many",
-               "replace_one", "bulk_write", "create_index", "create_indexes"}
+WRITE_VERBS = frozenset({"insert_one", "insert_many", "update_one",
+                         "update_many", "replace_one", "bulk_write",
+                         "create_index", "create_indexes"})
 
 # Field names that mean "this row can stop being valid": VOYD's own deadline
 # and revocation fields, plus the soft-delete conventions other teams use.
@@ -477,7 +486,8 @@ class Report:
         }
 
 
-def _gather(sources: dict[str, str]) -> tuple[list[Read], dict[str, set[str]]]:
+def _gather(sources: dict[str, str], read_verbs: frozenset[str],
+            write_verbs: frozenset[str]) -> tuple[list[Read], dict[str, set[str]]]:
     """Pass one: every read, and every mark a write or index *declares*.
 
     Nothing is classified here. Which fields a collection requires is a
@@ -504,12 +514,12 @@ def _gather(sources: dict[str, str]) -> tuple[list[Read], dict[str, set[str]]]:
             if collection is None:
                 continue
 
-            if fn.attr in WRITE_VERBS:
+            if fn.attr in write_verbs:
                 found = _declared_marks(node)
                 if found:
                     declared.setdefault(collection, set()).update(found)
                 continue
-            if fn.attr not in READ_VERBS:
+            if fn.attr not in read_verbs:
                 continue
 
             end = node.end_lineno or node.lineno
@@ -672,15 +682,26 @@ def _apply_claim(r: Read) -> None:
 
 def analyze(sources: dict[str, str], *,
             threshold: float = CONVENTION_THRESHOLD,
-            support_floor: int = CONVENTION_SUPPORT) -> Report:
+            support_floor: int = CONVENTION_SUPPORT,
+            read_verbs: Iterable[str] = (),
+            write_verbs: Iterable[str] = ()) -> Report:
     """Classify every read in ``sources`` (path -> code). Pure; no I/O.
 
     Three passes, because none of the three questions can be answered from
     one file: what marks exist (any file may declare one), what the
     convention is (it is a property of all the reads at once), and whether a
     given read honours it.
+
+    ``read_verbs``/``write_verbs`` *extend* the built-in sets rather than
+    replacing them. Most teams do not call the driver directly -- they have a
+    repository class, a `Store`, a `fetch_all`. To such a repository this tool
+    is blind, and a blind tool that prints "nothing to check" is the exact
+    failure it exists to find. Naming the wrapper's verbs is the cheap fix,
+    and ``main`` now says so out loud when it sees no reads at all.
     """
-    reads, declared = _gather(sources)
+    reads, declared = _gather(sources,
+                              READ_VERBS | frozenset(read_verbs),
+                              WRITE_VERBS | frozenset(write_verbs))
     marks = _infer(reads, declared, threshold=threshold,
                    support_floor=support_floor)
     _classify(reads, marks)
@@ -725,39 +746,159 @@ def collect_sources(paths: list[Path], allow: list[Path]) -> dict[str, str]:
     return out
 
 
-def _print_report(report: Report, strict: bool) -> None:
+# How many individual findings to print per collection before the list stops
+# being information and becomes wallpaper. Measured rather than guessed: on a
+# 2,000-file repository this tool printed 1,682 findings whose message bodies
+# were, all of them, the same single sentence. The inference genuinely does
+# get stronger with scale -- 22,318 of 24,000 reads established that
+# convention -- and the *report* got proportionally less useful, which made
+# the headline claim about economics true of the analysis and false of the
+# thing a human reads.
+SHOWN_PER_COLLECTION = 10
+
+
+def _common_prefix(rows: list[Read]) -> str:
+    """The directory every finding shares, so it can be said once.
+
+    A finding is read left to right and the useful part is on the right. When
+    every path starts with the same forty characters, those forty characters
+    are pushing the file and line off the edge of a terminal for no
+    information at all.
+    """
+    if len(rows) < 2:
+        return ""
+    parts = [Path(r.file).parts[:-1] for r in rows]
+    common: list[str] = []
+    for chunk in zip(*parts):
+        if len(set(chunk)) != 1:
+            break
+        common.append(chunk[0])
+    return str(Path(*common)) + "/" if common else ""
+
+
+def _by_directory(rows: list[Read], prefix: str) -> list[tuple[str, int, int]]:
+    """Findings grouped by the directory they live in, worst first.
+
+    A thousand leaks are not a thousand problems. They are usually one module
+    nobody routed through the helper, and the directory histogram is what
+    makes that visible in the first screenful -- a list of file:line cannot
+    show a shape, however carefully it is sorted.
+    """
+    buckets: dict[str, list[Read]] = {}
+    for r in rows:
+        parent = str(Path(r.file).parent)
+        buckets.setdefault(parent[len(prefix):] or ".", []).append(r)
+    out = [(d, len(rs), len({r.file for r in rs})) for d, rs in buckets.items()]
+    return sorted(out, key=lambda t: (-t[1], t[0]))
+
+
+def _print_findings(heading: str, rows: list[Read], *, show_all: bool) -> None:
+    """One findings section, at whatever size the repository turned out to be.
+
+    Two things are said once rather than per line. The shared path prefix,
+    because it is not information. And the reason, when every finding has the
+    same one -- it is a fact about the collection's convention, not about the
+    individual read, and repeating it 1,682 times is how a report with a true
+    headline becomes one nobody scrolls to the end of.
+    """
+    if not rows:
+        return
+    prefix = _common_prefix(rows)
+    whys = {r.why for r in rows}
+    shared = whys.pop() if len(whys) == 1 else None
+
+    print(f"\n{heading}" + (f" -- {shared}" if shared else "") + ":")
+    if prefix:
+        print(f"  (under {prefix})")
+    print()
+
+    dirs = _by_directory(rows, prefix)
+    if len(rows) > SHOWN_PER_COLLECTION and len(dirs) > 1:
+        print("  where they are:")
+        for directory, n, files in dirs[:8]:
+            print(f"    {n:>6}  in {files} file(s)  {directory}")
+        if len(dirs) > 8:
+            rest = sum(n for _, n, _ in dirs[8:])
+            print(f"    {rest:>6}  in {len(dirs) - 8} more director"
+                  f"{'y' if len(dirs) - 8 == 1 else 'ies'}")
+        print()
+
+    shown = rows if show_all else rows[:SHOWN_PER_COLLECTION]
+    for r in shown:
+        tail = "" if shared else f"  ({r.why})"
+        print(f"  {r.file[len(prefix):]}:{r.line}  {r.collection}{tail}")
+    if len(shown) < len(rows):
+        print(f"\n  ... and {len(rows) - len(shown)} more. "
+              "`--all` lists them; `--json` is the machine-readable form.")
+
+
+def _print_claims(report: Report) -> None:
+    """Every ``# voyd:`` assertion in the tree, as one reviewable list.
+
+    This is the static half of an argument the runtime has always made. A
+    break-glass read through the handle increments ``including_refused_total``
+    and records who and when, because the point was never to forbid the
+    unsafe thing -- it was to make sure somebody can *see* that it happened.
+    A door with an alarm nobody listens to is a door.
+
+    The claims in a source tree had no such list. Anybody could write
+    ``# voyd: audit -- needed for the report`` and the finding left the count
+    for good, reviewed once by whoever approved that diff and never again.
+    So: name them all, with their reasons, in one place a security reviewer
+    can read in a minute and `git blame` can date.
+    """
+    claimed = report.discharged + report.audited + report.stale
+    if not claimed:
+        print("\nNo `# voyd:` claims in this tree.")
+        return
+
+    print(f"\n{len(claimed)} `# voyd:` claim(s) -- every assertion that a "
+          "read is safe,\nor deliberately is not. Review these the way you "
+          "would review the\nbreak-glass column of an audit log, because "
+          "that is what they are:\n")
+    for kind, rows in (("audit ", report.audited),
+                       ("filter", report.discharged),
+                       ("STALE ", report.stale)):
+        for r in rows:
+            reason = r.reason or "(no reason given)"
+            print(f"  {kind}  {r.file}:{r.line}  {r.collection}")
+            print(f"           {reason}")
+    if report.stale:
+        print(f"\n  {len(report.stale)} of them no longer describe the code "
+              "underneath. A claim\n  that outlived its read is a "
+              "suppression, not an assertion.")
+
+
+def _print_report(report: Report, strict: bool, show_all: bool) -> None:
     print(f"scanned {report.files} file(s).")
     print(f"{len(report.marks)} collection(s) carry a mark your code expects "
           "its reads to name:")
     for collection, ms in sorted(report.marks.items()):
         print(f"  {collection}: " + "; ".join(m.evidence() for m in ms))
-    print()
 
     leaks = report.leaks
     if leaks:
-        print(f"{len(leaks)} of {report.considered} read(s) against them do "
-              f"not:\n")
-        for r in leaks:
-            print(f"  {r.file}:{r.line}  {r.collection}  ({r.why})")
+        _print_findings(
+            f"{len(leaks)} of {report.considered} read(s) against them do not",
+            leaks, show_all=show_all)
     else:
-        print(f"0 of {report.considered} read(s) against them are unfiltered.")
+        print(f"\n0 of {report.considered} read(s) against them are unfiltered.")
 
-    for label, rows, note in (
-        ("unjudged read", report.indeterminate,
-         "the filter is built elsewhere and nobody has said what it does"),
-        ("stale claim", report.stale,
-         "a `# voyd:` comment that no longer describes the code under it"),
-    ):
-        if rows:
-            s = "" if len(rows) == 1 else "s"
-            print(f"\n{len(rows)} {label}{s} -- {note}:\n")
-            for r in rows:
-                print(f"  {r.file}:{r.line}  {r.collection}  ({r.why})")
+    if report.indeterminate:
+        _print_findings(
+            f"{len(report.indeterminate)} unjudged read(s) -- the filter is "
+            "built elsewhere and nobody has said what it does",
+            report.indeterminate, show_all=show_all)
+    if report.stale:
+        _print_findings(
+            f"{len(report.stale)} stale claim(s) -- a `# voyd:` comment that "
+            "no longer describes the code under it",
+            report.stale, show_all=show_all)
+
     if report.discharged or report.audited:
         print(f"\n{len(report.discharged)} discharged, {len(report.audited)} "
-              "audited by an explicit claim in the source.")
-        for r in report.audited:
-            print(f"  {r.file}:{r.line}  {r.collection}  -- {r.reason}")
+              "audited by an explicit claim in the source. `--claims` lists "
+              "them.")
 
     if leaks:
         print("\nEach leak is a read that can serve a document the "
@@ -791,6 +932,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="count unjudged reads and stale claims towards the "
                          "exit code, so the obligation has to be discharged in "
                          "the source rather than carried indefinitely")
+    ap.add_argument("--all", action="store_true", dest="show_all",
+                    help="list every finding instead of the first few per "
+                         "section; the summary above them is unchanged")
+    ap.add_argument("--claims", action="store_true",
+                    help="list every `# voyd:` claim in the tree -- what each "
+                         "one asserts and why -- so break-glass is reviewable "
+                         "rather than merely written down once")
+    ap.add_argument("--read-verb", action="append", default=[], metavar="NAME",
+                    help="treat NAME as a read, for a repository class or "
+                         "driver wrapper this does not know about "
+                         "(e.g. --read-verb fetch_all); repeatable")
+    ap.add_argument("--write-verb", action="append", default=[], metavar="NAME",
+                    help="treat NAME as a write or index declaration; "
+                         "repeatable")
     ap.add_argument("--convention-threshold", type=float,
                     default=CONVENTION_THRESHOLD, metavar="R",
                     help=f"share of a collection's reads that must name a field "
@@ -804,7 +959,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"voyd-scan: {exc}", file=sys.stderr)
         return EXIT_ERROR
 
-    report = analyze(sources, threshold=args.convention_threshold)
+    report = analyze(sources, threshold=args.convention_threshold,
+                     read_verbs=args.read_verb, write_verbs=args.write_verb)
     count = report.obligations() if args.strict else len(report.leaks)
 
     if args.json:
@@ -819,15 +975,43 @@ def main(argv: list[str] | None = None) -> int:
               f"contains no .py to read. Nothing was checked.")
         return 0
 
+    if not report.reads:
+        # The third way this tool could report "clean" without establishing
+        # anything, and the last one to be found. A missing path was fixed
+        # with `ScanError`; a wrapping exit code was fixed with a clamp. This
+        # is the case where every path existed, every file parsed, and the
+        # scanner recognised not one single read -- because the team has a
+        # repository class and never touches the driver in the code it wrote.
+        #
+        # "No collection carries a mark" and "I could not see a single read"
+        # are the same output and completely different facts, and only one of
+        # them is about the repository. Saying so is the whole difference
+        # between a floor and a false all-clear.
+        print(f"scanned {report.files} file(s) and recognised no database read "
+              "at all.\n\n"
+              "That is a fact about this scanner, not about your code. It "
+              "looks for reads\nshaped like a MongoDB driver call -- "
+              "`db.notes.find(...)`. If your data access\ngoes through a "
+              "repository class, an ORM, or any wrapper, every read is\n"
+              "invisible here and this result means nothing.\n\n"
+              "  voyd-scan --read-verb <your_read_method> "
+              "--write-verb <your_write_method> ...\n\n"
+              "teaches it your wrapper's verbs. Until it finds a read, treat "
+              "this as\nunmeasured rather than clean.")
+        return 0
+
     if not report.marks:
-        print(f"scanned {report.files} file(s); found no collection whose own "
-              "code treats a field as a mark -- no deadline, no soft-delete "
-              "flag, and no field its reads agree on.\n"
+        print(f"scanned {report.files} file(s) and found "
+              f"{len(report.reads)} read(s), but no collection whose own code "
+              "treats a field as a mark -- no deadline, no soft-delete flag, "
+              "and no field its reads agree on.\n"
               "(This is a source heuristic -- dynamically named collections "
               "and ORM layers are invisible. See the header.)")
         return 0
 
-    _print_report(report, args.strict)
+    _print_report(report, args.strict, args.show_all)
+    if args.claims:
+        _print_claims(report)
     return min(count, EXIT_MAX)
 
 

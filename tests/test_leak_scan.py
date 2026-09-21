@@ -519,3 +519,125 @@ def test_the_json_carries_the_evidence_for_every_inferred_mark():
     assert d["marks"]["orders"] == [
         {"field": "valid_until", "source": "inferred", "support": 3, "reads": 4}]
     assert d["strict_obligations"] == 1
+
+
+# --------------------------------------------------------------------------
+# The report is an interface, and at scale it was the weakest part of this
+# tool. The inference gets stronger as a codebase grows; the printout got
+# proportionally less usable, which made the economics claim true of the
+# analysis and false of the thing a person reads.
+# --------------------------------------------------------------------------
+
+def _big(tmp_path: Path, files: int = 40, per_file: int = 12,
+         leak_every: int = 8) -> Path:
+    root = tmp_path / "repo"
+    for i in range(files):
+        d = root / f"pkg{i % 4}"
+        d.mkdir(parents=True, exist_ok=True)
+        lines = ["def f(db, u):"]
+        for j in range(per_file):
+            ok = (i * per_file + j) % leak_every
+            lines.append(f"    db.orders.find({{'user': u, 'settles_on': {j}}})"
+                         if ok else "    db.orders.find({'user': u})")
+        (d / f"m{i}.py").write_text("\n".join(lines) + "\n")
+    return root
+
+
+def test_the_report_stays_readable_when_the_finding_count_does_not(tmp_path, capsys):
+    """The defect this section exists for, pinned by line count.
+
+    Measured on a 2,000-file tree: 1,682 findings printed 1,682 lines whose
+    message bodies were, every one of them, the same sentence. A report that
+    long is the same as no report -- and it was produced by the tool whose
+    entire argument is that a number nobody can act on is worthless.
+    """
+    root = _big(tmp_path)
+    code = main([str(root)])
+    out = capsys.readouterr().out
+    assert code > 50, "the fixture must actually produce a lot of findings"
+    assert len(out.splitlines()) < 40, (
+        "a report that scales with the finding count is not a report")
+    assert "where they are:" in out, "the shape has to survive the truncation"
+    assert "more. `--all`" in out, "and the way to see the rest must be offered"
+
+
+def test_all_shows_every_finding_for_the_reader_who_wants_them(tmp_path, capsys):
+    root = _big(tmp_path)
+    code = main([str(root), "--all"])
+    out = capsys.readouterr().out
+    assert out.count("  orders") >= code, "--all must withhold nothing"
+
+
+def test_a_reason_every_finding_shares_is_printed_once(tmp_path, capsys):
+    """The evidence for an inferred mark is a fact about the collection, not
+    about each read that forgot it. Repeating it per line is how a true
+    headline ends up in a report nobody scrolls through."""
+    root = _big(tmp_path)
+    main([str(root), "--all"])
+    out = capsys.readouterr().out
+    assert out.count("which") == 1, "the shared reason belongs in the heading"
+
+
+# --------------------------------------------------------------------------
+# The third way this instrument could report "clean" without having
+# established anything. A missing path was fixed with ScanError; a wrapping
+# exit code was fixed with a clamp; this is the one where every path existed,
+# every file parsed, and not one read was recognised.
+# --------------------------------------------------------------------------
+
+WRAPPED = ("class Store:\n"
+           "    def live(self, u):\n"
+           "        return self.orders.fetch_all({'user': u, 'settles_on': 1})\n"
+           "    def live2(self, u):\n"
+           "        return self.orders.fetch_all({'user': u, 'settles_on': 1})\n"
+           "    def oops(self, u):\n"
+           "        return self.orders.fetch_all({'user': u})\n")
+
+
+def test_a_repository_class_makes_this_blind_and_it_has_to_say_so(tmp_path, capsys):
+    """Most teams do not call the driver directly, and to those teams this
+    tool is blind. "No collection carries a mark" and "I did not recognise a
+    single read" print the same reassuring nothing and are completely
+    different facts -- only one of them is about the repository."""
+    (tmp_path / "s.py").write_text(WRAPPED)
+    assert main([str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "recognised no database read at all" in out
+    assert "--read-verb" in out, "a limit worth reporting is worth a remedy"
+    assert "unmeasured rather than clean" in out
+    assert "no collection" not in out.lower(), (
+        "this must not read as a clean bill of health")
+
+
+def test_teaching_it_the_wrapper_s_verb_recovers_the_finding(tmp_path, capsys):
+    """And the remedy has to work, or naming it is worse than silence."""
+    (tmp_path / "s.py").write_text(WRAPPED)
+    assert main([str(tmp_path), "--read-verb", "fetch_all"]) == 1
+    out = capsys.readouterr().out
+    assert "settles_on" in out, "inference runs on a wrapper the same way"
+    assert "s.py:7" in out
+
+
+def test_claims_are_listed_for_review_because_that_is_what_an_alarm_is_for():
+    """The static half of `including_refused()`.
+
+    A break-glass read through the handle is counted and its actor recorded,
+    because the point was never to forbid the unsafe thing -- it was to make
+    sure somebody can see it happened. Claims in a source tree had no such
+    list: anybody could write `# voyd: audit -- needed for the report` and the
+    finding left the count permanently, reviewed once by whoever approved that
+    diff and never again.
+    """
+    report = analyze({"a.py": (
+        "def f(db, q):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    db.notes.find(q)    # voyd: filtered(expire_at) -- the helper applies it\n"
+        "    db.notes.find({})   # voyd: audit -- the retention report, by design\n"
+        "    db.notes.find({})   # voyd: audit\n"
+    )})
+    d = report.as_dict()
+    assert len(d["discharged_reads"]) == 1
+    assert d["audited_reads"][0]["reason"] == "the retention report, by design"
+    # The one with no reason is not an audit at all -- it is the finding.
+    assert len(d["stale_claims"]) == 1
+    assert d["audited_reads"][0]["reason"], "an alarm with no reason is noise"

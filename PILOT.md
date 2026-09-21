@@ -78,6 +78,14 @@ call the mark.
 **Record the number and the date.** You will run this again at gate 3, and the
 delta is part of the report.
 
+**If it reports that it recognised no read at all, stop and fix that first.**
+That is the likeliest outcome for a team with a repository class or an ORM,
+and it means the gate is unmeasured rather than clean. `--read-verb` teaches
+it your wrapper's method names, and the inference works identically through
+one — it never cared what the method was called, only what the filters agree
+on. Gate 1 does not have this blind spot, because it runs against real
+objects rather than source.
+
 **A zero here is informative, not disqualifying.** The scanner reads source
 with `ast`, so ORM layers and dynamically named collections are invisible, and
 it is honest about being a floor. It also cannot see the rules that have no
