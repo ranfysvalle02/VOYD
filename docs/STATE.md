@@ -82,6 +82,40 @@ out what erasure means when a third-party index holds the lossy copy, which is
 not MongoDB-specific and is therefore a [`drift/`](../drift) exhibit rather
 than a patch.
 
+### The tenant scope has no per-document counterpart
+
+**Medium — the constraint most users think they are buying, and the one most
+likely to be assumed structural when it is half structural.**
+
+`model("notes", tenant="tenant_id")` does two things well. The field becomes
+*required*, so an unscoped `find({})` raises rather than returning every
+tenant, and the value must be a scalar id, so `{"$ne": "other"}` — which
+passes a presence check and then matches everything, and which
+`$vectorSearch`'s filter happily accepts — is refused.
+
+What it is not is a `Rule`. It contributes to the collection query and to the
+index filter; nothing asks it about a document on the way out. So a batch
+handed to `reachable()`, which is exactly what a `$vectorSearch` hit is, comes
+back unfiltered by tenant. On the handle's own paths the query always carries
+the scope, so this is not a leak in normal use — but it is precisely the
+asymmetry [`AHA.md`](AHA.md) step 4 forbids, sitting on the constraint where a
+reader is least likely to check.
+
+**The remedy ships today and is one line:**
+`Restricted(field="tenant_id", claim="tenant_id")` beside the scope, with the
+handle bound via `for_caller({"tenant_id": ...})`. Then the constraint exists
+on both halves. Demonstrated in [`examples/tenancy.py`](../examples/tenancy.py)
+and pinned both ways in `tests/test_the_tenant_scope_is_a_query_half_rule.py`.
+
+**What would close it properly.** Either make `tenant=` install that rule
+itself — the obvious fix, and a behaviour change for every existing handle,
+since a caller that never bound a tenant would start being refused — or say in
+the tenancy documentation that the scope is a query-half rule and the egress
+half is opt-in. The second is free and honest; the first is right and belongs
+behind a pilot that asks for it.
+
+---
+
 ### A nested `$vectorSearch` child filter has no per-document counterpart
 
 **The one condition this repository calls fatal, present in one place.**
@@ -336,6 +370,28 @@ months.
 - **Atlas Local accepts `autoEmbed` index definitions it cannot serve.** An
   upstream defect this repository found and filed; kept in
   [`BUG.md`](BUG.md) because a test still depends on the fallback it forced.
+- **`numCandidates` is `max(50, limit * 10)` and does not scale with filter
+  selectivity.** MongoDB's guidance is that a highly selective pre-filter
+  needs a proportionally larger candidate pool, or the query cannot find
+  enough matches to fill `limit` — which would land hardest on exactly the
+  case a tenant filter creates. Measured on Atlas Local before assuming it:
+  600 documents, a filter selecting 5 of them (0.8%), `numCandidates` swept
+  from 50 to 2000. All five hits came back at every level, because the filter
+  is applied during HNSW traversal rather than to a pre-drawn sample.
+
+  So it does not reproduce at laptop scale, and that is the whole of what is
+  known. At millions of documents the guidance may well bite, and this
+  repository has no way to find out without a corpus it does not have. Written
+  down so the next person to read the MongoDB docs and worry can start from
+  the measurement rather than repeat it. The formula is one line in
+  `voyd/engine/search.py`.
+
+  Worth noting what is *not* at risk here: a missing or not-yet-queryable
+  index does not return a silent zero. `_queryable()` checks the named index
+  and the Atlas path refuses until it is live, falling back to in-process
+  cosine with a warning — the failure this project cares about most, already
+  closed.
+
 - **The scanner is a floor, not a census.** ORM layers and dynamically named
   collections are invisible to it, and rules with no query half are invisible
   to *every* static analyser — see [`AHA.md`](AHA.md) step 5.
