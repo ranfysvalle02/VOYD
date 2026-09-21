@@ -237,3 +237,42 @@ def test_an_undeclared_collection_can_still_be_dropped(seeded, boundary):
     finally:
         client.close()
     assert seeded.other.count_documents({}) == 0
+
+
+def test_an_aggregation_cannot_copy_refused_documents_elsewhere(seeded, boundary):
+    """The sharpest hole a read-path boundary can have, because it does not
+    look destructive.
+
+    `$out` and `$merge` write inside the server. The documents never come
+    back to the client, so nothing on the read path is ever handed one to
+    refuse. Measured before this was closed: a connection that had just
+    declined to show `revoked` copied it into another collection anyway.
+
+    A proxy cannot make these safe -- it is never given the document -- so
+    the only honest answer is the one `drop` gets.
+    """
+    client = pymongo.MongoClient(boundary, serverSelectionTimeoutMS=8000)
+    try:
+        for stage in ({"$out": "copied"}, {"$merge": {"into": "copied"}}):
+            with pytest.raises(pymongo.errors.OperationFailure,
+                               match="voyd-wire refuses"):
+                client[seeded.name].notes.aggregate(
+                    [{"$match": {"tenant_id": "acme"}}, stage])
+    finally:
+        client.close()
+
+    assert seeded.copied.count_documents({}) == 0, (
+        "a refused document escaped into an unguarded collection")
+
+
+def test_an_ordinary_aggregation_is_untouched(seeded, boundary):
+    """The refusal must be about writing elsewhere, not about aggregating.
+    A boundary that broke `$group` would be swapped out within a day."""
+    client = pymongo.MongoClient(boundary, serverSelectionTimeoutMS=8000)
+    try:
+        got = list(client[seeded.name].notes.aggregate(
+            [{"$match": {"tenant_id": "acme"}}, {"$sort": {"text": 1}}]))
+    finally:
+        client.close()
+    assert [d["text"] for d in got] == ["doomed", "live"], (
+        "the expired and revoked rows are refused; the rest aggregates")

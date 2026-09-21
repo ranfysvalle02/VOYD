@@ -201,7 +201,7 @@ the hash-chain ledger and the context index are gone, along with ~817 tests
 and ~35,000 words of documentation that described them. What is left is the
 boundary, the policy file, and the wire.
 
-The suite is **101 tests**, and it is the foundation rather than a census —
+The suite is **103 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie:
 
@@ -228,7 +228,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 97 tests, 14 seconds -- the inner loop
+pytest              # 99 tests, 14 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 

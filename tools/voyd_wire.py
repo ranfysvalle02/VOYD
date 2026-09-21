@@ -419,6 +419,38 @@ UNREWRITABLE = {
     "renameCollection": "moves the collection out from under the policy",
 }
 
+# Aggregation stages that write somewhere else. These are the sharpest hole
+# this boundary can have, because they do not *look* destructive: the
+# documents never come back to the client, so nothing on the read path ever
+# sees them. Measured before it was closed --
+#
+#     through the boundary:  ['live']
+#     after $out to another collection:  ['SECRET', 'live']
+#
+# -- a refused document copied itself out of the policy's reach, server-
+# side, through a connection that had just declined to show it. That is
+# exactly the silence this package is named after, arriving through its own
+# front door.
+#
+# A proxy cannot make these safe. The copy happens inside the server and
+# the boundary is never handed a document to refuse, so the only honest
+# answer is the same one `drop` gets: say no, out loud, with a reason.
+EXFILTRATING_STAGES = ("$out", "$merge")
+
+
+def writes_elsewhere(body: dict) -> str | None:
+    """Does this aggregation end by writing somewhere the policy is not?"""
+    pipeline = body.get("pipeline")
+    if not isinstance(pipeline, list):
+        return None
+    for stage in pipeline:
+        if not isinstance(stage, dict):
+            continue
+        for name in EXFILTRATING_STAGES:
+            if name in stage:
+                return name
+    return None
+
 
 def refuse_unrewritable(raw: bytes, req_id: int, resp_to: int,
                         guards: dict[str, Guard]) -> bytes | None:
@@ -433,6 +465,21 @@ def refuse_unrewritable(raw: bytes, req_id: int, resp_to: int,
     if decoded is None:
         return None
     _flags, body = decoded
+
+    guard = guards.get(body.get("aggregate"))
+    stage = writes_elsewhere(body) if guard is not None else None
+    if stage is not None:
+        print(f"  voyd: REFUSED {stage} on {guard.collection}: it copies "
+              f"documents server-side, past the boundary", flush=True)
+        return encode_op_msg(req_id, resp_to, 0, {
+            "ok": 0.0, "code": 8000, "codeName": "AtlasError",
+            "errmsg": (f"voyd-wire refuses {stage} on {guard.collection!r}: "
+                       f"it writes documents to another collection inside "
+                       f"the server, where this boundary never sees them and "
+                       f"the policy does not follow. Read through the "
+                       f"boundary and write the results back instead."),
+        })
+
     for command, why in UNREWRITABLE.items():
         target = body.get(command)
         named = (target if isinstance(target, str)
