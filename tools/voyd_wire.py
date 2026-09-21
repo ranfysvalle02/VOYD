@@ -66,6 +66,7 @@ try:
 except ImportError:  # pragma: no cover - the one dependency, and it is pymongo's
     sys.exit("pip install pymongo   (for the bson library)")
 
+import voyd_metrics
 from voyd.declare import OPTIONS, load
 from voyd.engine import Deadline, revoked
 from voyd.engine.time import now
@@ -699,7 +700,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                guards: dict[str, Guard], verbose: bool,
                rewritten: set[int],
                upstream: Upstream | None = None,
-               advertise: str | None = None) -> None:
+               advertise: str | None = None,
+               meter: "voyd_metrics.Meter | None" = None) -> None:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -728,6 +730,13 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     try:
         while True:
             raw, _len, req_id, resp_to, opcode = await read_message_async(reader)
+            if meter is not None:
+                # One integer add per *message*, not per document. The
+                # per-document path is 2.3us and stays untouched.
+                if to_server:
+                    meter.messages_from_client_total += 1
+                else:
+                    meter.messages_from_upstream_total += 1
             if opcode == OP_COMPRESSED:
                 expanded = uncompress_message(raw)
                 if expanded is None:
@@ -861,9 +870,11 @@ class Upstream:
     advertises straight past the boundary.
     """
 
-    def __init__(self, target: str, *, verbose: bool = True):
+    def __init__(self, target: str, *, verbose: bool = True,
+                 meter: "voyd_metrics.Meter | None" = None):
         self.target = target
         self.verbose = verbose
+        self.meter = meter
         self._addr: tuple[str, int, bool] | None = None
         self._lock = threading.Lock()
         # Resolution is serialised so a burst of clients arriving after an
@@ -887,6 +898,8 @@ class Upstream:
             host, port, _ = self._addr
             self._addr = None
             self.generation += 1
+            if self.meter is not None:
+                self.meter.upstream_reresolve_total += 1
         print(f"voyd-wire: {host}:{port} is no longer writable ({why}); "
               f"re-resolving on the next connection", flush=True)
 
@@ -1047,11 +1060,13 @@ class Live:
 
     def __init__(self) -> None:
         self.count = 0
+        self.total = 0
         self._lock = threading.Lock()
 
     def __enter__(self):
         with self._lock:
             self.count += 1
+            self.total += 1
         return self
 
     def __exit__(self, *_exc) -> None:
@@ -1061,7 +1076,8 @@ class Live:
 
 async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter,
                   upstream: Upstream, guards: dict[str, Guard], verbose: bool,
-                  live: Live, advertise: str | None = None) -> None:
+                  live: Live, advertise: str | None = None,
+                  meter: "voyd_metrics.Meter | None" = None) -> None:
     """One client connection, start to finish, as one coroutine pair.
 
     A MongoDB connection is stateful -- authentication, sessions, cursors
@@ -1091,7 +1107,7 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
         rewritten: set[int] = set()
         common = {"guards": guards, "verbose": verbose,
                   "rewritten": rewritten, "upstream": upstream,
-                  "advertise": advertise}
+                  "advertise": advertise, "meter": meter}
         tasks = [
             asyncio.ensure_future(pump(client_r, up_w, client_w,
                                        to_server=True, **common)),
@@ -1178,7 +1194,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           verbose: bool, *, certfile: str | None = None,
           keyfile: str | None = None, max_connections: int = 200,
           drain_seconds: float = 20.0, advertise: str | None = None,
-          workers: int = 1) -> None:
+          workers: int = 1, metrics_port: int | None = None) -> None:
     """Bind, announce, then run the boundary -- in this process or N of them.
 
     The listening socket is bound *here*, once, before any fork. That is
@@ -1213,27 +1229,68 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           f"mongodb{'+tls' if certfile else ''}://localhost:{listen_port}/"
           "?directConnection=true\n", flush=True)
 
+    # The slab is allocated *before* the fork so every worker inherits the
+    # same pages. There is no way to add one afterwards, which is why this
+    # happens here and not lazily on the first scrape.
+    slab = meters = None
+    if metrics_port is not None:
+        layout = voyd_metrics.Layout(tuple(guards))
+        slab = voyd_metrics.Slab(workers, layout)
+        meters = [voyd_metrics.Meter(layout, slab, i) for i in range(workers)]
+        print(f"voyd-wire: metrics on http://127.0.0.1:{metrics_port}/metrics"
+              f" (loopback only, always)", flush=True)
+
     if workers > 1:
         supervise(sock, workers, target, guards, verbose,
                   ssl_ctx=ssl_ctx, max_connections=max_connections,
-                  drain_seconds=drain_seconds, advertise=advertise)
+                  drain_seconds=drain_seconds, advertise=advertise,
+                  slab=slab, meters=meters, metrics_port=metrics_port)
         return
 
+    if slab is not None and metrics_port is not None:
+        voyd_metrics.serve(metrics_port, slab)
     counts = asyncio.run(_run(sock, ssl_ctx, target, guards, verbose,
                               max_connections=max_connections,
                               drain_seconds=drain_seconds,
-                              advertise=advertise))
+                              advertise=advertise,
+                              meter=meters[0] if meters else None))
     summarise(counts)
 
 
 async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
                target: str, guards: dict[str, Guard], verbose: bool, *,
                max_connections: int, drain_seconds: float,
-               advertise: str | None) -> dict:
+               advertise: str | None,
+               meter: "voyd_metrics.Meter | None" = None) -> dict:
     """One worker: accept, serve, drain, and report what it counted."""
-    upstream = Upstream(target, verbose=verbose)
+    upstream = Upstream(target, verbose=verbose, meter=meter)
     live = Live()
     stopping = asyncio.Event()
+
+    async def flushing() -> None:
+        """Copy this worker's counters into shared memory, once a second.
+
+        On the timer rather than on the message path: refusal costs about
+        2.3us per document and a shared-memory write per document would be
+        a measurable tax on the number being reported. One second is finer
+        than any scrape interval anybody configures, and the exposition
+        publishes its own staleness so the tradeoff is visible rather than
+        assumed.
+        """
+        while not stopping.is_set():
+            meter.connections_open = live.count
+            meter.connections_total = live.total
+            meter.flush(guards)
+            try:
+                await asyncio.wait_for(stopping.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+        meter.connections_open = live.count
+        meter.connections_total = live.total
+        meter.flush(guards)          # a last one, so a drain is visible
+
+    flusher = (asyncio.ensure_future(flushing()) if meter is not None
+               else None)
 
     async def handle(reader: asyncio.StreamReader,
                      writer: asyncio.StreamWriter) -> None:
@@ -1245,10 +1302,12 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
             # backlog is how a proxy turns a busy minute into an outage.
             print("voyd-wire: at the connection limit; refused one",
                   flush=True)
+            if meter is not None:
+                meter.connections_refused_total += 1
             await close(writer)
             return
         await session(reader, writer, upstream, guards, verbose, live,
-                      advertise)
+                      advertise, meter)
 
     # A failed TLS handshake, a port scan, a plain-TCP probe against a TLS
     # listener: one client's problem, never the listener's. An earlier
@@ -1310,13 +1369,18 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
     if live.count:
         print(f"voyd-wire: {live.count} connection(s) still open after "
               f"{drain_seconds}s; closing anyway", flush=True)
+    if flusher is not None:
+        await asyncio.gather(flusher, return_exceptions=True)
     return tally(guards)
 
 
 def supervise(sock: socket.socket, workers: int, target: str,
               guards: dict[str, Guard], verbose: bool, *,
               ssl_ctx: "ssl.SSLContext | None", max_connections: int,
-              drain_seconds: float, advertise: str | None) -> None:
+              drain_seconds: float, advertise: str | None,
+              slab: "voyd_metrics.Slab | None" = None,
+              meters: "list[voyd_metrics.Meter] | None" = None,
+              metrics_port: int | None = None) -> None:
     """N worker processes over one listening socket, and one honest total.
 
     Why processes at all, when the loop already removed the thread stacks:
@@ -1336,7 +1400,7 @@ def supervise(sock: socket.socket, workers: int, target: str,
     summaries would be worse than none.
     """
     children: list[tuple[int, int]] = []          # (pid, read fd)
-    for _ in range(workers):
+    for index in range(workers):
         read_fd, write_fd = os.pipe()
         pid = os.fork()
         if pid == 0:
@@ -1362,7 +1426,8 @@ def supervise(sock: socket.socket, workers: int, target: str,
                 counts = asyncio.run(_run(
                     sock, ssl_ctx, target, guards, verbose,
                     max_connections=max_connections,
-                    drain_seconds=drain_seconds, advertise=advertise))
+                    drain_seconds=drain_seconds, advertise=advertise,
+                    meter=meters[index] if meters else None))
             except BaseException:
                 traceback.print_exc()
                 counts, code = tally(guards), 1
@@ -1381,6 +1446,13 @@ def supervise(sock: socket.socket, workers: int, target: str,
     # either -- an accept queue with a listener that never accepts is a
     # client hanging for no reason.
     sock.close()
+
+    # Metrics are served from the parent, which is the only process that
+    # can see every worker's slot. It is also the process with no event
+    # loop and nothing else to do, so a slow scrape costs nothing that was
+    # going to refuse a document.
+    if slab is not None and metrics_port is not None:
+        voyd_metrics.serve(metrics_port, slab)
 
     def forward(signum, _frame):
         for pid, _fd in children:
@@ -1461,6 +1533,11 @@ def main(argv: list[str] | None = None) -> int:
                          "cannot spread BSON decoding across cores, so "
                          "this is the knob that does. Counters are summed "
                          "across workers and reported once on shutdown")
+    ap.add_argument("--metrics", type=int, metavar="PORT", default=None,
+                    help="serve Prometheus metrics on this port. Always "
+                         "loopback, with no flag to change it: a refusal "
+                         "count broken down by reason describes what a "
+                         "corpus holds and who has been probing it")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -1503,7 +1580,7 @@ def main(argv: list[str] | None = None) -> int:
         serve(args.listen, args.target, guards, not args.quiet,
               certfile=args.tls_cert, keyfile=args.tls_key,
               max_connections=args.max_connections, advertise=advertise,
-              workers=args.workers)
+              workers=args.workers, metrics_port=args.metrics)
     except KeyboardInterrupt:
         summarise(guards)
     return 0

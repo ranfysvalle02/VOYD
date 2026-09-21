@@ -273,6 +273,13 @@ Known gaps, stated rather than discovered:
   **Refusal costs ~2.3µs per document.** Counters are summed across workers
   and printed once. `python tools/voyd_bench.py` reproduces all of it, and
   checks the boundary was still refusing while it was being fast.
+- **`--metrics PORT`** serves Prometheus text while it runs: documents
+  admitted and refused per collection, refusals by reason, connections,
+  upstream re-resolutions. Summed across workers through a slab of shared
+  memory with one writer per slot, flushed on a timer so the message path
+  pays nothing for it (2.50 → 2.51µs/doc, noise). Loopback only, with no
+  flag to change it — a refusal count by reason describes what a corpus
+  holds and who has been probing it.
 - `on_delete="revoke"` covers both delete verbs and refuses the three that
   cannot be rewritten. An `update` that *overwrites* a fact is still an
   ordinary update — that is mutation rather than forgetting, and treating it

@@ -339,7 +339,9 @@ def run(args) -> int:
                 [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
                  "--listen", str(listen), "--target", f"127.0.0.1:{up_port}",
                  "--max-connections", str(max(args.clients * 4, 64)),
-                 "--workers", str(workers), "--quiet"],
+                 "--workers", str(workers), "--quiet"]
+                + (["--metrics", str(_free_port())] if args.with_metrics
+                   else []),
                 cwd=ROOT, start_new_session=True,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             try:
@@ -461,6 +463,10 @@ def main(argv: list[str] | None = None) -> int:
                          "the re-encode, which is half the work")
     ap.add_argument("--pad", type=int, default=200)
     ap.add_argument("--upstream-procs", type=int, default=4)
+    ap.add_argument("--with-metrics", action="store_true",
+                    help="run with --metrics on, to show that flushing "
+                         "counters on a timer costs the message path "
+                         "nothing measurable")
     ap.add_argument("--policy", help="keep the generated voydfile here")
     args = ap.parse_args(argv)
 

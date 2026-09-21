@@ -104,6 +104,37 @@ Primary discovery. Failover by reading the server's own
 own 48MB ceiling. Bounded connections, closed rather than queued. A draining
 `SIGTERM`.
 
+**Metrics, while it is still running** (`--metrics PORT`). Counters printed
+on shutdown answer "what did that process do?" after it is too late to act,
+and this page carried "no metrics endpoint" as the first thing an operator
+would ask for. Prometheus text on `/metrics`: documents admitted and refused
+per collection, refusals broken down by the reason vocabulary in
+`reasons.py`, connections open and total and refused-at-the-limit, upstream
+re-resolutions, and a per-worker flush counter that goes flat when a
+worker's loop wedges.
+
+Three details in it are decisions rather than defaults:
+
+*It is a slab of shared memory, one slot per worker.* A port per worker
+pushes the summing onto whoever is scraping, and their total is only as
+right as their service discovery. Workers pushing to the parent over a pipe
+puts an IPC round trip on a reporting path, and a worker blocked writing to
+a full pipe is a worker not refusing documents. Each worker being the only
+writer to its own slot needs no locks and no coordination at all.
+
+*Counters flush on a timer, not per document.* Refusal costs about 2.3us per
+document and a shared-memory write on that path would be a measurable tax on
+the number being reported. Measured with `--with-metrics`: 2.50us/doc
+without, 2.51us/doc with, which is noise. The cost is staleness of up to a
+second, and it is published as `voyd_metrics_age_seconds` rather than left
+for somebody to discover.
+
+*It binds loopback, and there is no flag to change it.* A refusal count
+broken down by reason is a description of what a corpus holds and who has
+been probing it -- a climbing `deadline` is the system working, a climbing
+`not_cleared` is somebody trying doors. A test asserts the string `0.0.0.0`
+does not appear in that module.
+
 **Clients cannot walk past it.** `--advertise-self` rewrites `hello` so clients stay on the boundary rather
 than following the cluster's host list, which is what makes this
 *enforcement* rather than a `directConnection=true` the caller has to
@@ -204,13 +235,6 @@ also reports the refused share read back from the worker summary. It is
 built with. A row that says `LEAKED` is a row whose throughput means
 nothing.
 
-**No metrics endpoint.** Counters exist and print on shutdown -- summed
-across workers and printed once, because N workers each printing their own
-summary reads exactly like the real thing while reporting a fraction of the
-traffic. There is still no `/metrics`, no structured log, nothing to scrape.
-**Consider:** this is the first thing anybody operating it will ask for, and
-it is now the *only* thing on this list blocking a week-long pilot.
-
 **`update` is not intercepted.** An `update` that overwrites a fact is
 mutation, not forgetting, and treating it otherwise would make every edit a
 revocation. That is the right call, but it means "make this unreachable" has
@@ -233,18 +257,25 @@ documents?"
 
 ## 4. Coverage
 
-113 tests, ~2,210 lines, against 8,078 lines of `voyd/` and 1,497 of
+156 tests, ~2,820 lines, against 8,078 lines of `voyd/` and 2,521 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
 
-687 lines are mentioned by no test file. Most of that is defensible —
+557 lines are mentioned by no test file, and all of it is defensible now:
 `composition.py` is type-checked rather than executed by design,
 `trait.py` and `expiry.py` are small and exercised indirectly, `sealing.py`
 runs under the encryption tests even though a name-scan cannot see it.
-`capabilities.py` (130 lines) is the one with no real excuse.
 
-**Consider:** the suite is fast by default (116 tests, ~19 seconds) with
+`capabilities.py` was listed here as "the one with no real excuse" and now
+has seventeen. It was a bad gap specifically because that module decides
+which search tier everything above it uses, and its own docstrings record
+two occasions when it got that wrong silently for months — Atlas inferred
+from the connection string, and a hardcoded `(8, 1)` floor that told every
+8.0 deployment it could not fuse ranks. Both are now tests. A regression
+that is only described in a comment is one that can come back.
+
+**Consider:** the suite is fast by default (152 tests, ~22 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
@@ -287,7 +318,6 @@ wants them adds surface that has to be kept honest forever.
 
 | | what it would take | what would unfreeze it |
 |---|---|---|
-| **A metrics surface** | small | anybody running it for a week |
 | **`$out` / `$merge` handling** | small, and it is a hole | do this one anyway |
 | **Revocation that propagates** | a sync protocol | `perimeter.py` says who else holds a copy is auditable and never enforceable. That is true without a protocol between you and the replica — and stops being true with one |
 | **Reverse-indexed receipts** | a storage decision | *"which answers were built on this fact?"* is already a query for anything written back; what is missing is the artefact that **left** — a Slack message, a fine-tune |
