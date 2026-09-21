@@ -64,6 +64,47 @@ def test_no_series_survives_its_reason_being_renamed():
         assert isinstance(reason, str) and reason
 
 
+def test_every_global_counter_exists_on_a_fresh_meter():
+    """`flush` does `getattr` for every name in GLOBAL.
+
+    A name added to GLOBAL and not initialised raised inside the flusher
+    task, which killed a worker's reporting and presented as the proxy
+    dropping connections -- a reporting bug wearing the costume of a
+    network one. `Meter` now derives its counters from GLOBAL instead of
+    hand-listing them, and this is the assertion that it still does.
+    """
+    layout = m.Layout(("notes",))
+    meter = m.Meter(layout, m.Slab(1, layout), 0)
+    for field in m.GLOBAL:
+        assert getattr(meter, field) == 0
+    meter.flush({})                      # must not raise
+
+
+def test_every_global_counter_has_help_text():
+    """A series with no HELP is a number a stranger has to guess at."""
+    missing = [f for f in m.GLOBAL if f not in m.HELP]
+    assert not missing, (
+        f"{sorted(missing)} are exposed with no HELP; a counter nobody can "
+        f"interpret is only marginally better than one nobody has")
+
+
+def test_a_counter_that_is_not_a_series_is_refused():
+    """A typo must not become a number that climbs where nothing reads it.
+
+    `meter.sealed_write_total += 1` would otherwise spring the attribute
+    into existence, count correctly, never be flushed, and leave the
+    dashboard flat -- confidently wrong and quiet about it, which is the
+    failure this repository is named after, committed by the part of it
+    whose job is to report.
+    """
+    layout = m.Layout(("notes",))
+    meter = m.Meter(layout, m.Slab(1, layout), 0)
+    with pytest.raises(AttributeError, match="has no counter"):
+        meter.sealed_write_total = 1     # the plausible typo
+    meter.sealed_writes_total += 1       # the real one still works
+    assert meter.sealed_writes_total == 1
+
+
 # --------------------------------------------------------------------------
 # The slab: one writer per slot, summed by the reader.
 # --------------------------------------------------------------------------

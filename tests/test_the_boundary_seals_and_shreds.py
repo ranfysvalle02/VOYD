@@ -258,25 +258,48 @@ def test_the_key_is_actually_gone(sealed_wire):
     assert vault.count_documents({"keyAltNames": "bob"}) == 1
 
 
-def test_one_erased_tenant_does_not_fail_the_page(sealed_wire):
-    """Fewer rows, never an error. A crypto-erased document is normal.
+def test_an_erased_document_does_not_fail_the_page_it_is_on(sealed_wire):
+    """Fewer rows, never an error -- asserted on a genuinely mixed batch.
 
-    Automatic decryption raises for the whole batch when one key is gone,
-    so a page of fifty containing one erased row would be a 500. That is
-    the "fewer rows, or an error" shape this codebase refuses everywhere
-    else, and the reason `unseal` is per document.
+    Automatic decryption raises for the whole *batch* when one key is
+    gone, so a page of fifty containing one erased row would be a 500.
+    That is the "fewer rows, or an error" shape this codebase refuses
+    everywhere else, and it is the entire reason `unseal` is per document.
 
-    Read with no tenant filter so both scopes land in one batch, and the
-    boundary has to return one of them rather than raise.
+    Getting a mixed batch takes some care, and an earlier version of this
+    test did not: within one scope the key is shared, so a shred is
+    all-or-nothing, and a *cross*-scope read is refused wholesale by the
+    off-scope rule before decryption is even reached. Either way the batch
+    is uniform and the claim goes unchecked.
+
+    What does mix, inside one scope and one batch: rows that carry the
+    sealed field and rows that do not. A note with no body is an ordinary
+    thing to have. After the shred the twenty sealed rows are refused as
+    unrecoverable and the twenty unsealed ones come back -- one page, two
+    verdicts, no exception, and an exact count.
     """
     through, _direct, name = sealed_wire
-    through[name]["__keys"].delete_one({"keyAltNames": "alice"})
+    notes = through[name].notes
+    notes.insert_many(
+        [{"tenant_id": "carol", "text": f"sealed body {i}", "n": i}
+         for i in range(20)]
+        + [{"tenant_id": "carol", "label": f"no body {i}", "n": 100 + i}
+           for i in range(20)])
 
-    # `including` the whole collection: two tenants, one batch, one of them
-    # unrecoverable. The off-scope rule refuses a mixed batch, so ask for
-    # bob's rows plus the erased id explicitly.
-    rows = list(through[name].notes.find({"tenant_id": "bob"}))
-    assert [r["text"] for r in rows] == [KEPT]
+    assert notes.count_documents({"tenant_id": "carol"}) == 40
+    before = list(notes.find({"tenant_id": "carol"}))
+    assert len(before) == 40, "the control: all forty are reachable first"
+
+    through[name]["__keys"].delete_one({"keyAltNames": "carol"})
+
+    # No exception is the first half of the assertion; the count is the
+    # second. A batch that raised would never reach either.
+    after = list(notes.find({"tenant_id": "carol"}))
+    assert len(after) == 20, (
+        f"expected the twenty rows with no sealed field to survive and the "
+        f"twenty sealed ones to be refused; got {len(after)}")
+    assert all("text" not in row for row in after)
+    assert sorted(row["n"] for row in after) == list(range(100, 120))
 
 
 # --------------------------------------------------------------------------
@@ -534,6 +557,128 @@ def test_durable_custody_survives_a_restart(tmp_path):
                 assert reachable(second, name, "alice") == [SECRET]
             finally:
                 second.close()
+    finally:
+        direct.drop_database(name)
+        direct.close()
+
+
+# --------------------------------------------------------------------------
+# It says what it did, while it is still running
+# --------------------------------------------------------------------------
+
+def test_the_sealing_counters_are_reported(tmp_path):
+    """A guarantee nobody counted is a claim about one.
+
+    The read half reports itself for free, because the undecryptable tally
+    is recorded on the *guard* rather than beside it -- so it arrives in
+    `refused_by_reason_total{reason="unrecoverable"}` with the deadline and
+    the revocation, which is where an operator is already looking.
+
+    The write half had no series at all until these existed, and that is
+    the gap worth a test: a boundary that silently stopped encrypting looks
+    exactly like one that is encrypting. `sealed_writes_total` flat while a
+    sealed collection is being written is plaintext reaching the disk, and
+    nothing else in this process would say so.
+    """
+    import urllib.request
+
+    name = f"voyd_test_metrics_seal_{uuid.uuid4().hex[:8]}"
+    direct = pymongo.MongoClient(f"mongodb://{mongo_host()}/"
+                                 "?directConnection=true")
+    metrics_port = free_port()
+    try:
+        with _wire(tmp_path, name, "--metrics", str(metrics_port)) as port:
+            client = pymongo.MongoClient(
+                f"mongodb://localhost:{port}/?directConnection=true",
+                serverSelectionTimeoutMS=8000)
+            try:
+                client[name].notes.insert_many(
+                    [{"tenant_id": "alice", "text": f"body {i}"}
+                     for i in range(5)])
+                # One write it cannot seal, refused rather than forwarded.
+                with pytest.raises(pymongo.errors.OperationFailure):
+                    client[name].notes.insert_one({"text": "no tenant"})
+                assert len(list(client[name].notes.find(
+                    {"tenant_id": "alice"}))) == 5
+                client[name]["__keys"].delete_one({"keyAltNames": "alice"})
+                assert list(client[name].notes.find(
+                    {"tenant_id": "alice"})) == []
+
+                # Counters flush on a timer, not on the message path, so
+                # the exposition is deliberately up to a second stale.
+                deadline = time.monotonic() + 15
+                said = ""
+                while time.monotonic() < deadline:
+                    with urllib.request.urlopen(
+                            f"http://127.0.0.1:{metrics_port}/metrics",
+                            timeout=5) as page:
+                        said = page.read().decode()
+                    if "voyd_sealed_writes_total 5" in said:
+                        break
+                    time.sleep(0.25)
+            finally:
+                client.close()
+
+        assert "voyd_sealed_writes_total 5" in said, (
+            "five documents were sealed and the series does not say so")
+        assert "voyd_seal_refused_writes_total 1" in said
+        assert "voyd_erasures_total 1" in said
+        # The pair that must move together. An erasure counted with no
+        # revocation behind it is the ordering being lost -- the key dies
+        # and the documents stay readable until a cache turns over -- and
+        # the only way to see that from outside is these two diverging.
+        assert "voyd_erasure_revocations_total 5" in said, (
+            "an erasure was sequenced but nothing was revoked ahead of it, "
+            "which is the window this feature exists to close")
+        # And now the interesting one, which is not the reason a reader
+        # would guess.
+        #
+        # Those five documents were refused as **revoked**, not as
+        # unrecoverable. The boundary had just encrypted them, so
+        # libmongocrypt still holds the scope's key and the decrypt
+        # *succeeds* -- for about another minute. What refuses them in that
+        # window is the revocation the boundary wrote before destroying the
+        # key, and that is precisely the arrangement the two halves exist
+        # to produce:
+        #
+        #   the key cache is a window where the ciphertext still reads
+        #       -> the revocation already refused the document
+        #   refusal only binds this application's read path
+        #       -> the key is gone, so every other copy is noise
+        #
+        # So `unrecoverable` staying at zero here is the design working,
+        # not a gap. It starts climbing once the cache turns over, or
+        # immediately in a process that never held the key -- which is any
+        # other reader of the same data, including the next restart of
+        # this one. Asserting the reason a reader would *expect* would have
+        # made this test fail against a correct boundary.
+        assert 'reason="deadline"} 5' in said, (
+            "during the key-cache window the refusal belongs to the "
+            "revocation the boundary wrote; if this is zero, nothing was "
+            "revoked ahead of the shred and those documents were served")
+        assert 'reason="unrecoverable"} 0' in said
+        assert 'voyd_revoked_total{collection="notes"} 5' in said
+
+        # `deadline` rather than `revoked`, and that is worth knowing
+        # before an alert is written against it. The revocation pipeline
+        # writes the mark *and* pulls `expire_at` in, so both rules now
+        # refuse the document, and `Deadline` is declared first -- the
+        # same reason an ordinary `delete` rewritten as a revocation
+        # reports, so this is a property of the tool rather than of
+        # sealing.
+        #
+        # Which is the argument for the two counters above existing at
+        # all: the per-reason series cannot tell a subject who was erased
+        # from a document that merely expired, because the boundary wrote
+        # the same marks for both. `erasures_total` and
+        # `erasure_revocations_total` are the pair that can, and they are
+        # what a compliance question should be asked of. See LIMITS.md
+        # §5.
+
+        # And the help text has to survive, or a stranger reading the
+        # endpoint cannot tell these apart.
+        assert "# HELP voyd_erasures_total" in said
+        assert "requests handled and not keys confirmed gone" in said
     finally:
         direct.drop_database(name)
         direct.close()

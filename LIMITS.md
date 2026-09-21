@@ -20,7 +20,7 @@ somebody who also wrote the claim.
 That is not a coverage problem and no amount of code fixes it. The suite is
 good at holding claims somebody thought to state; it has never once been the
 thing that caught a problem a *user* hit, because there have been no users.
-Fifteen defects this month, and the way they were found is the point.
+Eighteen defects this month, and the way they were found is the point.
 Eleven came from running something new: three from exercising paths nobody
 had exercised, four from the hostile pass in §4, two more from the
 hostile pass against fan-out in §3 -- a cheap query pattern withdrawing
@@ -31,13 +31,35 @@ without first revoking the documents, leaving them readable for the length
 of a key cache (§5), and a delete clause read from the command body when a
 `delete` carries it in a document sequence, which made the boundary miss
 every erasure request it was sent. One came from the benchmark contradicting a commit
-message that had already been pushed. Three came from *writing a test*: the scanner's two-mark finding in §4; the
+message that had already been pushed. Five came from *writing a test*: the scanner's two-mark finding in §4; the
 read-preference claim in §3, where the defect was in the prose and three
 files had spent weeks talking a reader out of something the proxy could
 already do; and fan-out's identity check, which looked for a standalone
 `saslStart`, never fired against a real driver's speculative handshake, and
-was fail-open while it did not — the most serious of the fifteen, and the
-only one a user could have been harmed by rather than merely misled.
+was fail-open while it did not — the most serious of the eighteen, and the
+only one a user could have been harmed by rather than merely misled; and two
+from the sealing work -- an erasure that revoked rows its key had never
+protected, making unencrypted documents of the same tenant unreachable as a
+side effect of a key deletion, which is the boundary inventing policy out of
+a verb; and a metrics `Meter` that hand-listed the counters `flush` reads, so
+adding one raised inside the flusher task, killed that worker's reporting,
+and presented as the proxy dropping connections -- a reporting bug wearing
+the costume of a network one.
+
+And one was a defect in the *suite* rather than in the code, which belongs
+here more than any of the others. A test named
+`test_one_erased_tenant_does_not_fail_the_page` carried a docstring about a
+page of fifty containing one erased row, and asserted a single-tenant page
+with nothing erased in it -- a duplicate of the test above it, with a comment
+admitting it had punted. It passed. It passed under sabotage. It would have
+gone on passing while the claim it was named after went unchecked, and the
+count on this page would have included it as coverage. Getting a genuinely
+mixed batch turned out to need care: inside one scope the key is shared, so a
+shred is all-or-nothing, and a cross-scope read is refused wholesale before
+decryption is reached -- so both obvious ways to write that test produce a
+uniform batch and check nothing. A test that cannot fail is a screenshot,
+and this page has said that about examples for a while without checking
+whether it was true of the tests.
 
 That last one is worth the sentence it costs. It was written *and* reviewed
 in the same hour as the feature, by the same person, with the failure mode
@@ -665,10 +687,18 @@ cannot destroy one.
   which rung is in force at startup, and prints `THIS BOUNDARY NOW HOLDS
   KEYS` beside it, because a reader who learned the purity claim from the
   README is owed the correction louder than a footnote.
-- **A sealed read is no longer 2.3 microseconds.** It decrypts before it
-  refuses. That ordering is not a preference: it is the order
-  `Admission._unsealed` uses, and the two must agree or the same document
-  would be admitted through the library and refused through the wire.
+- **A sealed read costs about 8.1 microseconds per document rather than
+  2.3**, because it decrypts before it refuses. That ordering is not a
+  preference: it is the order `Admission._unsealed` uses, and the two must
+  agree or the same document would be admitted through the library and
+  refused through the wire. Measured by `voyd_bench.py --seal` against a
+  real key vault: decrypt 5.8us, stable to a hundredth across passes;
+  encrypt ~8.7us warm and ~26us on the first pass, while libmongocrypt's
+  key cache fills; refusal 2.3us. The benchmark prints the spread rather
+  than one draw, because that first encrypting pass is three times the
+  steady state and quoting a single sample of it to two decimal places
+  would be a precision claim this page cannot support -- an earlier
+  version of this line said "21.0us" and that was exactly that mistake.
   Unsealed collections are untouched and still take the pure path, so a
   deployment sealing one collection of twelve pays for one of twelve.
 - **A document refused by a deadline has still been decrypted** by the time
@@ -712,6 +742,33 @@ suite going red -- §1, again, and this is the fourteenth. The assertion that
 now catches it (`test_destroying_a_key_is_immediate_not_eventual`) was
 written after the defect, which is the honest order.
 
+### What it reports, and the one thing it cannot
+
+The read half needed no new series: the undecryptable tally is recorded on
+the *guard* rather than beside it, so it arrives in
+`refused_by_reason_total` with the deadline and the revocation, where an
+operator is already looking. The write half had nothing at all, which is
+worse than it sounds -- a boundary that silently stopped encrypting is
+indistinguishable from one that is encrypting. `sealed_writes_total`,
+`sealed_reads_total`, `seal_refused_writes_total`, `erasures_total` and
+`erasure_revocations_total` are the five that close it.
+
+**`erasures_total` and `erasure_revocations_total` are a pair.** The first
+climbing while the second stays flat is the ordering defect above as a
+graph: a key destroyed with nothing marked ahead of it.
+
+**What the per-reason series cannot tell you** is an erasure from an
+expiry. A revocation writes the mark *and* pulls `expire_at` in, and
+`Deadline` is declared first, so an erased subject is refused under
+`deadline` -- the same reason a naturally expired document reports. That is
+not new with sealing; it is what every `delete` rewritten as a revocation
+has always done. But it means `refused_by_reason_total` is the wrong place
+to ask a compliance question, and the erasure pair is the right one.
+**Consider:** reporting the *first* reason that fires is a choice, and a
+rule set could instead report all of them. That would make the series
+overlap and stop summing to the refusal total, which is a worse trade than
+the ambiguity. Undecided, and not currently a problem anybody has.
+
 ### Open, and marked
 
 **An erasure is recognised by its shape, not by a verb.** The key vault is an
@@ -739,6 +796,19 @@ worker would be undecryptable through the next -- a bug that appears only at
 `--workers 2` and looks like corruption. The default custody is still
 `Ephemeral`, which does not survive a restart, and the boundary says so in
 capitals at startup.
+
+**An erasure revokes only the rows the key protected**, meaning rows that
+carry one of the sealed fields. A row of the same tenant with none of them
+was never encrypted, so it has no cache window to close, and revoking it
+would be the boundary inventing policy out of a key deletion -- an operator
+would be surprised to find unencrypted documents unreachable because they
+destroyed a key. Somebody who means "forget this tenant entirely" has a
+verb for that already: a `delete` on the collection under
+`on_delete="revoke"`. **Consider:** the test matches on `$exists` rather
+than on the BSON subtype, so a plaintext value sitting in a field the
+policy declares sealed is revoked too. That is deliberate -- such a row was
+written while sealing was off and an erasure should still reach it -- but it
+is a judgement rather than a derivation.
 
 **A pipeline update that may assign a sealed field is refused.** Its stages
 compute values inside the server, where this boundary cannot encrypt what

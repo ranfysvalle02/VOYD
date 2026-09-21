@@ -776,7 +776,8 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
 
 async def erase_first(body: Mapping, statements: list,
                       guards: dict[str, Guard],
-                      vault: "voyd_seal.Vault | None", verbose: bool) -> None:
+                      vault: "voyd_seal.Vault | None", verbose: bool,
+                      meter: "voyd_metrics.Meter | None" = None) -> None:
     """If this client is destroying a key, revoke its documents first.
 
     Sequenced here, on the request, rather than left to the operator to
@@ -797,6 +798,13 @@ async def erase_first(body: Mapping, statements: list,
     for name, g in guards.items():
         if vault.seals(name):
             g.revoked += marked
+    if meter is not None:
+        # Counted as a pair on purpose. `erasures_total` climbing while
+        # `erasure_revocations_total` stays flat is the ordering being lost,
+        # which is the defect this feature already shipped once -- and the
+        # only way to see it from outside is that the two series diverge.
+        meter.erasures_total += len(scopes)
+        meter.erasure_revocations_total += marked
     if verbose:
         print(f"  voyd: erasure of {', '.join(scopes)}: revoked {marked} "
               f"document(s) first, so they are unreachable now rather than "
@@ -821,7 +829,8 @@ def seal_refusal(req_id: int, resp_to: int, why: str) -> bytes:
 
 async def judge(raw: bytes, req_id: int, resp_to: int,
                 guards: dict[str, Guard], verbose: bool,
-                vault: "voyd_seal.Vault | None") -> bytes:
+                vault: "voyd_seal.Vault | None",
+                meter: "voyd_metrics.Meter | None" = None) -> bytes:
     """`enforce`, plus decryption for the collections that declared it.
 
     **The fast path is byte-for-byte the old one.** With no `--key-vault`,
@@ -872,6 +881,8 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
     assert collection is not None
     guard = guards.get(collection)
     plain, tally = await vault.unseal(batch, collection)
+    if meter is not None:
+        meter.sealed_reads_total += len(batch)
     if guard is not None:
         if tally:
             guard.note_sealed(tally)
@@ -987,21 +998,27 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # sent, which is the kind of bug that only shows up on the
                 # combination nobody ran.
                 await erase_first(body, head[3] if head else [],
-                                  guards, vault, verbose)
+                                  guards, vault, verbose, meter)
 
                 if vault is not None and vault.targets(body):
                     again = decode_sections(raw)
                     if again is not None:
+                        before = vault.sealed_writes
                         try:
                             resealed = await vault.seal_command(
                                 dict(again[1]), again[2], again[3])
                         except voyd_seal.SealError as exc:
+                            if meter is not None:
+                                meter.seal_refused_writes_total += 1
                             await send(back, seal_refusal(
                                 req_id, req_id, str(exc)))
                             continue
                         if resealed is not None:
                             raw = encode_sections(req_id, resp_to, again[0],
                                                   *resealed)
+                        if meter is not None:
+                            meter.sealed_writes_total += (
+                                vault.sealed_writes - before)
             elif opcode == OP_MSG:
                 if advertise:
                     rebuilt = rewrite_topology(raw, req_id, resp_to, advertise)
@@ -1023,7 +1040,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
 
                 raw = (delete_reply(raw, req_id, resp_to) if was_delete
                        else await judge(raw, req_id, resp_to, guards,
-                                        verbose, vault))
+                                        verbose, vault, meter))
             await send(writer, raw)
     except Hangup:
         # Not an error, and the one disconnect the caller may still be
@@ -2012,15 +2029,18 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
             # A write is never fanned out, so this is only ever on the
             # primary leg.
             await erase_first(body, head[3] if head else [],
-                              guards, vault, verbose)
+                              guards, vault, verbose, meter)
 
             if vault is not None and vault.targets(body):
                 again = decode_sections(raw)
                 if again is not None:
+                    before = vault.sealed_writes
                     try:
                         resealed = await vault.seal_command(
                             dict(again[1]), again[2], again[3])
                     except voyd_seal.SealError as exc:
+                        if meter is not None:
+                            meter.seal_refused_writes_total += 1
                         await conv.to_client(
                             seal_refusal(req_id, req_id, str(exc)))
                         continue
@@ -2028,6 +2048,9 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                         raw = encode_sections(req_id, resp_to, again[0],
                                               *resealed)
                         original = raw
+                    if meter is not None:
+                        meter.sealed_writes_total += (
+                            vault.sealed_writes - before)
 
             # ---- the identity check -------------------------------------
             #
@@ -2188,7 +2211,7 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
                 rewritten.discard(resp_to)
                 raw = (delete_reply(raw, req_id, resp_to) if was_delete
                        else await judge(raw, req_id, resp_to, guards,
-                                        verbose, vault))
+                                        verbose, vault, meter))
             await conv.to_client(raw)
     except Hangup:
         return "hangup"
@@ -2281,7 +2304,8 @@ async def close(writer: asyncio.StreamWriter) -> None:
         pass
 
 
-def tally(guards: dict[str, Guard]) -> dict:
+def tally(guards: dict[str, Guard],
+          vault: "voyd_seal.Vault | None" = None) -> dict:
     """What one process actually did, as data rather than as a print.
 
     Separated from the printing because with `--workers` the counters live
@@ -2294,10 +2318,15 @@ def tally(guards: dict[str, Guard]) -> dict:
     for g in guards.values():
         for reason, n in g.reasons().items():
             reasons[reason] = reasons.get(reason, 0) + n
-    return {"served": sum(g.admitted for g in guards.values()),
-            "refused": sum(g.refused for g in guards.values()),
-            "revoked": sum(g.revoked for g in guards.values()),
-            "reasons": reasons}
+    counts = {"served": sum(g.admitted for g in guards.values()),
+              "refused": sum(g.refused for g in guards.values()),
+              "revoked": sum(g.revoked for g in guards.values()),
+              "reasons": reasons}
+    if vault is not None:
+        counts["sealed"] = vault.sealed_writes
+        counts["unsealed"] = vault.unsealed_reads
+        counts["erased"] = vault.erasures
+    return counts
 
 
 def merge(tallies: list[dict]) -> dict:
@@ -2322,7 +2351,21 @@ def summarise(counts: dict | dict[str, Guard]) -> None:
     reasons = counts.get("reasons") or {}
     print(f"voyd-wire: served {served}, refused {refused} {reasons or '{}'}, "
           f"turned {revoked} delete(s) into revocations", flush=True)
-    print("voyd-wire: documents deleted by this process: 0", flush=True)
+    sealed = counts.get("sealed")
+    if sealed is not None:
+        print(f"voyd-wire: sealed {sealed} document(s) on the way in, "
+              f"unsealed {counts.get('unsealed', 0)} on the way out, "
+              f"sequenced {counts.get('erased', 0)} erasure(s)", flush=True)
+        # The old line said this unconditionally, and with `--key-vault` it
+        # would have been a half-truth: the boundary still deletes no
+        # documents, but it does forward a key's destruction, and a key is
+        # the one thing here whose deletion is the point. Saying both is
+        # cheaper than letting a reader reconcile them.
+        print(f"voyd-wire: documents deleted by this process: 0 "
+              f"(key deletions forwarded: {counts.get('erased', 0)} -- the "
+              f"one deletion this tool argues for)", flush=True)
+    else:
+        print("voyd-wire: documents deleted by this process: 0", flush=True)
 
 
 def serve(listen_port: int, target: str, guards: dict[str, Guard],
@@ -2363,28 +2406,8 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
               "directConnection=true or they will walk past this boundary",
               flush=True)
     if vault_spec:
-        seals = vault_spec["sealed"]
-        rung = vault_spec["custody"]
-        print(f"voyd-wire: key vault {vault_spec['database']}."
-              f"{vault_spec.get('collection', '__keys')}; custody is "
-              f"{type(rung).__name__} -- {rung.detail()}", flush=True)
-        for name, (fields, scope) in sorted(seals.items()):
-            print(f"voyd-wire: sealing {name}.{{{', '.join(fields)}}} under "
-                  f"a key per {scope}; shred one and every copy of that "
-                  f"tenant's ciphertext is noise", flush=True)
-        # Said out loud because it is the property this flag spends. Every
-        # other thing this process does is pure; this one holds a
-        # connection and a credential, and a reader who learned the purity
-        # claim from the README is owed the correction here rather than in
-        # a footnote.
-        print("voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database "
-              "connection of its own and is a custody holder; sealed reads "
-              "decrypt before they refuse. See LIMITS.md \u00a75", flush=True)
-        if not rung.durable:
-            print("voyd-wire: WARNING: custody is ephemeral -- the master "
-                  "key is in this process's memory and a restart makes "
-                  "every sealed document unreadable. Demo-grade. Use "
-                  "--kms local:/path/to/master.key to keep it", flush=True)
+        for line in voyd_seal.announce(vault_spec):
+            print(line, flush=True)
     print("voyd-wire: connect any driver to "
           f"mongodb{'+tls' if certfile else ''}://localhost:{listen_port}/"
           "?directConnection=true\n", flush=True)
@@ -2551,12 +2574,13 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
               f"{drain_seconds}s; closing anyway", flush=True)
     if flusher is not None:
         await asyncio.gather(flusher, return_exceptions=True)
+    counted = tally(guards, vault)
     if vault is not None:
         # The one connection this process opened on its own behalf, put
         # down on the way out. A boundary that argues at length about
         # holding a handle you cannot close should not leave one open.
         await vault.aclose()
-    return tally(guards)
+    return counted
 
 
 def supervise(sock: socket.socket, workers: int, target: str,

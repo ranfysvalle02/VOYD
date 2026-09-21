@@ -114,8 +114,17 @@ class Vault:
         # key's id stays correct (it just stops resolving), so this is only
         # ever a saved round trip, never a stale verdict.
         self._keys: dict[str, Any] = {}
+        # What this vault did, for the shutdown summary and the metrics
+        # slab. A guarantee nobody counted is a claim about one, and the
+        # write half had no series at all until these existed: a boundary
+        # silently not encrypting looks exactly like one that is.
         self.sealed_writes = 0
         self.unsealed_reads = 0
+        # Erasure *requests sequenced*, not keys confirmed destroyed. The
+        # key dies by the client's own forwarded delete and this process
+        # does not wait to see it land, so counting it as "keys destroyed"
+        # would be this file claiming an outcome it never observed.
+        self.erasures = 0
         self.refused_unrecoverable = 0
         self.refused_key_unavailable = 0
 
@@ -154,17 +163,20 @@ class Vault:
             self._client = None
 
     def describe(self) -> dict:
-        """What this boundary now holds, printed rather than implied.
+        """What this boundary now holds, as data.
 
         A proxy that quietly became a custody holder is the thing this
-        repository is named after. `--key-vault` therefore prints this at
-        startup: the vault namespace, the custody rung in force, and which
-        fields of which collections it is sealing.
+        repository is named after, so this is printed at startup and is
+        also what `announce` below renders -- one source of truth for the
+        vault namespace, the custody rung in force, and which fields of
+        which collections are sealed.
         """
         return {
             "vault": f"{self.database}.{self.collection}",
             "custody": self.custody.describe(),
             "detail": self.custody.detail(),
+            "durable": bool(getattr(self.custody, "durable", False)),
+            "rung": type(self.custody).__name__,
             "sealed": {c: list(f) for c, (f, _s) in self.sealed.items()},
             "scope": {c: s for c, (_f, s) in self.sealed.items()},
         }
@@ -517,9 +529,12 @@ class Vault:
         """
         if not scopes or self._client is None:
             return 0
+        self.erasures += len(scopes)
         db = self._client[self.database]
         marked = 0
         for collection, (_fields, scope_field) in self.sealed.items():
+            if not _fields:
+                continue
             pipeline = pipelines.get(collection)
             if not pipeline:
                 # A sealed collection with no revocable() field has nowhere
@@ -532,8 +547,31 @@ class Vault:
                     "60s. Declare revocable() to close that window",
                     collection)
                 continue
+            # Only the rows the key actually protected.
+            #
+            # This is a real decision and it is narrow on purpose.
+            # Destroying a key is a statement about *ciphertext*, and the
+            # only reason to revoke ahead of it is to close the window
+            # where that ciphertext still decrypts out of a cache. A row
+            # carrying none of the sealed fields has no such window -- it
+            # was never encrypted -- so revoking it would be the boundary
+            # inventing policy out of a key deletion, and an operator
+            # would be surprised to find unencrypted documents unreachable
+            # because they destroyed a key.
+            #
+            # The operator who means "forget this tenant entirely" already
+            # has a verb for it: a `delete` on the collection, which
+            # `on_delete="revoke"` turns into exactly that. Two verbs, two
+            # meanings, neither one redefining the other.
+            #
+            # `$exists` rather than `$type: "binData"`: a plaintext value
+            # sitting in a field the policy declares sealed is a row
+            # written while sealing was off, and an erasure for that scope
+            # should still reach it. See LIMITS.md §5.
             result = await db[collection].update_many(
-                {scope_field: {"$in": scopes}}, pipeline)
+                {scope_field: {"$in": scopes},
+                 "$or": [{field: {"$exists": True}} for field in _fields]},
+                pipeline)
             marked += result.modified_count
         return marked
 
@@ -547,3 +585,42 @@ def sealed_from(options: Mapping) -> dict:
     return {name: (tuple(opt["sealed"]), opt["scope_field"])
             for name, opt in options.items()
             if opt.get("sealed") and opt.get("scope_field")}
+
+
+def announce(spec: Mapping) -> list[str]:
+    """The startup banner for a sealing boundary, as lines.
+
+    A function rather than prints inline because it is asserted: the
+    README leads with "the proxy holds no database connection of its own",
+    and a deployment that switched that off is owed the retraction in the
+    first screen of output rather than in a footnote. A test checks these
+    lines are there, which is only possible if something returns them.
+
+    Built from a `vault_spec` rather than from an open `Vault`, because it
+    is printed in the parent before any fork and before anything has
+    dialled the database -- if the vault is unreachable, the operator
+    should have already read what this process was going to hold.
+    """
+    view = Vault(spec["uri"], database=spec["database"],
+                 sealed=spec["sealed"], custody=spec["custody"],
+                 collection=spec.get("collection", "__keys")).describe()
+    lines = [f"voyd-wire: key vault {view['vault']}; custody is "
+             f"{view['rung']} -- {view['detail']}"]
+    for name, fields in sorted(view["sealed"].items()):
+        lines.append(
+            f"voyd-wire: sealing {name}.{{{', '.join(fields)}}} under a key "
+            f"per {view['scope'][name]}; shred one and every copy of that "
+            f"tenant's ciphertext is noise")
+    # The property this flag spends, said out loud. Every other thing this
+    # process does is pure; this one holds a connection and a credential.
+    lines.append(
+        "voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database "
+        "connection of its own and is a custody holder; sealed reads "
+        "decrypt before they refuse. See LIMITS.md \u00a75")
+    if not view["durable"]:
+        lines.append(
+            "voyd-wire: WARNING: custody is ephemeral -- the master key is "
+            "in this process's memory and a restart makes every sealed "
+            "document unreadable. Demo-grade. Use "
+            "--kms local:/path/to/master.key to keep it")
+    return lines

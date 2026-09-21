@@ -77,6 +77,16 @@ GLOBAL = (
     "fanout_unverified_total",
     "fanout_withdrawn_total",
     "fanout_retried_on_primary_total",
+    # Sealing. The read half already reports itself through
+    # `refused_by_reason_total{reason="unrecoverable"}`, because the tally
+    # lives on the guard rather than beside it. These four are the parts
+    # that had no series at all: whether the boundary is encrypting, and
+    # what it refused or erased while doing it.
+    "sealed_writes_total",
+    "sealed_reads_total",
+    "seal_refused_writes_total",
+    "erasures_total",
+    "erasure_revocations_total",
 )
 
 
@@ -216,22 +226,41 @@ class Meter:
     that the message path should not pay for reporting.
     """
 
+    # Every counter starts at zero and is named exactly once, in `GLOBAL`.
+    # This used to be fifteen hand-written assignments, and adding a
+    # sixteenth name to `GLOBAL` without adding it here left `flush` doing
+    # `getattr` on an attribute that did not exist -- which raised inside
+    # the flusher task, killed the worker's reporting, and presented as the
+    # proxy dropping connections. One list, one place to add to.
+    #
+    # `__slots__` is deliberately not used: the fields are derived from a
+    # tuple at runtime, and the point of this change is that nothing here
+    # repeats that tuple.
     def __init__(self, layout: Layout, slab: Slab, slot: int):
         self.layout = layout
         self.slab = slab
         self.slot = slot
-        self.connections_open = 0
-        self.connections_total = 0
-        self.connections_refused_total = 0
-        self.upstream_reresolve_total = 0
-        self.messages_from_client_total = 0
-        self.messages_from_upstream_total = 0
-        self.worker_flushes_total = 0
-        self.fanout_reads_total = 0
-        self.fanout_verified_total = 0
-        self.fanout_unverified_total = 0
-        self.fanout_withdrawn_total = 0
-        self.fanout_retried_on_primary_total = 0
+        for field in GLOBAL:
+            setattr(self, field, 0)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Refuse a counter this process will never report.
+
+        A typo like `meter.sealed_write_total += 1` is otherwise silent:
+        the attribute springs into existence, the number climbs, `flush`
+        never looks at it, and the series a dashboard is watching stays
+        flat while the code looks like it is counting. That is the exact
+        failure mode this whole repository is about -- confidently wrong
+        and quiet -- committed by the thing whose job is to report it.
+        """
+        if (name not in GLOBAL and name not in ("layout", "slab", "slot")
+                and not name.startswith("_")):
+            raise AttributeError(
+                f"Meter has no counter {name!r}. Add it to voyd_metrics."
+                f"GLOBAL (and to HELP) so it is allocated in the slab and "
+                f"exposed, or this number would climb where nothing reads "
+                f"it")
+        object.__setattr__(self, name, value)
 
     def flush(self, guards: dict) -> None:
         self.worker_flushes_total += 1
@@ -305,6 +334,44 @@ HELP = {
     "admitted_total": ("counter", "Documents a prompt was allowed to see."),
     "refused_total": ("counter", "Documents refused on the read path."),
     "revoked_total": ("counter", "Deletes rewritten as revocations."),
+    "sealed_writes_total": (
+        "counter",
+        "Documents whose sealed fields this boundary encrypted on the way "
+        "in. This is the write half of the guarantee and the only series "
+        "that can show it is running: if it stays at zero while a sealed "
+        "collection is being written, plaintext is reaching the disk."),
+    "sealed_reads_total": (
+        "counter",
+        "Documents examined on the sealed read path. The gap between this "
+        "and refused_by_reason_total{reason=\"unrecoverable\"} is what "
+        "decrypted successfully."),
+    "seal_refused_writes_total": (
+        "counter",
+        "Writes answered with an error because this boundary could not "
+        "seal them -- no tenant to scope a key to, a pipeline update that "
+        "would assign a sealed field server-side, an operator that has no "
+        "meaning against ciphertext. Failing closed is the only option "
+        "available, since forwarding puts plaintext in a backup no later "
+        "fix reaches. Any sustained value is an application writing in a "
+        "shape the policy cannot protect."),
+    "erasures_total": (
+        "counter",
+        "Erasure requests this boundary recognised and sequenced. Named "
+        "for what it counts rather than for what it is about: the key is "
+        "destroyed by the client's own forwarded delete, and this process "
+        "does not wait for the server to confirm it, so this is requests "
+        "handled and not keys confirmed gone. The number to reconcile "
+        "against the requests that were *received* -- a gap there is an "
+        "erasure whose filter this boundary could not read, which is "
+        "forwarded, and which therefore skipped the revocation below."),
+    "erasure_revocations_total": (
+        "counter",
+        "Documents revoked ahead of a key being destroyed. Unreachable "
+        "first, erased second: a key destroyed with nothing marked stays "
+        "readable for as long as a decrypting process keeps it cached, "
+        "about a minute. This climbing alongside erasures_total is that "
+        "ordering being honoured; erasures_total climbing while this stays "
+        "flat is the window being left open."),
     "refused_by_reason_total": (
         "counter",
         "Refusals by reason. `deadline` climbing is the system working; "

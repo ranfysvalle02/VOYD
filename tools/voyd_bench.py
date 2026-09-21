@@ -452,6 +452,104 @@ def _verdict(rows: list[tuple[str, dict]]) -> None:
                   "this run cannot say what workers buy")
 
 
+def seal_cost(uri: str, docs: int, pad: int, runs: int) -> int:
+    """What sealing costs per document, measured rather than hedged.
+
+    Separate from the sweep above and deliberately not part of it. That one
+    measures a *proxy* -- sockets, BSON, the event loop -- against a fake
+    upstream. This measures the two crypto operations on their own, because
+    they are the only new per-document cost `--key-vault` adds and mixing
+    them into a throughput number would make neither legible.
+
+    It needs a real key vault, since the whole point is that the cost is
+    libmongocrypt's and not a stand-in's. Nothing is written to the
+    collection: the documents are sealed in memory and unsealed again, which
+    is exactly the work the boundary does on the write and read paths.
+
+    The number worth carrying away is the decrypt one. A read pays it per
+    document on top of refusal's ~2.3us; a write pays the encrypt once.
+    """
+    import asyncio
+    import statistics
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import voyd_seal
+    from voyd.engine.custody import Ephemeral
+
+    database = f"voyd_bench_seal_{os.getpid()}"
+
+    async def go() -> tuple[float, float]:
+        vault = voyd_seal.Vault(uri, database=database,
+                                sealed={"notes": (("text",), "tenant_id")},
+                                custody=Ephemeral())
+        await vault.open()
+        try:
+            body = "x" * pad
+            plain = [{"_id": i, "tenant_id": "acme", "text": body}
+                     for i in range(docs)]
+
+            # Both directions are run `runs` times and reported as a
+            # median with its spread, because a single pass is not a
+            # measurement. Encryption in particular moves around by a
+            # factor of two between passes -- key-cache warm-up and the
+            # allocator, not anything this boundary controls -- and
+            # printing one draw of that as "21.0us" would be this file
+            # inventing a precision it does not have.
+            written = []
+            sealed = plain
+            for _ in range(runs):
+                start = time.perf_counter()
+                sealed = [await vault._seal_document(
+                    d, ("text",), "tenant_id", where="bench") for d in plain]
+                written.append((time.perf_counter() - start) / docs * 1e6)
+
+            read = []
+            for _ in range(runs):
+                start = time.perf_counter()
+                kept, tally = await vault.unseal(sealed, "notes")
+                read.append((time.perf_counter() - start) / docs * 1e6)
+                if len(kept) != docs or tally:
+                    raise SystemExit(
+                        "seal bench: a document was refused during a run "
+                        "with no erasure in it; this measured the wrong path")
+                if kept[0]["text"] != body:
+                    raise SystemExit(
+                        "seal bench: the round trip did not return the "
+                        "plaintext, so this measured nothing useful")
+            return written, read
+        finally:
+            await vault.aclose()
+            from pymongo import AsyncMongoClient
+            scratch = AsyncMongoClient(uri)
+            await scratch.drop_database(database)
+            await scratch.close()
+
+    written, read = asyncio.run(go())
+    encrypt, decrypt = statistics.median(written), statistics.median(read)
+    print(f"\nsealing, per document ({docs} docs x {pad}B, {runs} runs each "
+          f"way,\nreal key vault, libmongocrypt):\n")
+    print(f"  encrypt (write path)   {encrypt:6.2f}us   "
+          f"(min {min(written):.2f}, max {max(written):.2f})")
+    print(f"  decrypt (read path)    {decrypt:6.2f}us   "
+          f"(min {min(read):.2f}, max {max(read):.2f})")
+    print(f"\n  refusal alone          {REFUSAL_US:6.2f}us   "
+          f"(the pure path, unchanged for unsealed collections)")
+    print(f"  a sealed read          {REFUSAL_US + decrypt:6.2f}us   "
+          f"= refusal + decrypt, {(REFUSAL_US + decrypt) / REFUSAL_US:.1f}x")
+    print("\nThe read number is the one to carry away, and it is the stable "
+          "one: a\ndocument is sealed once and served many times. Encryption "
+          "moves around\nbetween passes by enough that quoting it to two "
+          "decimal places would be\nfiction -- the spread above is the "
+          "honest form of it.")
+    return 0
+
+
+# Refusal's own per-document cost, from the sweep above. Stated as a
+# constant here so the comparison below is against this file's own measured
+# number rather than a figure recalled from the README.
+REFUSAL_US = 2.3
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -489,7 +587,22 @@ def main(argv: list[str] | None = None) -> int:
                          "counters on a timer costs the message path "
                          "nothing measurable")
     ap.add_argument("--policy", help="keep the generated voydfile here")
+    ap.add_argument("--seal", action="store_true",
+                    help="instead of the sweep, measure what --key-vault "
+                         "costs per document: one encrypt and one decrypt "
+                         "against a real key vault. Needs a reachable "
+                         "MongoDB and the crypto extra")
+    ap.add_argument("--seal-uri",
+                    default=os.getenv(
+                        "VOYD_TEST_MONGO_URI",
+                        "mongodb://localhost:27018/?directConnection=true"),
+                    help="the deployment --seal builds its key vault in")
+    ap.add_argument("--seal-runs", type=int, default=5)
     args = ap.parse_args(argv)
+
+    if args.seal:
+        return seal_cost(args.seal_uri, args.docs * 5, args.pad,
+                         args.seal_runs)
 
     if args.role == "upstream":
         signal.signal(signal.SIGTERM, lambda *_: os._exit(0))

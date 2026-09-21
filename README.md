@@ -284,6 +284,32 @@ erased second.** The two halves cover each other exactly:
       -> the key is gone, so a backup restored next year is noise
 ```
 
+### It says what it did
+
+Sealing is invisible unless it is counted, and a boundary that silently
+stopped encrypting looks exactly like one that is encrypting. So the read
+half arrives in the refusal series an operator is already watching, and the
+write half got four of its own (`--metrics PORT`):
+
+```
+voyd_sealed_writes_total 5              <- if this is flat, plaintext is landing
+voyd_sealed_reads_total 10
+voyd_seal_refused_writes_total 1        <- writes it could not seal
+voyd_erasures_total 1                   <- erasure requests sequenced
+voyd_erasure_revocations_total 5        <- documents revoked ahead of the key
+```
+
+**The last two are a pair, and the pair is the point.** `erasures_total`
+climbing while `erasure_revocations_total` stays flat *is* the ordering being
+lost — a key destroyed with nothing marked, readable for as long as somebody
+keeps it cached. It is the defect above, as a graph.
+
+They also answer a question the per-reason series cannot. A revocation writes
+the mark *and* pulls the deadline in, so an erased subject is refused under
+`deadline` — the same reason a document that merely expired reports. Nothing
+in `refused_by_reason_total` can separate the two, because the boundary wrote
+the same marks for both. These two can.
+
 ### What this costs, stated rather than discovered
 
 This is the one flag that spends the property the rest of this README leads
@@ -304,10 +330,15 @@ voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database connection of its
   file; `--kms env:PREFIX` reaches the rungs where destroying it is somebody
   else's audited operation. The default is ephemeral, does not survive a
   restart, and says so in capitals.
-- **A sealed read is no longer 2.3µs.** It decrypts before it refuses —
-  which is the order the library uses, and the two must agree or the same
-  document would be admitted one way and refused the other. Unsealed
-  collections still take the pure path untouched.
+- **A sealed read costs ~8.1µs per document instead of 2.3µs**, because it
+  decrypts before it refuses — which is the order the library uses, and the
+  two must agree or the same document would be admitted one way and refused
+  the other. Measured, not estimated: `python tools/voyd_bench.py --seal`
+  reports **5.8µs** to decrypt (stable to a hundredth across passes) and
+  **~8.7µs** to encrypt once the key cache is warm, against a real key
+  vault. The first encrypting pass costs ~26µs while that cache fills,
+  which is why the benchmark prints a spread rather than one draw.
+  Unsealed collections still take the pure path untouched at 2.3µs.
 - **A write it cannot seal is refused, never forwarded.** No tenant in the
   document, a pipeline update that may assign a sealed field, `$inc` on
   ciphertext: the error goes straight back and the server never sees the
@@ -338,7 +369,7 @@ the hash-chain ledger and the context index are gone, along with ~817 tests
 and ~35,000 words of documentation that described them. What is left is the
 boundary, the policy file, and the wire.
 
-The suite is **268 tests**, and it is the foundation rather than a census —
+The suite is **272 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie:
 
@@ -367,7 +398,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 268 tests, 93 seconds -- the inner loop
+pytest              # 272 tests, 96 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 
@@ -527,6 +558,7 @@ Stated rather than discovered:
   **Refusal costs ~2.3µs per document.** Counters are summed across workers
   and printed once. `python tools/voyd_bench.py` reproduces all of it, and
   checks the boundary was still refusing while it was being fast.
+  `--seal` measures what `--key-vault` adds per document instead.
 - **`--metrics PORT`** serves Prometheus text while it runs: documents
   admitted and refused per collection, refusals by reason, connections,
   upstream re-resolutions. Summed across workers through a slab of shared
