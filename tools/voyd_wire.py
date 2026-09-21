@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """A MongoDB connection that cannot serve a fact you have forgotten.
 
-    # terminal 1
-    python tools/voyd_wire.py --listen 27099 --target localhost:27018 \
-        --guard notes
+    # terminal 1 -- rules in a file that is not your application
+    python tools/voyd_wire.py --config voydfile.py --target localhost:27018
 
     # terminal 2 -- any driver, any language
     mongosh mongodb://localhost:27099/demo
@@ -51,6 +50,7 @@ try:
 except ImportError:  # pragma: no cover - the one dependency, and it is pymongo's
     sys.exit("pip install pymongo   (for the bson library)")
 
+from voyd.declare import load
 from voyd.engine import Deadline, revoked
 from voyd.engine.admission import Admission, AdmissionSpec
 
@@ -73,16 +73,37 @@ class Guard:
     that makes it movable to a wire in the first place.
     """
 
-    def __init__(self, collection: str, *, at_field: str, mark_field: str):
-        self.collection = collection
-        self.handle = Admission(None, AdmissionSpec(
-            collection, rules=(Deadline(at_field=at_field),
-                               revoked(mark_field))))
+    def __init__(self, spec: AdmissionSpec):
+        self.collection = spec.collection
+        self.spec = spec
+        self.handle = Admission(None, spec)
         self.refused = 0
         self.admitted = 0
 
+    @classmethod
+    def defaults(cls, collection: str, *, at_field: str, mark_field: str):
+        """A guard for a collection nobody wrote a policy for.
+
+        The two rules every collection with a deadline wants, so
+        ``--guard notes`` is still a complete thing to type. A policy file
+        says more; this says the obvious part.
+        """
+        return cls(AdmissionSpec(collection,
+                                 rules=(Deadline(at_field=at_field),
+                                        revoked(mark_field))))
+
     def filter(self, docs: list[dict]) -> list[dict]:
-        kept = self.handle.reachable(docs)
+        handle = self.handle
+        if self.spec.tenant:
+            # A declared tenant is enforced per document, and the proxy has
+            # no filters to read it from -- so it takes the scope from the
+            # batch itself. Every document in a cursor batch came from one
+            # query, so they share a tenant; a batch that does not is already
+            # the leak, and `off_scope` is what names it.
+            scopes = {d.get(self.spec.tenant) for d in docs}
+            handle = handle.for_tenant(scopes.pop() if len(scopes) == 1
+                                       else object())
+        kept = handle.reachable(docs)
         self.refused += len(docs) - len(kept)
         self.admitted += len(kept)
         return kept
@@ -326,6 +347,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--listen", type=int, default=27099, help="local port")
     ap.add_argument("--target", default="localhost:27017",
                     help="the mongod/Atlas this fronts (host:port)")
+    ap.add_argument("--config", metavar="VOYDFILE",
+                    help="a policy file declaring the rules per collection "
+                         "(see voyd.declare). This is the whole of what you "
+                         "write, and it is not in your application")
     ap.add_argument("--guard", action="append", default=[], metavar="COLLECTION",
                     help="a collection whose reads are admitted; repeatable. "
                          "Collections not named here are forwarded untouched, "
@@ -336,14 +361,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
-    if not args.guard:
-        print("voyd-wire: --guard names at least one collection, or this "
-              "process is a plain TCP relay pretending to be a boundary",
-              file=sys.stderr)
+    if not args.config and not args.guard:
+        print("voyd-wire: give it --config voydfile.py, or --guard naming at "
+              "least one collection. With neither, this process is a plain "
+              "TCP relay pretending to be a boundary", file=sys.stderr)
         return 2
 
-    guards = {c: Guard(c, at_field=args.at_field, mark_field=args.mark_field)
-              for c in args.guard}
+    guards: dict[str, Guard] = {}
+    if args.config:
+        try:
+            for collection, spec in load(args.config).items():
+                guards[collection] = Guard(spec)
+        except Exception as exc:
+            # A policy file that is wrong must fail here, loudly, rather than
+            # at the first query. Starting a boundary from a broken
+            # declaration is how you get a door that is ajar.
+            print(f"voyd-wire: {args.config}: {exc}", file=sys.stderr)
+            return 2
+    for c in args.guard:
+        guards.setdefault(c, Guard.defaults(
+            c, at_field=args.at_field, mark_field=args.mark_field))
     try:
         serve(args.listen, args.target, guards, not args.quiet)
     except KeyboardInterrupt:

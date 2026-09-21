@@ -25,6 +25,8 @@ previously the same one.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import voyd.engine as engine
 
 # The promise. Grouped as in the source, so a diff shows what kind of thing
@@ -140,10 +142,39 @@ def test_the_extension_point_protocols_are_documentation_not_imports():
     assert inspect.getdoc(trait.Trait)
 
 
-def test_the_top_level_package_stays_small():
-    """``import voyd`` is the front door and has always been five names.
-    The engine namespace is the advanced one; the front door is not."""
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_the_top_level_package_is_the_policy_file_and_nothing_else():
+    """``import voyd`` is the front door, and the front door is now a
+    *policy file* rather than a library.
+
+    Every name here appears in a `voydfile.py`, which is the test for whether
+    it belongs: `guard` and the eight field declarations are the vocabulary a
+    team writes, and `Engine` is the escape hatch for the in-process form. If
+    a name is added that nobody would put in a policy file, it belongs in
+    `voyd.engine` with the rest of the advanced surface.
+
+    The list grew by nine when the declarative layer landed, and that is the
+    mechanism working rather than the surface drifting: adding a public name
+    costs a line in this diff, which is how the last overgrowth was caught
+    (`voyd.engine.__all__` had reached 100 names, 48 of them in no README,
+    blog or example).
+    """
     import voyd
 
-    assert set(voyd.__all__) == {"Engine", "PermanentFailure",
-                                 "__version__"}
+    assert set(voyd.__all__) == {
+        "Engine", "PermanentFailure",
+        "guard", "deadline", "revocable", "holdable", "tenant",
+        "restricted_to", "embedded_with", "budget", "distinct",
+        "__version__",
+    }
+
+    policy_vocabulary = set(voyd.__all__) - {"Engine", "PermanentFailure",
+                                             "__version__"}
+    declared = (ROOT / "voydfile.py").read_text()
+    unused = {n for n in policy_vocabulary if n not in declared}
+    assert unused <= {"holdable", "restricted_to", "embedded_with",
+                      "budget", "distinct"}, (
+        f"{sorted(unused)} is exported but the example policy file does not "
+        f"show it; a vocabulary word nobody has written down is a guess")

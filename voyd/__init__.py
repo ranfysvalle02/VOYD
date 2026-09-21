@@ -22,10 +22,19 @@ way out.
     await docs.including_refused().find({})   # break-glass: gated, and counted
     await docs.revoke({"_id": x}, reason="credential leaked")
 
-**Or on the wire**, where it binds the connection instead of the import::
+**Or on the wire**, where it binds the connection instead of the import.
+Declare the rules once, in a file that is not your application::
 
-    python tools/voyd_wire.py --listen 27099 --target localhost:27017 \\
-        --guard notes
+    # voydfile.py
+    from voyd import guard, deadline, revocable, tenant
+
+    @guard("notes")
+    class Notes:
+        expire_at = deadline()
+        forgotten = revocable()
+        tenant_id = tenant()
+
+    # then: python tools/voyd_wire.py --config voydfile.py --target ...
 
 Same check, no code. Any driver in any language pointed at that port cannot
 read a forgotten fact, because the boundary is not something a caller can
@@ -77,8 +86,16 @@ no mock tier, on purpose, because these properties are only true if the
 
 from __future__ import annotations
 
+from .declare import (budget, deadline, distinct, embedded_with, guard,
+                      holdable, restricted_to, revocable, tenant)
 from .engine import Engine, PermanentFailure
 
 __version__ = "0.1.0"
 
-__all__ = ["Engine", "PermanentFailure", "__version__"]
+__all__ = [
+    "Engine", "PermanentFailure",
+    # The declarative policy surface -- everything `voydfile.py` needs.
+    "guard", "deadline", "revocable", "holdable", "tenant",
+    "restricted_to", "embedded_with", "budget", "distinct",
+    "__version__",
+]
