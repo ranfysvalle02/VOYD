@@ -157,11 +157,14 @@ is a way to reach it, and none of them is the on-ramp.
 | `uv sync --extra crypto` | cryptographic erasure | when "unreachable here" is not enough and you need "unreadable in every backup" |
 | `uv sync --extra mcp` | the same guarantee as tools a model can call | when an agent runtime is the caller |
 
-`PILOT.md` is the smallest honest trial: refusal on one collection, exit
-criteria, and a report template. `bench/pilot.py` runs the same flow against a
-real MongoDB and fills every line of that report except the one only a real
-team can answer — kept after two weeks. A proof of the mechanism is not
-evidence of demand.
+`PILOT.md` is the smallest honest trial, in four gates that each can end it:
+your own number from the scanner before you install anything, then shadow mode
+(three lines, no behaviour change) to count how many facts your live read path
+served that were already gone, then one read path switched, then a decision
+against a threshold you wrote down before you started. `bench/pilot.py` runs
+the same flow against a real MongoDB and fills every line of the report a
+synthetic run honestly can — leaving the ones only real traffic answers blank.
+A proof of the mechanism is not evidence of demand.
 
 ---
 

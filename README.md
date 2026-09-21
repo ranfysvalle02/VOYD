@@ -108,23 +108,8 @@ Postgres holds the row, Qdrant holds the vector, MinIO holds the bytes, and a
 cron is supposed to keep them agreeing. Four owners, four clocks, four ways to drift. The
 deleted document answers the query.
 
-Then the pilot, run on synthetic data against a real MongoDB, filling its own
-report — a revoked credential still reaches a prompt through the raw read and
-an unfiltered candidate producer, the handle refuses it on both, and so does
-the summary an agent wrote from it. It does not run a vector index; it calls
-`reachable()` directly to isolate the same per-hit egress boundary
-`$vectorSearch` uses:
-
-```bash
-uv run python bench/pilot.py            # writes bench/results/pilot.md
-```
-
-Every line of the [`PILOT.md`](PILOT.md) report is filled from that run except
-the one only a real team can answer: kept after two weeks. A proof of the
-mechanism is not evidence of demand, and the report says so.
-
-And before installing anything, run it against **your own** repository — one
-stdlib file, no database, no credentials:
+Then, before you install anything at all, run the scanner against **your own**
+repository — one stdlib file, no database, no credentials, no clone required:
 
 ```bash
 python scanner/voyd_scan path/to/your/repo
@@ -148,6 +133,24 @@ Unjudged reads — a filter built by a helper, which a source scan cannot see �
 are a proof obligation rather than a shrug, dischargeable in the source the
 way `# type: ignore` is, and `--strict` holds the count at zero once you get
 it there. The header is honest about what a source scan cannot see.
+
+Then measure the half a source scan cannot reach, still without changing
+anything a user sees. Shadow mode keeps your existing read path exactly as it
+is and counts, alongside it, how many of the documents it served were already
+gone:
+
+```bash
+uv run python examples/shadow.py        # the three lines, runnable
+uv run python bench/pilot.py            # the same flow, synthetic, asserted
+```
+
+That count is the pilot. [`PILOT.md`](PILOT.md) is built around it in four
+gates — your number, shadow, one read path, decide — each of which can end the
+trial, and it asks you to write down what result would make you say no
+*before* you run the first command. `bench/pilot.py` fills every line of the
+report that a synthetic run honestly can, and leaves the ones only real
+traffic can answer blank on purpose. A proof of the mechanism is not evidence
+of demand.
 
 And to see why this is more than a soft-delete flag, run
 [`examples/rosetta.py`](examples/rosetta.py): soft-delete, TTL, a feature flag,
@@ -394,7 +397,7 @@ front door, the on-ramp and the pilot; everything else is reference material in
 |---|---|
 | [`AHA.md`](docs/AHA.md) | the one idea, derived in five steps with the measurements. Everything else is downstream |
 | [`ADOPTING.md`](ADOPTING.md) | the first hour: one collection, one read path, under ten lines — and what you do *not* get by stopping there |
-| [`PILOT.md`](PILOT.md) | the smallest honest trial: exit criteria and a report template — plus `bench/pilot.py`, the same flow against a real MongoDB with the report already filled |
+| [`PILOT.md`](PILOT.md) | the trial, in four gates that each can end it — your own number before you install, then shadow mode, then one read path. Plus `bench/pilot.py`, the same flow against a real MongoDB |
 
 **The argument** — why it is a real problem, at length and executable.
 
