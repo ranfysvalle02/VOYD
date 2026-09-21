@@ -36,7 +36,12 @@ class Notes:
 Point the boundary at your database:
 
 ```bash
+# a local mongod
 python tools/voyd_wire.py --config voydfile.py --target localhost:27017
+
+# or Atlas -- SRV is resolved, TLS is used, the primary is found
+python tools/voyd_wire.py --config voydfile.py \
+    --target "mongodb+srv://user:pass@cluster0.xxxxx.mongodb.net/"
 ```
 
 Then change one connection string. **That is the whole integration.** No
@@ -70,6 +75,14 @@ And the verb already in everybody's code gets the better meaning:
   the deadline          set, so the reaper collects the bytes
                         on the schedule they already had
 ```
+
+**Both delete verbs**, because they are different wire commands and covering
+one is worse than covering neither: `deleteOne`/`deleteMany` (`delete`) and
+`findOneAndDelete` (`findAndModify`), which still hands the caller the
+document back. And the verbs that *cannot* be a revocation — `drop`,
+`dropDatabase`, `renameCollection` — are **refused with a reason** rather than
+forwarded, because a drop takes the marks with it and leaves no evidence that
+anything was ever forgotten.
 
 Delete is a wish — eventually, best effort, unprovable. Refuse is a contract.
 They asked for the wish and got the contract, and the bytes still go, on the
@@ -186,11 +199,16 @@ refusal itself each turns it red.
 
 Known gaps, stated rather than discovered:
 
-- The proxy is a demonstration: no TLS termination, no pooling, one thread per
-  direction, compression negotiated away in the handshake so replies arrive
-  readable.
-- `on_delete="revoke"` covers `delete`. An `update` that overwrites a fact is
-  still an ordinary update, and a `findAndModify` delete is not intercepted.
+- The proxy does **not** terminate TLS from the client — that leg is
+  plaintext, so run it beside the application rather than across a network.
+  It speaks TLS *upstream*, which is what Atlas requires.
+- It finds the primary once, at startup. It does not follow an election, so
+  a failover means restarting it. A boundary is not a driver.
+- One thread per direction and no connection pooling.
+- `on_delete="revoke"` covers both delete verbs and refuses the three that
+  cannot be rewritten. An `update` that *overwrites* a fact is still an
+  ordinary update — that is mutation rather than forgetting, and treating it
+  otherwise would make every edit a revocation.
 - **Automatic encryption and server-side embedding are library-only.** Both
   survive the trim and neither is reachable through the wire: decryption needs
   the application's key context, which a proxy deliberately does not hold.

@@ -302,31 +302,16 @@ def revoke_instead_of_delete(raw: bytes, req_id: int, resp_to: int,
     if body.get("delete") != guard.collection or ident != "deletes":
         return None
 
-    spec = guard.spec
-    mark_field = next((r.field for r in spec.rules
-                       if getattr(r, "reversible", None) is False), None)
-    if mark_field is None:
+    pipeline = _forget_pipeline(guard.spec, "deleted via voyd-wire")
+    if not pipeline:
         return None          # nothing to mark with; forward the real delete
 
-    stamp = now()
-    at = spec.at_field
-    updates = []
-    for d in docs:
-        updates.append({
-            "q": d.get("q", {}),
-            # `limit: 1` means deleteOne; anything else is deleteMany.
-            "multi": d.get("limit", 0) == 0,
-            "u": [{"$set": {
-                mark_field: {"$literal": {"at": stamp,
-                                          "reason": "deleted via voyd-wire"}},
-                # A missing deadline is a *pinned* row, not an early one, so
-                # the two cases are separated rather than folded together --
-                # `$min` against null would pin an erased fact forever.
-                at: {"$cond": [{"$eq": [{"$type": f"${at}"}, "date"]},
-                               {"$min": [f"${at}", stamp]}, stamp]},
-                **{name: None for name in spec.derived_fields},
-            }}],
-        })
+    updates = [{
+        "q": d.get("q", {}),
+        # `limit: 1` means deleteOne; anything else is deleteMany.
+        "multi": d.get("limit", 0) == 0,
+        "u": pipeline,
+    } for d in docs]
 
     new_body = {("update" if k == "delete" else k): v for k, v in body.items()}
     if verbose:
@@ -335,6 +320,113 @@ def revoke_instead_of_delete(raw: bytes, req_id: int, resp_to: int,
               flush=True)
     guard.revoked += len(updates)
     return encode_sections(req_id, resp_to, flags, new_body, "updates", updates)
+
+
+def _forget_pipeline(spec, reason: str) -> list:
+    """The update `Admission.revoke()` writes, as a pipeline.
+
+    One definition, used by every verb this boundary rewrites, because two
+    spellings that produced different rows would be the drift this package
+    is about arriving through its own front door.
+    """
+    mark_field = next((r.field for r in spec.rules
+                       if getattr(r, "reversible", None) is False), None)
+    if mark_field is None:
+        return []
+    stamp = now()
+    at = spec.at_field
+    return [{"$set": {
+        mark_field: {"$literal": {"at": stamp, "reason": reason}},
+        # A missing deadline is a *pinned* row, not an early one, so the two
+        # cases are separated -- `$min` against null would pin an erased
+        # fact forever.
+        at: {"$cond": [{"$eq": [{"$type": f"${at}"}, "date"]},
+                       {"$min": [f"${at}", stamp]}, stamp]},
+        **{name: None for name in spec.derived_fields},
+    }}]
+
+
+def revoke_instead_of_find_and_delete(raw: bytes, req_id: int, resp_to: int,
+                                      guard: Guard, verbose: bool) -> bytes | None:
+    """`findOneAndDelete`, which is a different command and was a real hole.
+
+    `delete` and `findAndModify` are separate wire commands, so intercepting
+    the first and not the second gave a team the guarantee for one delete
+    verb and silently not for the other -- measured: `deleteOne` left the row
+    on disk and `findOneAndDelete` destroyed it, under the same policy, in
+    the same process. Partial enforcement that looks complete is the exact
+    failure this project exists to forbid, so it was worth more than a
+    footnote.
+
+    `remove: true` becomes `update: <the forget pipeline>`, which keeps the
+    verb's whole point -- the caller still gets the document back.
+    """
+    decoded = decode_op_msg(raw)
+    if decoded is None:
+        return None
+    flags, body = decoded
+    if body.get("findAndModify") != guard.collection or not body.get("remove"):
+        return None
+
+    pipeline = _forget_pipeline(guard.spec, "findOneAndDelete via voyd-wire")
+    if not pipeline:
+        return None
+
+    body = {k: v for k, v in body.items() if k != "remove"}
+    body["update"] = pipeline
+    # `new: false` is what a delete means here: the caller asked for the
+    # document as it was, which is also the only version that still reads.
+    body.setdefault("new", False)
+    if verbose:
+        print(f"  voyd: {guard.collection}: findOneAndDelete -> revoke; "
+              f"the row stays on disk", flush=True)
+    guard.revoked += 1
+    return encode_op_msg(req_id, resp_to, flags, body)
+
+
+# Commands that can make a guarded fact unreachable and that this boundary
+# cannot turn into a revocation. Refusing them is the whole point: a
+# guarantee that covers three verbs out of four is the silent hole this
+# package is named after, and the operator asked for `on_delete="revoke"`.
+UNREWRITABLE = {
+    "drop": "drops the whole collection, marks and all",
+    "dropDatabase": "drops the database",
+    "renameCollection": "moves the collection out from under the policy",
+}
+
+
+def refuse_unrewritable(raw: bytes, req_id: int, resp_to: int,
+                        guards: dict[str, Guard]) -> bytes | None:
+    """Answer the client with an error rather than let the fact be destroyed.
+
+    Only on a collection somebody declared `on_delete="revoke"` for. That
+    declaration is a statement that deletes here are supposed to become
+    revocations, and honouring it for `deleteOne` while passing `drop`
+    through would be the boundary lying by omission.
+    """
+    decoded = decode_op_msg(raw)
+    if decoded is None:
+        return None
+    _flags, body = decoded
+    for command, why in UNREWRITABLE.items():
+        target = body.get(command)
+        named = (target if isinstance(target, str)
+                 else next(iter(guards), None) if command == "dropDatabase"
+                 else None)
+        guard = guards.get(named) if named else None
+        if command not in body or guard is None or guard.on_delete != "revoke":
+            continue
+        print(f"  voyd: REFUSED {command} on {guard.collection}: {why}, and "
+              f"this collection declared on_delete='revoke'", flush=True)
+        return encode_op_msg(req_id, resp_to, 0, {
+            "ok": 0.0, "code": 8000, "codeName": "AtlasError",
+            "errmsg": (f"voyd-wire refuses {command} on "
+                       f"{guard.collection!r}: it {why}, which cannot be "
+                       f"expressed as a revocation. This collection declared "
+                       f"on_delete='revoke'; drop it through a direct "
+                       f"connection if you mean it."),
+        })
+    return None
 
 
 def delete_reply(raw: bytes, req_id: int, resp_to: int) -> bytes:
@@ -450,7 +542,17 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                 # every delete was forwarded and the rewrite below looked
                 # like it was not implemented.
                 head = decode_sections(raw)
-                target = guards.get(head[1].get("delete")) if head else None
+                body = head[1] if head else {}
+
+                # A destructive verb this boundary cannot express as a
+                # revocation is answered here rather than forwarded: the
+                # reply goes straight back and the server never sees it.
+                refusal = refuse_unrewritable(raw, req_id, req_id, guards)
+                if refusal is not None:
+                    src.sendall(refusal)
+                    continue
+
+                target = guards.get(body.get("delete"))
                 if target is not None and target.on_delete == "revoke":
                     swapped = revoke_instead_of_delete(
                         raw, req_id, resp_to, target, verbose)
@@ -458,6 +560,16 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                         raw = swapped
                         with lock:
                             rewritten.add(req_id)
+
+                # `findOneAndDelete` is a *different command*, and
+                # intercepting one and not the other gave a team the
+                # guarantee for one delete verb and silently not the other.
+                fam = guards.get(body.get("findAndModify"))
+                if fam is not None and fam.on_delete == "revoke":
+                    swapped = revoke_instead_of_find_and_delete(
+                        raw, req_id, resp_to, fam, verbose)
+                    if swapped is not None:
+                        raw = swapped
             elif opcode == OP_MSG:
                 with lock:
                     was_delete = resp_to in rewritten
@@ -482,28 +594,101 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                 pass
 
 
+def resolve_target(target: str) -> tuple[str, int, bool]:
+    """Where to connect, and whether it needs TLS.
+
+    ``--target`` takes either a bare ``host:port`` or a full MongoDB URI --
+    and the URI form is not a convenience. Atlas is `mongodb+srv`, which
+    means three things a raw TCP dial cannot do: the hosts live in DNS SRV
+    records, the connection must be TLS, and the port is not in the string.
+    Without this the boundary could front a container on localhost and
+    nothing anybody actually runs, which made "point it at your database"
+    true only of the database nobody has in production.
+
+    One node is chosen deliberately rather than the whole replica set. This
+    is a boundary, not a driver: it does not do topology discovery, failover
+    or read preference, and a client should reach it with
+    ``directConnection=true`` so it does not try to follow the hosts Atlas
+    advertises in `hello` straight past it.
+    """
+    if "://" not in target:
+        host, _, port = target.partition(":")
+        return host, int(port or 27017), False
+    try:
+        from pymongo.uri_parser import parse_uri
+    except ImportError:  # pragma: no cover - pymongo is the one dependency
+        raise SystemExit("a URI target needs pymongo installed")
+    parsed = parse_uri(target)
+    tls = bool(parsed["options"].get("tls", target.startswith("mongodb+srv")))
+
+    # The *primary*, not the first node DNS happened to return. A replica set
+    # answers reads on a secondary and rejects writes there with
+    # `NotWritablePrimary`, so fronting the wrong member gives a boundary
+    # that reads perfectly and fails every delete -- found exactly that way
+    # against a live cluster.
+    #
+    # Discovered once, at startup, with the driver that already knows how.
+    # This is a boundary and not a driver: it does not follow an election,
+    # and a failover means restarting it. That is a real limitation and it is
+    # better stated than discovered.
+    try:
+        from pymongo import MongoClient
+        with MongoClient(target, serverSelectionTimeoutMS=15000) as probe:
+            # `ping` first: the driver connects lazily, and `.primary` on an
+            # undiscovered topology is `None` -- which silently selected the
+            # first DNS node again and looked like this fix had not worked.
+            probe.admin.command("ping")
+            primary = probe.primary
+        if primary:
+            return primary[0], primary[1], tls
+    except Exception as exc:
+        print(f"voyd-wire: could not find the primary ({type(exc).__name__}); "
+              f"using the first node DNS returned. Writes may be refused by "
+              f"the server as `not primary`.", flush=True)
+
+    host, port = parsed["nodelist"][0]
+    return host, port, tls
+
+
+def connect_upstream(host: str, port: int, tls: bool) -> socket.socket:
+    sock = socket.create_connection((host, port), timeout=20)
+    sock.settimeout(None)
+    if not tls:
+        return sock
+    import ssl
+    ctx = ssl.create_default_context()
+    # `server_hostname` is what makes certificate validation mean anything
+    # against a named cluster; without it this would be an encrypted channel
+    # to whoever answered.
+    return ctx.wrap_socket(sock, server_hostname=host)
+
+
 def serve(listen_port: int, target: str, guards: dict[str, Guard],
           verbose: bool) -> None:
-    host, _, port = target.partition(":")
-    target_addr = (host, int(port or 27017))
+    host, port, tls = resolve_target(target)
+    target_addr = (host, port)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", listen_port))
     server.listen(64)
     print(f"voyd-wire: listening on 127.0.0.1:{listen_port} -> "
-          f"{target_addr[0]}:{target_addr[1]}")
-    print(f"voyd-wire: guarding {', '.join(sorted(guards)) or '(nothing)'}")
+          f"{target_addr[0]}:{target_addr[1]}"
+          + (" (TLS)" if tls else ""), flush=True)
+    for name, g in sorted(guards.items()):
+        print(f"voyd-wire: guarding {name}: {g.spec.describe()}"
+              + (", delete -> revoke" if g.on_delete == "revoke" else ""),
+              flush=True)
     print("voyd-wire: connect any driver to "
-          f"mongodb://localhost:{listen_port}/\n")
+          f"mongodb://localhost:{listen_port}/?directConnection=true\n",
+          flush=True)
 
     while True:
         client, _ = server.accept()
-        upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            upstream.connect(target_addr)
+            upstream = connect_upstream(host, port, tls)
         except OSError as exc:
-            print(f"voyd-wire: cannot reach {target}: {exc}")
+            print(f"voyd-wire: cannot reach {host}:{port}: {exc}")
             client.close()
             continue
         rewritten: set[int] = set()
@@ -522,7 +707,10 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--listen", type=int, default=27099, help="local port")
     ap.add_argument("--target", default="localhost:27017",
-                    help="the mongod/Atlas this fronts (host:port)")
+                    help="the database this fronts: `host:port`, or a full "
+                         "MongoDB URI. A `mongodb+srv://` URI is resolved "
+                         "through DNS and connected over TLS, which is what "
+                         "Atlas requires")
     ap.add_argument("--config", metavar="VOYDFILE",
                     help="a policy file declaring the rules per collection "
                          "(see voyd.declare). This is the whole of what you "
