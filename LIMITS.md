@@ -50,7 +50,7 @@ One was found by a type checker being pointed at code it had never read:
 `voyd_bench`'s inner coroutine claimed to return two floats and had been
 returning two lists since the spread was added, so a function reporting a
 median and a range was documented as reporting one number. That is the
-whole argument for §4's `tools/` change in one line -- the annotation was
+whole argument for §4's `voyd/wire/` change in one line -- the annotation was
 wrong for as long as nothing checked it.
 
 And one was a defect in the *suite* rather than in the code, which belongs
@@ -435,7 +435,7 @@ The 19 is a fixed executor pool, not per connection; it does not grow.
 `--workers N` pre-forks N processes over one inherited listening socket,
 which is the knob that uses the other cores.
 
-It scales close to linearly. `tools/voyd_bench.py`, 14 cores, 100 documents
+It scales close to linearly. `voyd/wire/bench.py`, 14 cores, 100 documents
 per batch with one in ten revoked:
 
 | | docs/s admitted | cores | us/doc | vs 1 worker |
@@ -682,7 +682,7 @@ the guarded side only.
 ## 4. Coverage
 
 477 tests, ~8,479 lines, against 7,626 lines of `voyd/` and 7,555 of
-`tools/`. `voyd/` shrank by ~600 and `tools/` grew by ~500 in the same
+`voyd/wire/`. `voyd/` shrank by ~600 and `voyd/wire/` grew by ~500 in the same
 pass: the library front door was deleted and the guarantee it was the last
 holder of moved to the wire. A cut that only subtracted would have been a
 smaller number and a smaller product. Well-targeted rather than thorough: the coverage is by *claim*,
@@ -762,7 +762,7 @@ no `PYTHONPATH` -- against this repository's own source. The claim that it
 costs a stranger nothing to try is worth exactly as much as the last time
 somebody tried it that way.
 
-**`mypy` reads `tools/` now, and the exclusion is gone.** This entry used to
+**`mypy` reads `voyd/wire/` now, and the exclusion is gone.** This entry used to
 explain why it did not, and the explanation was a count: *`voyd_wire.py` has
 31 errors*. By the time anybody re-measured it was 59, in a file that had
 grown to 3,180 lines and holds the concurrency, the failover and the
@@ -1004,7 +1004,7 @@ judgement call -- it is two different operations wearing one sentence.
 `deadline()`, an index leading with every `tenant()`, an `autoEmbed` field
 naming the model every `auto_embed()` declares, a `binData` validator behind
 every `sealed()`. `--verify-only` exits instead of serving, which is the form
-a deploy gate wants. See `tools/voyd_preflight.py`; the argument for it is
+a deploy gate wants. See `voyd/wire/preflight.py`; the argument for it is
 `capabilities.py`'s own -- a claim about software this package does not ship,
 with no expiry and nobody responsible for it, is asked rather than assumed.
 
@@ -1199,7 +1199,7 @@ That mattered more than a missing feature, because `CLAIMS.md` carries it
 as a headline and **a reader of the README had no way to know the claim
 did not hold through the connection string the README tells them to use.**
 The claim was true; the artifact it was true of was not the one being
-recommended. It is now true of both, and `tools/voyd_cascade.py` is where
+recommended. It is now true of both, and `voyd/wire/cascade.py` is where
 the wire's half lives.
 
 **The decision, and why.** A cascade is a multi-document write derived

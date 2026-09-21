@@ -24,8 +24,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import voyd_wire as w  # noqa: E402
+from voyd.wire import proxy as w
 
 from .conftest import free_port, mongo_host  # noqa: E402
 
@@ -175,7 +174,7 @@ def test_a_tls_client_gets_the_same_refusal(db, tmp_path):
                       "    tenant_id = tenant()\n")
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", mongo_host(),
          "--tls-cert", str(cert), "--tls-key", str(key)],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -205,7 +204,7 @@ def test_connections_past_the_limit_are_closed_rather_than_queued(db, tmp_path):
                       "class N:\n    expire_at = deadline()\n")
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", mongo_host(),
          "--max-connections", "2"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -305,7 +304,7 @@ def test_the_boundary_drains_on_sigterm_and_says_what_it_did(db, tmp_path):
                       "    tenant_id = tenant()\n")
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", mongo_host()],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:

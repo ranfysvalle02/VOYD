@@ -28,6 +28,6 @@ COPY . .
 # `voydfile.py` over the example one and point `--target` at your cluster.
 EXPOSE 27099
 
-CMD ["uv", "run", "python", "tools/voyd_wire.py", \
+CMD ["uv", "run", "voyd-wire", \
      "--config", "voydfile.py", "--listen", "27099", \
      "--target", "host.docker.internal:27017"]

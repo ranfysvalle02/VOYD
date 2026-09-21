@@ -41,7 +41,7 @@ jobs:
         run: uv sync --all-extras
 
       - name: Lint
-        run: uv run --no-sync ruff check voyd/ tools/ tests/ examples/ scanner/
+        run: uv run --no-sync ruff check voyd/ tests/ examples/ scanner/
 
       - name: Types, because the wheel ships py.typed
         # `voyd/py.typed` tells every downstream checker that these
@@ -80,7 +80,7 @@ jobs:
         # judges code nobody on this side has seen, so the claim that it
         # needs no install is tested by uninstalling everything: a bare
         # interpreter, no `uv sync`, no `pip install`, no PYTHONPATH.
-        run: python3 scanner/voyd_scan --strict voyd/ tools/ scanner/
+        run: python3 scanner/voyd_scan --strict voyd/ scanner/
 
       - name: Importing voyd is the policy vocabulary and one driver
         run: |
@@ -94,7 +94,7 @@ jobs:
           assert not unexpected, f'importing voyd pulled {sorted(unexpected)}'
           print('clean:', sorted(voyd.__all__))"
 
-      - name: The wheel builds and the cut surfaces stayed cut
+      - name: The wheel builds, ships the proxy, and exposes no handle
         run: |
           uv build
           uv venv /tmp/wheelcheck
@@ -110,14 +110,20 @@ jobs:
               except ImportError:
                   continue
               raise AssertionError(f'{gone} is back in the wheel')
-          # The assertion that inverted. This line used to check that
-          # \`from voyd import Engine\` *worked*. The library front door is
-          # the thing that was cut, so it now has to be absent -- and a
-          # wheel is where a re-export sneaks back without anyone noticing.
+          # There is one way to use this and it is not an import. A
+          # re-export that put an application-facing handle back would
+          # undo that silently, and a wheel is where it would happen.
           for name in ('Engine', 'Model'):
               assert not hasattr(voyd, name), f'{name} is back in the wheel'
               assert not hasattr(voyd.engine, name), f'voyd.engine.{name} is back'
-          print('wheel: the policy vocabulary imports, the front door is gone')"
+          # And the product is *in* the wheel. This is the other half of the
+          # same assertion: a distribution that ships the vocabulary to write
+          # a policy and nothing that can serve one is not the artifact.
+          import voyd.wire, voyd.wire.proxy, voyd.wire.seal, voyd.wire.cascade
+          assert callable(voyd.wire.main)
+          print('wheel: the policy vocabulary imports, the proxy ships')"
+          test -x /tmp/wheelcheck/bin/voyd-wire
+          /tmp/wheelcheck/bin/voyd-wire --help > /dev/null
 
       - name: End to end, real driver through a real boundary
         # Atlas Local is a real mongod and a real mongot, not a mock. The

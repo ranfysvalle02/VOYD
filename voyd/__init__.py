@@ -21,7 +21,7 @@ Declare the rules once, in a file that is not your application::
         forgotten = revocable()
         tenant_id = tenant()
 
-    # then: python tools/voyd_wire.py --config voydfile.py --target ...
+    # then: voyd-wire --config voydfile.py --target localhost:27017
 
 No code. Any driver in any language pointed at that port cannot read a
 forgotten fact, because the boundary is not something a caller can forget

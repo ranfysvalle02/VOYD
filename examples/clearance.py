@@ -131,7 +131,7 @@ def _run_against(name: str, tag: str, legal: str, desk: str) -> None:
         path.write_text(POLICY)
         port = free_port()
         proc = subprocess.Popen(
-            [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+            [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
              "--listen", str(port), "--target", RS_URI],
             cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True)

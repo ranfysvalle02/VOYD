@@ -20,9 +20,9 @@ next read, still on disk for the investigation, and its deadline is pulled in
 so the reaper collects it on the schedule it already had. The driver is told
 `deleted_count=1`, which is true in the only sense the caller cared about.
 
-This file asserts rather than prints-and-hopes. There is no test suite in this
-repository at the moment -- see the README -- so the examples are the
-executable evidence, and an example that cannot fail is a screenshot.
+This file asserts rather than prints-and-hopes. The examples are
+executable evidence and CI runs every one of them, so an example that
+cannot fail is a screenshot.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def main() -> None:
     port = _free_port()
     host = URI.split("//", 1)[1].split("/", 1)[0]
     proxy = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", "voydfile.py",
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", "voydfile.py",
          "--listen", str(port), "--target", host],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:

@@ -57,7 +57,7 @@ was *destroyed* (an erasure) or merely *unreachable* (an outage). Those look
 identical at the driver and mean opposite things, and a deployment that
 reported one as the other would be paging on a success or ignoring a failure.
 
-Deliberately outside `voyd/`, like `voyd_fanout.py`: nothing here is
+Deliberately outside `voyd/`, like `fanout.py`: nothing here is
 importable package surface.
 """
 

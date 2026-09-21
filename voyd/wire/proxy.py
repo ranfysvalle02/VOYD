@@ -2,7 +2,7 @@
 """A MongoDB connection that cannot serve a fact you have forgotten.
 
     # terminal 1 -- rules in a file that is not your application
-    python tools/voyd_wire.py --config voydfile.py --target localhost:27018
+    voyd-wire --config voydfile.py --target localhost:27018
 
     # terminal 2 -- any driver, any language
     mongosh mongodb://localhost:27099/demo
@@ -45,7 +45,7 @@ primary, strict `secondary` a client-side error rather than a quiet primary
 read), retryable writes stay armed because `rewrite_topology` keeps
 `setName`, and sessions and transactions are forwarded intact. `--fan-out`
 ranks reads on secondaries and re-reads their marks from the primary before
-releasing them -- see `voyd_fanout.py` for why the obvious version of that
+releasing them -- see `fanout.py` for why the obvious version of that
 is unsafe.
 
 **Concurrency is the transport's problem, not the boundary's.** Every
@@ -84,12 +84,12 @@ try:
 except ImportError:  # pragma: no cover - the one dependency, and it is pymongo's
     sys.exit("pip install pymongo   (for the bson library)")
 
-import voyd_cascade
-import voyd_ensure
-import voyd_fanout
-import voyd_preflight
-import voyd_seal
-import voyd_metrics
+from . import cascade
+from . import ensure
+from . import fanout
+from . import preflight
+from . import seal
+from . import metrics
 from voyd.declare import OPTIONS, load
 from voyd.engine import Deadline, revoked
 from voyd.engine.time import now
@@ -134,7 +134,7 @@ class Guard:
         # A `Guard` is still constructible with no database at all -- the
         # per-document check has never needed one, and that is what made it
         # movable to a wire.
-        self.cascade: "voyd_cascade.Cascade | None" = None
+        self.cascade: "cascade.Cascade | None" = None
         # Refusals that happened during decryption rather than during
         # `reachable()`. Counted on the guard so one collection has one
         # tally: an operator asking "what did this refuse" should not have
@@ -1436,8 +1436,8 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
 
 async def erase_first(body: Mapping, statements: list,
                       guards: dict[str, Guard],
-                      vault: "voyd_seal.Vault | None", verbose: bool,
-                      meter: "voyd_metrics.Meter | None" = None) -> None:
+                      vault: "seal.Vault | None", verbose: bool,
+                      meter: "metrics.Meter | None" = None) -> None:
     """If this client is destroying a key, revoke its documents first.
 
     Sequenced here, on the request, rather than left to the operator to
@@ -1487,8 +1487,8 @@ async def cascade_first(raw: bytes, guard: Guard, database: str,
     ``None`` when there is no lineage here and the bytes should be left
     alone.
     """
-    cascade = guard.cascade
-    if cascade is None or not guard.spec.lineage_field:
+    downstream = guard.cascade
+    if downstream is None or not guard.spec.lineage_field:
         return None
     decoded = decode_sections(raw)
     if decoded is None:
@@ -1504,9 +1504,9 @@ async def cascade_first(raw: bytes, guard: Guard, database: str,
     pins = []
     for clause in docs:
         query = clause.get("q", {})
-        ids = await cascade.resolve(database, guard, query,
+        ids = await downstream.resolve(database, guard, query,
                                     one=clause.get("limit", 0) == 1)
-        guard.cascaded += await cascade.mark_descendants(
+        guard.cascaded += await downstream.mark_descendants(
             database, guard, ids, pipeline, query)
         pins.append(ids)
     return pins
@@ -1521,8 +1521,8 @@ async def cascade_first_for_one(raw: bytes, guard: Guard, database: str,
     silently not for `findOneAndDelete`. The lineage half is not going to
     repeat that on its first commit.
     """
-    cascade = guard.cascade
-    if cascade is None or not guard.spec.lineage_field:
+    downstream = guard.cascade
+    if downstream is None or not guard.spec.lineage_field:
         return None
     decoded = decode_op_msg(raw)
     if decoded is None:
@@ -1538,9 +1538,9 @@ async def cascade_first_for_one(raw: bytes, guard: Guard, database: str,
     # `findAndModify` with a `sort` means the caller cares which one, so the
     # resolution has to honour it or the cascade and the revocation pick
     # different documents -- the same defect `pins` exists to prevent.
-    ids = await cascade.resolve(database, guard, query, one=True,
+    ids = await downstream.resolve(database, guard, query, one=True,
                                 sort=body.get("sort"))
-    guard.cascaded += await cascade.mark_descendants(
+    guard.cascaded += await downstream.mark_descendants(
         database, guard, ids, pipeline, query)
     return ids
 
@@ -1583,8 +1583,8 @@ async def derive_on_insert(raw: bytes, req_id: int, resp_to: int,
     guard = guards.get(name) if isinstance(name, str) else None
     if guard is None or ident != "documents" or not docs:
         return raw, None
-    cascade, field = guard.cascade, guard.spec.lineage_field
-    if cascade is None or not field:
+    downstream, field = guard.cascade, guard.spec.lineage_field
+    if downstream is None or not field:
         return raw, None
     if not any(isinstance(d.get(field), (list, tuple)) and d.get(field)
                for d in docs):
@@ -1598,7 +1598,7 @@ async def derive_on_insert(raw: bytes, req_id: int, resp_to: int,
         if not isinstance(parents, (list, tuple)) or not parents:
             prepared.append(doc)
             continue
-        closure, deadlines, broken = await cascade.parentage(
+        closure, deadlines, broken = await downstream.parentage(
             database, guard, list(parents), doc)
         if broken:
             return raw, _refuse(
@@ -1642,8 +1642,8 @@ def seal_refusal(req_id: int, resp_to: int, why: str) -> bytes:
 
 async def judge(raw: bytes, req_id: int, resp_to: int,
                 guards: dict[str, Guard], verbose: bool,
-                vault: "voyd_seal.Vault | None",
-                meter: "voyd_metrics.Meter | None" = None,
+                vault: "seal.Vault | None",
+                meter: "metrics.Meter | None" = None,
                 caller: dict | None = None) -> bytes:
     """`enforce`, plus decryption for the collections that declared it.
 
@@ -1728,9 +1728,9 @@ class _Pump(TypedDict):
     rewritten: set[int]
     upstream: "Upstream | None"
     advertise: str | None
-    vault: "voyd_seal.Vault | None"
+    vault: "seal.Vault | None"
     embeds: Mapping | None
-    meter: "voyd_metrics.Meter | None"
+    meter: "metrics.Meter | None"
     # Shared by both directions, like `rewritten` and for the same reason:
     # the request side asks who this connection is, and the reply side is
     # the one that sees the answer come back. Not named `back` -- `pump`'s
@@ -1750,9 +1750,9 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                rewritten: set[int],
                upstream: Upstream | None = None,
                advertise: str | None = None,
-               vault: "voyd_seal.Vault | None" = None,
+               vault: "seal.Vault | None" = None,
                embeds: Mapping | None = None,
-               meter: "voyd_metrics.Meter | None" = None,
+               meter: "metrics.Meter | None" = None,
                back_channel: "Backchannel | None" = None,
                who: "CallerIdentity | None" = None,
                reduced: set[int] | None = None,
@@ -1935,7 +1935,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         try:
                             resealed = await vault.seal_command(
                                 dict(again[1]), again[2], again[3])
-                        except voyd_seal.SealError as exc:
+                        except seal.SealError as exc:
                             if meter is not None:
                                 meter.seal_refused_writes_total += 1
                             await send(back, seal_refusal(
@@ -2060,7 +2060,7 @@ class Upstream:
     """
 
     def __init__(self, target: str, *, verbose: bool = True,
-                 meter: "voyd_metrics.Meter | None" = None):
+                 meter: "metrics.Meter | None" = None):
         self.target = target
         self.verbose = verbose
         self.meter = meter
@@ -2209,13 +2209,13 @@ class Secondaries:
     """
 
     def __init__(self, uri: str, *, verbose: bool = True,
-                 meter: "voyd_metrics.Meter | None" = None,
+                 meter: "metrics.Meter | None" = None,
                  give_up: float = 1.0):
         self.uri = uri
         # Shared across every connection this worker serves. A per
         # connection sample would be a handful of reads on a short-lived
         # client, which is not enough to withdraw a collection on.
-        self.payoff = voyd_fanout.Payoff(ratio=give_up)
+        self.payoff = fanout.Payoff(ratio=give_up)
         self.verbose = verbose
         self.meter = meter
         self._nodes: list[tuple[str, int, bool]] = []
@@ -2571,9 +2571,9 @@ class Live:
 async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter,
                   upstream: Upstream, guards: dict[str, Guard], verbose: bool,
                   live: Live, advertise: str | None = None,
-                  vault: "voyd_seal.Vault | None" = None,
+                  vault: "seal.Vault | None" = None,
                   embeds: Mapping | None = None,
-                  meter: "voyd_metrics.Meter | None" = None,
+                  meter: "metrics.Meter | None" = None,
                   half_close_seconds: float = 10.0) -> None:
     """One client connection, start to finish, as one coroutine pair.
 
@@ -2969,8 +2969,8 @@ class Conversation:
             return raw
 
         self.retry.pop(resp_to, None)
-        ids = voyd_fanout.needed_ids(batch)
-        fields = voyd_fanout.verdict_fields(guard)
+        ids = fanout.needed_ids(batch)
+        fields = fanout.verdict_fields(guard)
         began = time.monotonic()
         # How long the secondary took, measured from the moment `route`
         # sent the command. A *duration*, which is worth saying because the
@@ -3010,7 +3010,7 @@ class Conversation:
                   f"marks", flush=True)
             kept: list = []
         else:
-            judgeable, originals = voyd_fanout.merge_marks(batch, fresh, fields)
+            judgeable, originals = fanout.merge_marks(batch, fresh, fields)
             allowed = guard.filter(judgeable, self.who.claims)
             try:
                 permitted = {d["_id"] for d in allowed}
@@ -3098,9 +3098,9 @@ def authenticating(body: Mapping) -> tuple[bool, tuple[str, str] | None]:
 async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 upstream: Upstream, secondaries: Secondaries,
                 guards: dict[str, Guard], verbose: bool,
-                rewritten: set[int], vault: "voyd_seal.Vault | None",
+                rewritten: set[int], vault: "seal.Vault | None",
                 embeds: Mapping | None,
-                meter: "voyd_metrics.Meter | None") -> str:
+                meter: "metrics.Meter | None") -> str:
     """client -> upstream, choosing which upstream each message goes to.
 
     Every write rewrite here is the same call the single-upstream pump
@@ -3199,7 +3199,7 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                     try:
                         resealed = await vault.seal_command(
                             dict(again[1]), again[2], again[3])
-                    except voyd_seal.SealError as exc:
+                    except seal.SealError as exc:
                         if meter is not None:
                             meter.seal_refused_writes_total += 1
                         await conv.to_client(
@@ -3240,7 +3240,7 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 more = body.get("getMore")
                 if isinstance(more, int):
                     dest = conv.home.get(more, "primary")
-                elif (shape := voyd_fanout.routes_to_secondary(
+                elif (shape := fanout.routes_to_secondary(
                         body, guards, secondaries.payoff.withdrawn(),
                         frozenset(vault.sealed) if vault else frozenset())):
                     if conv.secondary_w is None:
@@ -3256,7 +3256,7 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                         # sees one node and cannot have asked for this, so
                         # the boundary asks on its behalf -- which is the
                         # whole of what `--fan-out` opts into.
-                        if head is not None and voyd_fanout.read_preference_of(
+                        if head is not None and fanout.read_preference_of(
                                 body) is None:
                             patched = dict(body)
                             patched["$readPreference"] = {
@@ -3289,8 +3289,8 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
 async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
                   source: str, guards: dict[str, Guard], verbose: bool,
                   rewritten: set[int], upstream: Upstream | None,
-                  advertise: str | None, vault: "voyd_seal.Vault | None",
-                  meter: "voyd_metrics.Meter | None") -> str:
+                  advertise: str | None, vault: "seal.Vault | None",
+                  meter: "metrics.Meter | None") -> str:
     """One upstream -> the client, with the verdict taken on the way.
 
     Two of these run per fanned-out connection and they write to the same
@@ -3464,7 +3464,7 @@ async def close(writer: asyncio.StreamWriter) -> None:
 
 
 def tally(guards: dict[str, Guard],
-          vault: "voyd_seal.Vault | None" = None) -> dict:
+          vault: "seal.Vault | None" = None) -> dict:
     """What one process actually did, as data rather than as a print.
 
     Separated from the printing because with `--workers` the counters live
@@ -3612,7 +3612,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
               "directConnection=true or they will walk past this boundary",
               flush=True)
     if vault_spec:
-        for line in voyd_seal.announce(vault_spec):
+        for line in seal.announce(vault_spec):
             print(line, flush=True)
     for name, model in sorted((auto_embed or {}).items()):
         # Worth a line of its own: this is the only declaration that makes
@@ -3632,9 +3632,9 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
     # happens here and not lazily on the first scrape.
     slab = meters = None
     if metrics_port is not None:
-        layout = voyd_metrics.Layout(tuple(guards))
-        slab = voyd_metrics.Slab(workers, layout)
-        meters = [voyd_metrics.Meter(layout, slab, i) for i in range(workers)]
+        layout = metrics.Layout(tuple(guards))
+        slab = metrics.Slab(workers, layout)
+        meters = [metrics.Meter(layout, slab, i) for i in range(workers)]
         print(f"voyd-wire: metrics on http://127.0.0.1:{metrics_port}/metrics"
               f" (loopback only, always)", flush=True)
 
@@ -3648,7 +3648,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
         return
 
     if slab is not None and metrics_port is not None:
-        voyd_metrics.serve(metrics_port, slab)
+        metrics.serve(metrics_port, slab)
     counts = asyncio.run(_run(sock, ssl_ctx, target, guards, verbose,
                               max_connections=max_connections,
                               drain_seconds=drain_seconds,
@@ -3665,7 +3665,7 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
                advertise: str | None, fan_out: str | None = None,
                give_up: float = 1.0, vault_spec: dict | None = None,
                auto_embed: dict | None = None,
-               meter: "voyd_metrics.Meter | None" = None) -> dict:
+               meter: "metrics.Meter | None" = None) -> dict:
     """One worker: accept, serve, drain, and report what it counted."""
     upstream = Upstream(target, verbose=verbose, meter=meter)
     # Built per worker, after the fork, because an encrypting handle owns
@@ -3675,7 +3675,7 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
     # of them a different key for the same tenant, and a document written
     # through one worker would be unreadable through the next.
     embeds = dict(auto_embed or {})
-    vault = voyd_seal.Vault(**vault_spec) if vault_spec else None
+    vault = seal.Vault(**vault_spec) if vault_spec else None
     if vault is not None:
         await vault.open()
     # Per worker, after the fork, for the same reason the vault is: it owns
@@ -3683,20 +3683,20 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
     # guards rather than threaded through a dozen signatures because it is
     # a property of a *collection that declares lineage*, and every site
     # that needs it already has that collection's guard in hand.
-    cascade = None
-    if voyd_cascade.Cascade.wanted(guards):
-        cascade = voyd_cascade.Cascade(_vault_uri(target), verbose=verbose)
-        await cascade.open()
+    lineage = None
+    if cascade.Cascade.wanted(guards):
+        lineage = cascade.Cascade(_vault_uri(target), verbose=verbose)
+        await lineage.open()
         for g in guards.values():
             if g.spec.lineage_field:
-                g.cascade = cascade
+                g.cascade = lineage
     secondaries = (Secondaries(fan_out, verbose=verbose, meter=meter,
                                give_up=give_up)
                    if fan_out else None)
     live = Live()
     stopping = asyncio.Event()
 
-    async def flushing(meter: "voyd_metrics.Meter") -> None:
+    async def flushing(meter: "metrics.Meter") -> None:
         """Copy this worker's counters into shared memory, once a second.
 
         On the timer rather than on the message path: refusal costs about
@@ -3817,8 +3817,8 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         # down on the way out. A boundary that argues at length about
         # holding a handle you cannot close should not leave one open.
         await vault.aclose()
-    if cascade is not None:
-        await cascade.aclose()
+    if lineage is not None:
+        await lineage.aclose()
     return counted
 
 
@@ -3826,8 +3826,8 @@ def supervise(sock: socket.socket, workers: int, target: str,
               guards: dict[str, Guard], verbose: bool, *,
               ssl_ctx: "ssl.SSLContext | None", max_connections: int,
               drain_seconds: float, advertise: str | None,
-              slab: "voyd_metrics.Slab | None" = None,
-              meters: "list[voyd_metrics.Meter] | None" = None,
+              slab: "metrics.Slab | None" = None,
+              meters: "list[metrics.Meter] | None" = None,
               metrics_port: int | None = None,
               fan_out: str | None = None, give_up: float = 1.0,
               vault_spec: dict | None = None,
@@ -3929,7 +3929,7 @@ def supervise(sock: socket.socket, workers: int, target: str,
     # loop and nothing else to do, so a slow scrape costs nothing that was
     # going to refuse a document.
     if slab is not None and metrics_port is not None:
-        voyd_metrics.serve(metrics_port, slab)
+        metrics.serve(metrics_port, slab)
 
     def forward(signum, _frame):
         nonlocal stopping
@@ -4057,7 +4057,7 @@ def _vault_from(args) -> dict | int:
       and costs a credential, so it is a mistake worth naming.
     - a `--kms` this cannot parse.
     """
-    declared = voyd_seal.sealed_from(OPTIONS)
+    declared = seal.sealed_from(OPTIONS)
     if declared and not args.key_vault:
         print("voyd-wire: this policy declares sealed() on "
               + ", ".join(sorted(declared))
@@ -4095,7 +4095,7 @@ def _ensure(args, guards: dict[str, Guard]) -> int:
     boot step; the pair is evidence.
     """
     try:
-        lines = asyncio.run(voyd_ensure.provision(
+        lines = asyncio.run(ensure.provision(
             _vault_uri(args.target), args.ensure, guards, OPTIONS,
             wait_s=args.ensure_wait))
     except Exception as exc:                                  # noqa: BLE001
@@ -4119,19 +4119,19 @@ def _preflight(args, guards: dict[str, Guard]) -> int:
     guarantees the boundary is about to start making, not in a metric
     somebody reads afterwards.
     """
-    found, why = asyncio.run(voyd_preflight.inspect(
+    found, why = asyncio.run(preflight.inspect(
         _vault_uri(args.target), args.verify,
-        voyd_preflight.declarations(guards, OPTIONS)))
-    for line in voyd_preflight.report(found, why):
+        preflight.declarations(guards, OPTIONS)))
+    for line in preflight.report(found, why):
         print(line, flush=True)
-    if voyd_preflight.fatal(found) and not args.verify_only:
+    if preflight.fatal(found) and not args.verify_only:
         print("voyd-wire: refusing to start. The boundary would enforce a "
               "policy this cluster cannot satisfy, and it would do it one "
               "query at a time -- which is a worse way to find out than "
               "this. Fix the line above, or drop --verify to start anyway",
               file=sys.stderr)
         return 3
-    if voyd_preflight.fatal(found):
+    if preflight.fatal(found):
         return 3
     print(flush=True)
     return 0

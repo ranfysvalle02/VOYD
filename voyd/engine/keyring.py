@@ -773,7 +773,7 @@ async def why_undecryptable(keyring, scope, cache: dict) -> str:
 
     **A module function rather than a method, because there are now two
     callers and they must not drift.** ``Sealing.unseal`` asks it for a
-    library read; ``tools/voyd_seal.py`` asks it for a read crossing the
+    library read; ``voyd/wire/seal.py`` asks it for a read crossing the
     wire. A document refused as ``unrecoverable`` through one and
     ``key_unavailable`` through the other would be the same deployment
     reporting an erasure and an outage for one event, and whichever answer

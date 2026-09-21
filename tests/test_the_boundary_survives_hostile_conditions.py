@@ -27,9 +27,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
 
-import voyd_wire as w  # noqa: E402
+from voyd.wire import proxy as w
 
 from .conftest import MONGO_URI, free_port, mongo_host  # noqa: E402
 
@@ -41,7 +40,7 @@ POLICY = ("from voyd import guard, deadline, revocable\n"
           "    expire_at = deadline()\n"
           "    forgotten = revocable()\n")
 
-ASK = None          # built lazily; encoding needs voyd_wire imported
+ASK = None          # built lazily; encoding needs the proxy imported
 
 
 def ask() -> bytes:
@@ -76,7 +75,7 @@ def wired(tmp_path):
 
     Deliberately not `mongod`: these tests are about the transport, and a
     real database makes them slower, flakier, and no more truthful about
-    sockets. `voyd_bench`'s upstream answers every request with one
+    sockets. `voyd.wire.bench`'s upstream answers every request with one
     pre-encoded batch.
     """
     started = []
@@ -84,7 +83,7 @@ def wired(tmp_path):
     def go(*extra, docs=200, pad=1000):
         up_port, listen = free_port(), free_port()
         upstream = subprocess.Popen(
-            [sys.executable, "tools/voyd_bench.py", "--role", "upstream",
+            [sys.executable, "-m", "voyd.wire.bench", "--role", "upstream",
              "--port", str(up_port), "--docs", str(docs),
              "--refuse-every", "10", "--pad", str(pad),
              "--upstream-procs", "1"],
@@ -95,7 +94,7 @@ def wired(tmp_path):
         policy = tmp_path / "voydfile.py"
         policy.write_text(POLICY)
         proxy = subprocess.Popen(
-            [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+            [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
              "--listen", str(listen), "--target", f"127.0.0.1:{up_port}",
              "--quiet", *extra],
             cwd=ROOT, start_new_session=True,
@@ -390,7 +389,7 @@ def test_the_failover_signal_fires_on_a_real_election(tmp_path):
                       "    forgotten = revocable()\n")
     listen = free_port()
     proxy = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(listen), "--target", mongo_host()],
         cwd=ROOT, start_new_session=True,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

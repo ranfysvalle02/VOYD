@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """How much does refusal cost, and does it scale? Measured, not asserted.
 
-    python tools/voyd_bench.py                 # the whole sweep
-    python tools/voyd_bench.py --workers 1,4    # just these
-    python tools/voyd_bench.py --seconds 20     # longer, less noise
+    voyd-bench                  # the whole sweep
+    voyd-bench --workers 1,4    # just these
+    voyd-bench --seconds 20     # longer, less noise
 
 Every performance number in `LIMITS.md` comes from here, so it is in the
 repository rather than in a gist: a benchmark nobody else can run is an
@@ -53,10 +53,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+from . import proxy as w
 
-import voyd_wire as w  # noqa: E402
+ROOT = Path(__file__).resolve().parents[2]
 
 COLLECTION = "bench"
 NAMESPACE = f"benchdb.{COLLECTION}"
@@ -321,7 +320,8 @@ def run(args) -> int:
 
     up_port = args.port
     upstream = subprocess.Popen(
-        [sys.executable, __file__, "--role", "upstream", "--port", str(up_port),
+        [sys.executable, "-m", "voyd.wire.bench",
+         "--role", "upstream", "--port", str(up_port),
          "--docs", str(args.docs), "--refuse-every", str(args.refuse_every),
          "--pad", str(args.pad), "--dims", str(args.dims),
          "--upstream-procs", str(args.upstream_procs)],
@@ -352,7 +352,7 @@ def run(args) -> int:
 
             listen = _free_port()
             proxy = subprocess.Popen(
-                [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+                [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
                  "--listen", str(listen), "--target", f"127.0.0.1:{up_port}",
                  "--max-connections", str(max(args.clients * 4, 64)),
                  "--workers", str(workers), "--quiet"]
@@ -472,9 +472,9 @@ def seal_cost(uri: str, docs: int, pad: int, runs: int) -> int:
     import asyncio
     import statistics
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import voyd_seal
     from voyd.engine.custody import Ephemeral
+
+    from . import seal
 
     database = f"voyd_bench_seal_{os.getpid()}"
 
@@ -484,7 +484,7 @@ def seal_cost(uri: str, docs: int, pad: int, runs: int) -> int:
     # range was documented as returning one number. Every `min`/`max`/
     # `median` call below is a type error against the old signature.
     async def go() -> tuple[list[float], list[float]]:
-        vault = voyd_seal.Vault(uri, database=database,
+        vault = seal.Vault(uri, database=database,
                                 sealed={"notes": (("text",), "tenant_id")},
                                 custody=Ephemeral())
         await vault.open()

@@ -36,7 +36,6 @@ from .conftest import RS_URI, free_port
 
 pymongo = pytest.importorskip("pymongo")
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
 
 pytestmark = pytest.mark.needs_mongo
 
@@ -58,7 +57,7 @@ def _wire(tmp_path, target: str, *extra: str):
     policy.write_text(POLICY)
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", target, *extra],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -264,7 +263,7 @@ def test_a_claim_the_wire_cannot_supply_is_announced_at_boot():
     file. Announced at boot instead, which is the only place it is cheap
     to notice.
     """
-    import voyd_wire as w
+    from voyd.wire import proxy as w
 
     from voyd.engine.admission.rules import Clearance, Deadline, revoked
     from voyd.engine.admission.spec import AdmissionSpec
@@ -281,7 +280,7 @@ def test_a_claim_the_wire_cannot_supply_is_announced_at_boot():
 def test_a_groups_rule_is_not_announced_because_it_can_be_answered():
     """The other half of the control. A warning that fired on the rule
     this boundary *can* enforce would train people to ignore it."""
-    import voyd_wire as w
+    from voyd.wire import proxy as w
 
     from voyd.engine.admission.rules import Restricted
     from voyd.engine.admission.spec import AdmissionSpec
@@ -293,7 +292,7 @@ def test_a_groups_rule_is_not_announced_because_it_can_be_answered():
 
 def test_the_claims_the_wire_supplies_are_what_connection_status_gives():
     """The two lists have to agree or the warning above is decoration."""
-    import voyd_wire as w
+    from voyd.wire import proxy as w
 
     claims = w.claims_from({"authInfo": {
         "authenticatedUsers": [{"user": "alice", "db": "admin"}],
@@ -308,7 +307,7 @@ def test_an_unauthenticated_connection_yields_no_groups():
     """A deployment without auth answers with empty lists, and that is a
     real answer rather than a failure. The rules then refuse, which is
     correct: nobody is not everybody."""
-    import voyd_wire as w
+    from voyd.wire import proxy as w
 
     claims = w.claims_from({"authInfo": {"authenticatedUsers": [],
                                          "authenticatedUserRoles": []}})

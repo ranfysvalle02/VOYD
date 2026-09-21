@@ -81,7 +81,7 @@ def _wire(tmp_path, policy: str, target: str, *extra):
     path.write_text(policy)
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
          "--listen", str(port), "--target", target, *extra],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -293,7 +293,7 @@ def test_the_server_embeds_and_refusal_still_holds(atlas, tmp_path):
     from voyd.engine.search import SearchSpec
 
     # The index name comes from the spec `voyd-wire --ensure` builds, not
-    # from a literal. `tools/voyd_ensure.py` does not override
+    # from a literal. `voyd/wire/ensure.py` does not override
     # `vector_index`, so it is the `SearchSpec` default -- and a literal
     # here was wrong on the first run, which reads as "mongot indexed
     # nothing" rather than as "you asked for an index that does not exist".

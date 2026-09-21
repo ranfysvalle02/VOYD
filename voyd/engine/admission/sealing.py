@@ -246,7 +246,7 @@ class Sealing(_Composed):
         """Was the key destroyed, or merely unreachable?
 
         One line, because the answer belongs to the key vault rather than
-        to this read path: ``tools/voyd_seal.py`` asks the identical
+        to this read path: ``voyd/wire/seal.py`` asks the identical
         question for a read crossing the wire, and two implementations of
         it would let one deployment call the same event an erasure here
         and an outage there. See ``keyring.why_undecryptable``.

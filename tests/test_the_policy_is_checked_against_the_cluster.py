@@ -37,9 +37,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
 
-import voyd_preflight as pf  # noqa: E402
+from voyd.wire import preflight as pf
 
 from voyd.declare import OPTIONS, load  # noqa: E402
 
@@ -404,7 +403,7 @@ def run_wire(tmp_path, database: str, policy: str = POLICY, *extra):
     path = tmp_path / "voydfile.py"
     path.write_text(policy)
     return subprocess.run(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
          "--listen", str(free_port()), "--target", mongo_host(),
          "--verify", database, "--verify-only", *extra],
         cwd=ROOT, capture_output=True, text=True, timeout=120)
@@ -468,7 +467,7 @@ def test_an_unreachable_cluster_does_not_block_the_boundary(tmp_path):
     path = tmp_path / "voydfile.py"
     path.write_text(POLICY)
     done = subprocess.run(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
          "--listen", str(free_port()),
          # A port nothing is listening on.
          "--target", f"127.0.0.1:{free_port()}", "--verify", "whatever",

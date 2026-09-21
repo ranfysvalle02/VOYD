@@ -66,7 +66,7 @@ def boundary(policy: str, *extra: str, wait_s: float = 30.0):
         path.write_text(policy)
         port = free_port()
         proc = subprocess.Popen(
-            [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+            [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
              "--listen", str(port), "--target", target(), *extra],
             cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True)

@@ -20,10 +20,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
 
-import voyd_bench as b  # noqa: E402
-import voyd_wire as w  # noqa: E402
+from voyd.wire import bench as b
+from voyd.wire import proxy as w
 
 
 def test_the_canned_reply_is_a_cursor_batch_the_boundary_will_admit():
@@ -73,7 +72,7 @@ def test_the_sweep_runs_end_to_end_and_the_control_beats_the_proxy():
     """One short real sweep. Not for the numbers -- for the invariant that
     the harness is not what is being measured."""
     out = subprocess.run(
-        [sys.executable, "tools/voyd_bench.py", "--workers", "0,1",
+        [sys.executable, "-m", "voyd.wire.bench", "--workers", "0,1",
          "--seconds", "1.5", "--clients", "2", "--docs", "20"],
         cwd=ROOT, capture_output=True, text=True, timeout=180)
     assert out.returncode == 0, out.stdout + out.stderr

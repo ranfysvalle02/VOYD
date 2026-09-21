@@ -89,6 +89,12 @@ Issues = "https://github.com/ranfysvalle02/VOYD/issues"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[project.scripts]
+# The artifact. `pip install voyd` has to give you something that can
+# serve a policy file, not only the vocabulary to write one.
+voyd-wire = "voyd.wire.proxy:main"
+voyd-bench = "voyd.wire.bench:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["voyd"]
 
@@ -134,7 +140,7 @@ select = ["E4", "E7", "E9", "F"]
 # It is zero now, and the 59 were not 59 problems. Seventeen were one
 # dynamic-attribute decision in `Meter`; sixteen were one unannotated dict
 # splatted into `**kwargs`. Two root causes were a third of the total.
-files = ["voyd", "tools", "scanner/voyd_scan"]
+files = ["voyd", "scanner/voyd_scan"]
 # No `python_version` pin, deliberately. Pinning it to the 3.11 floor makes
 # mypy read every installed stub under 3.11 syntax, so any dependency
 # resolved for a newer interpreter can fail to *parse* -- which is fatal, and
@@ -198,7 +204,7 @@ markers = [
 # `scanner` is a second distribution with no dependencies and no import of
 # `voyd`; putting it on the path is what lets a test reach it without the
 # two packages depending on each other.
-pythonpath = [".", "scanner", "tools"]
+pythonpath = [".", "scanner"]
 
 [dependency-groups]
 dev = [

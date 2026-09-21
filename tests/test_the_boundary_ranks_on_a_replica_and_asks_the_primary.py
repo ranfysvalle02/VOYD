@@ -35,8 +35,7 @@ from voyd.engine.time import now
 from .conftest import RS_URI, free_port
 
 pymongo = pytest.importorskip("pymongo")
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import voyd_fanout  # noqa: E402
+from voyd.wire import fanout
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -92,7 +91,7 @@ class _Guard:
 def test_a_projectable_rule_set_names_the_fields_the_verdict_reads():
     guard = _Guard([_Rule(at_field="expire_at"), _Rule(field="forgotten")],
                    tenant="tenant_id")
-    assert voyd_fanout.verdict_fields(guard) == {
+    assert fanout.verdict_fields(guard) == {
         "_id", "expire_at", "forgotten", "tenant_id"}
 
 
@@ -103,23 +102,23 @@ def test_a_rule_this_module_has_never_heard_of_costs_a_whole_document():
     verdict would then be taken on a document missing exactly the field the
     rule reads. `None` means "fetch everything", which is slower and right.
     """
-    assert voyd_fanout.verdict_fields(_Guard([_Rule(threshold=3)])) is None
+    assert fanout.verdict_fields(_Guard([_Rule(threshold=3)])) is None
 
 
 def test_a_content_addressed_rule_also_costs_a_whole_document():
     distinct = type("Distinct", (), {})()
     distinct.on = None
-    assert voyd_fanout.verdict_fields(_Guard([distinct])) is None
+    assert fanout.verdict_fields(_Guard([distinct])) is None
     distinct.on = "url"
-    assert voyd_fanout.verdict_fields(_Guard([distinct])) == {"_id", "url"}
+    assert fanout.verdict_fields(_Guard([distinct])) == {"_id", "url"}
 
 
 def test_a_budget_with_a_custom_cost_callable_is_opaque():
     budget = type("Budget", (), {})()
     budget.cost_field, budget.cost = "tokens", None
-    assert voyd_fanout.verdict_fields(_Guard([budget])) == {"_id", "tokens"}
+    assert fanout.verdict_fields(_Guard([budget])) == {"_id", "tokens"}
     budget.cost = len
-    assert voyd_fanout.verdict_fields(_Guard([budget])) is None
+    assert fanout.verdict_fields(_Guard([budget])) is None
 
 
 @pytest.mark.parametrize("body,expected", [
@@ -138,7 +137,7 @@ def test_a_read_is_only_routed_if_its_answer_can_still_be_matched(body, expected
     have been ranked on a replica whose marks nobody could check, leaving a
     choice between refusing a whole page and serving it unverified.
     """
-    assert voyd_fanout.correlatable(body) is expected
+    assert fanout.correlatable(body) is expected
 
 
 @pytest.mark.parametrize("body", [
@@ -150,15 +149,15 @@ def test_a_read_is_only_routed_if_its_answer_can_still_be_matched(body, expected
     {"aggregate": "notes", "pipeline": [{"$match": {}}, {"$out": "copied"}]},
 ])
 def test_what_never_leaves_the_primary(body):
-    assert voyd_fanout.routes_to_secondary(body, {"notes": object()}) is None
+    assert fanout.routes_to_secondary(body, {"notes": object()}) is None
 
 
 def test_a_guarded_read_that_cannot_be_correlated_stays_on_the_primary():
     body = {"find": "notes", "projection": {"_id": 0}}
-    assert voyd_fanout.routes_to_secondary(body, {"notes": object()}) is None
+    assert fanout.routes_to_secondary(body, {"notes": object()}) is None
     # ...but the same read on a collection nobody declared has no verdict to
     # verify, so there is nothing to correlate and it may go.
-    assert voyd_fanout.routes_to_secondary(body, {}) == ("notes", "find", 0)
+    assert fanout.routes_to_secondary(body, {}) == ("notes", "find", 0)
 
 
 def test_a_mark_lifted_on_the_primary_travels_as_an_absence():
@@ -171,7 +170,7 @@ def test_a_mark_lifted_on_the_primary_travels_as_an_absence():
     """
     stale = [{"_id": 1, "text": "t", "forgotten": {"at": PAST}}]
     fresh = {1: {"_id": 1}}
-    judgeable, originals = voyd_fanout.merge_marks(
+    judgeable, originals = fanout.merge_marks(
         stale, fresh, {"_id", "forgotten"})
     assert "forgotten" not in judgeable[0]
     assert originals[0]["text"] == "t", "the client still gets its document"
@@ -179,7 +178,7 @@ def test_a_mark_lifted_on_the_primary_travels_as_an_absence():
 
 def test_a_document_the_primary_does_not_have_is_dropped():
     stale = [{"_id": 1, "text": "gone"}, {"_id": 2, "text": "here"}]
-    judgeable, originals = voyd_fanout.merge_marks(
+    judgeable, originals = fanout.merge_marks(
         stale, {2: {"_id": 2}}, {"_id"})
     assert [d["_id"] for d in originals] == [2]
     assert len(judgeable) == 1
@@ -195,7 +194,7 @@ def _wire(tmp_path, uri, *extra):
     policy.write_text(POLICY)
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", uri, *extra],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -588,7 +587,7 @@ SEARCH = ("notes", "search", 16)
 
 def test_a_read_that_pays_keeps_fanning_out():
     """The `$vectorSearch` shape: a long scan, a cheap confirmation."""
-    payoff = voyd_fanout.Payoff(warmup=3)
+    payoff = fanout.Payoff(warmup=3)
     for _ in range(20):
         assert payoff.record(SHAPE, ranked=0.100, verified=0.002) is None
     assert payoff.withdrawn() == frozenset()
@@ -598,7 +597,7 @@ def test_a_read_that_does_not_pay_is_withdrawn_and_says_why():
     """The small-collection shape: the primary is asked for marks on nearly
     everything it would have served anyway, so it does comparable work and
     the client pays a round trip for the privilege."""
-    payoff = voyd_fanout.Payoff(warmup=3)
+    payoff = fanout.Payoff(warmup=3)
     reasons = [payoff.record(SHAPE, ranked=0.004, verified=0.006)
                for _ in range(10)]
     said = [r for r in reasons if r]
@@ -611,7 +610,7 @@ def test_withdrawal_is_one_way():
     """No path back inside one process, deliberately. Re-admitting on a
     favourable sample is how a boundary oscillates, and the cost of staying
     on the primary is a slower read rather than a wrong one."""
-    payoff = voyd_fanout.Payoff(warmup=2)
+    payoff = fanout.Payoff(warmup=2)
     for _ in range(5):
         payoff.record(SHAPE, ranked=0.001, verified=0.010)
     for _ in range(50):
@@ -620,14 +619,14 @@ def test_withdrawal_is_one_way():
 
 
 def test_a_ratio_of_zero_measures_without_acting():
-    payoff = voyd_fanout.Payoff(ratio=0.0, warmup=2)
+    payoff = fanout.Payoff(ratio=0.0, warmup=2)
     for _ in range(20):
         assert payoff.record(SHAPE, ranked=0.001, verified=0.500) is None
     assert payoff.withdrawn() == frozenset()
 
 
 def test_one_collection_giving_up_does_not_withdraw_another():
-    payoff = voyd_fanout.Payoff(warmup=2)
+    payoff = fanout.Payoff(warmup=2)
     for _ in range(10):
         payoff.record(SHAPE, ranked=0.001, verified=0.010)
         payoff.record(("papers", "find", 0), ranked=0.200, verified=0.001)
@@ -644,7 +643,7 @@ def test_a_cheap_read_does_not_withdraw_the_search_it_shares_a_collection_with()
     fix: a selective read went from 5 secondary queries out of 5 to 0 out
     of 5 after twelve full-collection finds.
     """
-    payoff = voyd_fanout.Payoff(warmup=2)
+    payoff = fanout.Payoff(warmup=2)
     for _ in range(20):
         payoff.record(SHAPE, ranked=0.001, verified=0.010)
         assert payoff.record(SEARCH, ranked=0.200, verified=0.002) is None
@@ -654,7 +653,7 @@ def test_a_cheap_read_does_not_withdraw_the_search_it_shares_a_collection_with()
 def test_the_same_collection_at_two_sizes_is_two_propositions():
     """Asking for 10 documents and asking for 1,000 are different trades
     against one collection, because confirming costs per document."""
-    payoff = voyd_fanout.Payoff(warmup=2)
+    payoff = fanout.Payoff(warmup=2)
     small, large = ("notes", "find", 16), ("notes", "find", 1024)
     for _ in range(20):
         payoff.record(large, ranked=0.001, verified=0.010)
@@ -675,17 +674,17 @@ def test_a_reads_shape_is_read_off_the_request(body, expected):
     """It has to come from the request: the routing decision is made before
     there is any answer to look at."""
     name = next(c for c in ("find", "aggregate") if c in body)
-    assert voyd_fanout.read_shape(body, name, body[name]) == expected
+    assert fanout.read_shape(body, name, body[name]) == expected
 
 
 def test_a_withdrawn_shape_is_not_routed_to_a_secondary():
     body = {"find": "notes"}
     guards = {"notes": object()}
-    assert voyd_fanout.routes_to_secondary(body, guards) == SHAPE
-    assert voyd_fanout.routes_to_secondary(
+    assert fanout.routes_to_secondary(body, guards) == SHAPE
+    assert fanout.routes_to_secondary(
         body, guards, frozenset({SHAPE})) is None
     # ...and a different shape on the same collection is unaffected.
-    assert voyd_fanout.routes_to_secondary(
+    assert fanout.routes_to_secondary(
         {"find": "notes", "limit": 10}, guards,
         frozenset({SHAPE})) == ("notes", "find", 16)
 

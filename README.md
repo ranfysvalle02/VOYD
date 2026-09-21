@@ -42,11 +42,11 @@ project has found in itself:
 | the intent | the window it actually had | found in |
 |---|---|---|
 | `delete` removes the fact | ~60s of TTL monitor lag | the premise above |
-| a destroyed key makes it unreadable | ~60s of libmongocrypt key cache | `tools/voyd_seal.py` |
-| a replica's copy is current | unbounded replication lag | `tools/voyd_fanout.py` |
-| the index embeds with the declared model | nobody had ever asked it | `tools/voyd_preflight.py` |
+| a destroyed key makes it unreadable | ~60s of libmongocrypt key cache | `voyd/wire/seal.py` |
+| a replica's copy is current | unbounded replication lag | `voyd/wire/fanout.py` |
+| the index embeds with the declared model | nobody had ever asked it | `voyd/wire/preflight.py` |
 | this test proves the claim in its name | it asserted a page of one | `LIMITS.md` §1 |
-| this counter is on a dashboard | it was never flushed | `tools/voyd_metrics.py` |
+| this counter is on a dashboard | it was never flushed | `voyd/wire/metrics.py` |
 
 Three unrelated subsystems, three independent discoveries, one defect: a
 *delete-is-a-wish window*. Then the same shape again in the configuration,
@@ -64,7 +64,7 @@ So this repository applies it to itself, and not as a slogan:
 - **[LIMITS.md](LIMITS.md)** counts this project's own defects, names its
   own bad numbers, and opens with the one that matters: nobody has used this
   but its author.
-- Every performance figure comes from `tools/voyd_bench.py`, which checks
+- Every performance figure comes from `voyd/wire/bench.py`, which checks
   the boundary was still refusing while it was being fast.
 
 None of that makes the code correct. It makes the difference between *a
@@ -101,6 +101,13 @@ first, unreadable second.**
 
 ## No code
 
+```bash
+pip install voyd        # or: uv add voyd
+```
+
+That gives you one command, `voyd-wire`, and the vocabulary to write the
+file it reads. There is nothing here to import into an application.
+
 Declare the rules once, in a file that is not your application:
 
 ```python
@@ -118,15 +125,15 @@ Point the boundary at your database:
 
 ```bash
 # a local mongod
-python tools/voyd_wire.py --config voydfile.py --target localhost:27017
+voyd-wire --config voydfile.py --target localhost:27017
 
 # --advertise-self pins clients here instead of the cluster's own hosts
 # or Atlas -- SRV is resolved, TLS is used, the primary is found
-python tools/voyd_wire.py --config voydfile.py \
+voyd-wire --config voydfile.py \
     --target "mongodb+srv://user:pass@cluster0.xxxxx.mongodb.net/"
 
 # reachable across a network, with TLS terminated for clients too
-python tools/voyd_wire.py --config voydfile.py --target "$ATLAS" \
+voyd-wire --config voydfile.py --target "$ATLAS" \
     --tls-cert server.pem --tls-key server.key --max-connections 500
 ```
 
@@ -312,30 +319,26 @@ the size of the collection. Refill still guarantees the page; this just
 stops it needing three trips to get there. `receipts()["over_fetch"]` shows
 the number.
 
-## There is no in-process form, and that is the change
+## There is no in-process form
 
-This section used to say "in-process, if you want it", and show an `Engine`
-handle you constructed and called `find()` on. It is gone.
+A boundary you can forget to route a read through is not a boundary, so
+there is no handle to hold and no `find()` to call. `pip install voyd`
+gives you `voyd-wire` and the vocabulary a `voydfile.py` is written in —
+`guard`, `deadline`, `revocable`, `tenant`, `restricted_to`, `sealed`,
+`auto_embed` — plus what `--ensure` and `--verify` provision with. Your
+application imports nothing.
 
-Two front doors onto one guarantee is precisely the gap this project exists
-to make visible, and it was inside the project. Several claims in
-`CLAIMS.md` were held up only by the door this README does not recommend —
-a reader had no way to tell which ones — and the one that mattered most,
-that a revocation reaches what was derived from the fact, was library-only
-while being printed as a headline. The wire holds it now; see
-`LIMITS.md` section 6b for how, and for what it costs.
+Two front doors onto one guarantee is the gap this project exists to make
+visible, and having one would mean having it here: a claim that holds
+through an import and not through the connection string is a claim a
+reader cannot check. Everything in [CLAIMS.md](CLAIMS.md) holds through
+the port.
 
-What stays importable is the policy vocabulary — `guard`, `deadline`,
-`revocable`, `tenant`, `restricted_to`, `sealed`, `auto_embed` and the rest
-— because the proxy loads it, plus the parts `--ensure` and `--verify`
-provision with. Nothing in `voyd/` is application-facing. `pip install voyd`
-is not the artifact; `voydfile.py` and a connection string are.
-
-The one thing you still run in your own process is a **measurement**, and
+The one thing you do run in your own process is a **measurement**, and
 only because a boundary would defeat the point of it: `examples/shadow.py`
 counts how many documents your existing read path serves that your own
-database has already marked as gone, changing nothing. When that number
-convinces somebody, the same spec becomes a policy file.
+database has already marked as gone, and changes nothing while it does.
+When that number convinces somebody, the same rules become a policy file.
 
 ## The server owns the encoding
 
@@ -429,7 +432,7 @@ class Notes:
 ```
 
 ```bash
-python tools/voyd_wire.py --config voydfile.py --target "$ATLAS" \
+voyd-wire --config voydfile.py --target "$ATLAS" \
     --key-vault app --kms local:/etc/voyd/master.key
 ```
 
@@ -525,7 +528,7 @@ voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database connection of its
 - **A sealed read costs ~8.1µs per document instead of 2.3µs**, because it
   decrypts before it refuses — the order the library uses, and the two must
   agree or the same document would be admitted one way and refused the
-  other. Measured: `tools/voyd_bench.py --seal` reports **5.8µs** to
+  other. Measured: `voyd/wire/bench.py --seal` reports **5.8µs** to
   decrypt, stable across passes, and **~8.7µs** to encrypt warm (~26µs on
   the first pass, while the key cache fills — which is why the benchmark
   prints a spread rather than one draw). Unsealed collections still take
@@ -567,7 +570,7 @@ responsible for it.** `auto_embed("voyage-4")` is exactly that. So it is
 asked:
 
 ```bash
-python tools/voyd_wire.py --config voydfile.py --target "$ATLAS" \
+voyd-wire --config voydfile.py --target "$ATLAS" \
     --verify app --verify-only          # a deploy gate: exit 0, 3, or why not
 ```
 
@@ -621,7 +624,7 @@ this process does not own. [LIMITS.md](LIMITS.md) §5.
 primary, beside every write, is the cost a read replica exists to remove:
 
 ```bash
-python tools/voyd_wire.py --config voydfile.py --target "$RS" --fan-out "$RS"
+voyd-wire --config voydfile.py --target "$RS" --fan-out "$RS"
 ```
 
 **The obvious version of this is unsafe, and it is unsafe in exactly the way
@@ -793,7 +796,7 @@ Stated rather than discovered:
   `--workers N` pre-forks over one shared listening socket to use the rest,
   and scales 1.94x / 3.57x / 5.98x at 2 / 4 / 8 workers on fourteen cores.
   **Refusal costs ~2.3µs per document.** Counters are summed across workers
-  and printed once. `python tools/voyd_bench.py` reproduces all of it, and
+  and printed once. `voyd-bench` reproduces all of it, and
   checks the boundary was still refusing while it was being fast.
   `--seal` measures what `--key-vault` adds per document instead.
 - **`--metrics PORT`** serves Prometheus text while it runs: documents

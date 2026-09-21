@@ -15,7 +15,7 @@ re-measures them rather than splitting the difference.
 
 ## What landed, so nobody re-does it
 
-- **Lineage on the wire.** `tools/voyd_cascade.py`. Children marked
+- **Lineage on the wire.** `voyd/wire/cascade.py`. Children marked
   first, then the source; the ids resolved once and both halves pinned to
   them; an insert naming a parent has its ancestry closed transitively and
   is refused if that parent may not be reached. `LIMITS.md` §6b has the
@@ -37,7 +37,7 @@ and `sealing.py` all import operation constants (`AUDIT`, `REVOKE`,
 write verbs with it. It stays.
 
 **The cut was ~600 lines, not ~1,500.** `voyd/` went 8,220 -> 7,626 while
-`tools/` went 7,062 -> 7,555. A guarantee did not evaporate when the door
+`voyd/wire/` went 7,062 -> 7,555. A guarantee did not evaporate when the door
 did; it moved, and moving it cost lines. Estimate the *next* one the same
 way: by grepping, not by remembering.
 
@@ -123,7 +123,7 @@ rule can be "wire-driven, or on this list with a reason".
 
 Do this before the next claim is added, not after.
 
-## 4. `tools/voyd_wire.py` is 4,382 lines
+## 4. `voyd/wire/proxy.py` is 4,382 lines
 
 Up ~270 from the cascade. It is the single biggest structural risk in the
 repository and it holds every enforcement decision. Splitting framing /
@@ -158,7 +158,7 @@ touching `Layout`, which is shared-memory and pre-fork -- read the note in
 
 Also unmeasured: **what the cascade costs**. A delete on a lineage
 collection is now a find plus an update before the forwarded command, and
-an insert naming a parent is a find before it. `tools/voyd_bench.py`
+an insert naming a parent is a find before it. `voyd/wire/bench.py`
 measures the ordinary paths; nothing measures this one, and "one extra
 round trip" is an assumption until it is a number.
 
@@ -236,13 +236,13 @@ production behaviour first; the test cost is the symptom.
 ## Verification (all of it)
 
 ```bash
-uv run --no-sync ruff check voyd/ tools/ tests/ examples/ scanner/
+uv run --no-sync ruff check voyd/ tests/ examples/ scanner/
 uv run --no-sync mypy
 VOYD_TEST_MONGO_URI="mongodb://localhost:27018/?directConnection=true" \
   uv run --no-sync pytest -q -m "" tests/ \
   --deselect tests/test_search_refuses_on_the_path_that_bypasses_the_query.py::test_the_server_embeds_and_refusal_still_holds
 uv run --no-sync pytest -q -m "" tests/test_search_refuses_on_the_path_that_bypasses_the_query.py::test_the_server_embeds_and_refusal_still_holds
-python3 scanner/voyd_scan --strict voyd/ tools/ scanner/
+python3 scanner/voyd_scan --strict voyd/ scanner/
 for f in examples/*.py; do VOYD_MONGO_URI="mongodb://localhost:27018/?directConnection=true" uv run --no-sync python "$f" >/dev/null || echo "FAIL $f"; done
 uv build
 ```

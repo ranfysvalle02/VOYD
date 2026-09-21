@@ -28,9 +28,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
 
-import voyd_wire as w  # noqa: E402
+from voyd.wire import proxy as w
 
 from .conftest import free_port, mongo_host  # noqa: E402
 
@@ -160,7 +159,7 @@ def test_workers_share_one_socket_and_report_one_total(db, tmp_path):
     policy.write_text(POLICY)
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", mongo_host(), "--workers", "2"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -203,7 +202,7 @@ def test_ctrl_c_does_not_cost_the_workers_their_tallies(db, tmp_path):
     policy.write_text(POLICY)
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", mongo_host(), "--workers", "2"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         start_new_session=True)
@@ -253,7 +252,7 @@ def test_many_concurrent_connections_are_each_still_refused(db, tmp_path):
     policy.write_text(POLICY)
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", mongo_host(),
          "--max-connections", "600", "--quiet"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

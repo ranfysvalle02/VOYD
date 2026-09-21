@@ -25,8 +25,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import voyd_wire as w  # noqa: E402
+from voyd.wire import proxy as w
 
 from .conftest import free_port, mongo_host  # noqa: E402
 
@@ -139,7 +138,7 @@ def test_a_driver_with_no_direct_connection_stays_on_the_boundary(db, tmp_path):
                       "    tenant_id = tenant()\n")
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", mongo_host(), "--advertise-self"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:

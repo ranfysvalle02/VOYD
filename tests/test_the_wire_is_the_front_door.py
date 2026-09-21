@@ -63,7 +63,7 @@ def _wire(tmp_path, *extra):
     policy.write_text(POLICY)
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", mongo_host(), *extra],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -182,7 +182,7 @@ def test_an_undeclared_collection_is_forwarded_untouched(seeded, boundary):
 def test_the_boundary_refuses_to_run_as_a_plain_relay():
     """No policy and no `--guard` would be a TCP pipe wearing the name of a
     boundary, which is the one thing this must never be."""
-    proc = subprocess.run([sys.executable, "tools/voyd_wire.py"],
+    proc = subprocess.run([sys.executable, "-m", "voyd.wire.proxy"],
                           cwd=ROOT, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 2
     assert "pretending to be a boundary" in proc.stderr

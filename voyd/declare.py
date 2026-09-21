@@ -19,7 +19,7 @@ The whole of a policy, and the whole of what anybody has to write::
 
 Then::
 
-    python tools/voyd_wire.py --config voydfile.py --target localhost:27017
+    voyd-wire --config voydfile.py --target localhost:27017
 
 Your application is not edited. No import is added to it, no handle replaces
 a collection, no read path is rewritten and nobody has to remember anything.
@@ -150,7 +150,7 @@ def auto_embed(model: str) -> _Field:
     arriving through a driver that never heard of the declaration -- and
     comparing a vector to an index built by a different model does not
     fail, it returns a number between -1 and 1, which is the whole problem.
-    The boundary refuses it by name. See ``tools/voyd_wire.py``.
+    The boundary refuses it by name. See ``voyd/wire/proxy.py``.
 
     Declared, not probed. A deployment that cannot do server-side
     embedding says so at index creation and ``--ensure`` falls back to an

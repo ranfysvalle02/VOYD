@@ -26,14 +26,11 @@ and the wire tests drive the same paths through a real `mongod`.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 bson = pytest.importorskip("bson")
-import voyd_wire as w  # noqa: E402
+from voyd.wire import proxy as w
 
 from voyd.engine.admission.rules import Deadline, revoked  # noqa: E402
 from voyd.engine.admission.spec import AdmissionSpec  # noqa: E402

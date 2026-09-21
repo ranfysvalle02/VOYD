@@ -10,7 +10,7 @@ nearest-neighbour structure of the index still describes it.
 
 Two paths write that erasure and they are two different pieces of code --
 `Admission.revoke` in `admission/marks.py` and `_forget_pipeline` in
-`tools/voyd_wire.py`. The wire one carries a docstring promising "one
+`voyd/wire/proxy.py`. The wire one carries a docstring promising "one
 definition, used by every verb this boundary rewrites, because two
 spellings that produced different rows would be the drift this package is
 about". They *are* two spellings. Nothing checked they agreed, so the first
@@ -40,7 +40,6 @@ from .conftest import free_port, mongo_host
 
 pymongo = pytest.importorskip("pymongo")
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
 
 PAST = now() - timedelta(days=1)
 VEC = [0.1, 0.2, 0.3, 0.4]
@@ -58,7 +57,7 @@ class Notes:
 # --- the two spellings have to agree ---------------------------------------
 
 def test_both_erasure_paths_null_every_declared_derived_field():
-    """`marks.py` and `voyd_wire.py` each build this update separately.
+    """`marks.py` and `proxy.py` each build this update separately.
 
     The wire one's docstring claims "one definition, used by every verb",
     and that is true *within* the wire. Across the two there are two
@@ -66,7 +65,7 @@ def test_both_erasure_paths_null_every_declared_derived_field():
     is a vector that survives its document depending on which path the
     erasure took.
     """
-    import voyd_wire as w
+    from voyd.wire import proxy as w
 
     from voyd.engine.admission.rules import Deadline, revoked
     from voyd.engine.admission.spec import AdmissionSpec
@@ -86,7 +85,7 @@ def test_both_erasure_paths_null_every_declared_derived_field():
 def test_a_collection_with_no_derived_fields_is_left_alone():
     """The default is `("embedding",)`, and a policy may declare none. An
     erasure that invented a null field would be writing schema."""
-    import voyd_wire as w
+    from voyd.wire import proxy as w
 
     from voyd.engine.admission.rules import Deadline, revoked
     from voyd.engine.admission.spec import AdmissionSpec
@@ -153,7 +152,7 @@ async def test_both_doors_leave_the_same_row(adb):
     """The drift check with teeth. The wire builds its own update and the
     library builds another; this asserts the row they leave is the same
     shape, which is what the wire's docstring already promises."""
-    import voyd_wire as w
+    from voyd.wire import proxy as w
 
     notes = _notes(adb)
     await adb.notes.insert_one({"_id": 1, "text": "x", "embedding": VEC})
@@ -182,7 +181,7 @@ def _wire(tmp_path):
     policy.write_text(POLICY)
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", mongo_host()],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:

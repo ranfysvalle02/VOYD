@@ -25,9 +25,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
 
-import voyd_metrics as m  # noqa: E402
+from voyd.wire import metrics as m
 
 from voyd.engine.admission import reasons as R  # noqa: E402
 
@@ -56,7 +55,7 @@ def test_every_refusal_reason_in_the_engine_has_a_series():
     missing = exported - set(m.REASONS)
     assert not missing, (
         f"reasons.py declares {sorted(missing)} with no series in "
-        f"voyd_metrics.REASONS; add them or add them to NOT_A_REASON")
+        f"metrics.REASONS; add them or add them to NOT_A_REASON")
 
 
 def test_no_series_survives_its_reason_being_renamed():
@@ -68,7 +67,7 @@ def test_the_declared_counters_are_exactly_the_series():
     """`Meter`'s annotations and `GLOBAL` are two views of one fact.
 
     They have to both exist. The annotations are what lets a type checker
-    see a counter at all -- without them `tools/` had seventeen
+    see a counter at all -- without them `voyd/wire/` had seventeen
     `attr-defined` errors and went unchecked, which is how the front door
     ended up being the least statically verified file in the repository.
     `GLOBAL` is what allocates the slot and exposes the series.
@@ -265,7 +264,7 @@ def test_metrics_are_summed_across_workers_while_it_runs(db, tmp_path):
                       "    forgotten = revocable()\n")
     port, metrics = free_port(), free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--listen", str(port), "--target", mongo_host(),
          "--workers", "3", "--metrics", str(metrics), "--quiet"],
         cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
@@ -320,11 +319,11 @@ def test_the_metrics_port_is_loopback_only():
         httpd.server_close()
 
     # And there is no way to ask for anything else.
-    source = (ROOT / "tools" / "voyd_metrics.py").read_text()
+    source = (ROOT / "voyd" / "wire" / "metrics.py").read_text()
     assert source.count("0.0.0.0") == 0, \
         "voyd_metrics must not be able to bind outward"
     helptext = subprocess.run(
-        [sys.executable, "tools/voyd_wire.py", "--help"],
+        [sys.executable, "-m", "voyd.wire.proxy", "--help"],
         cwd=ROOT, capture_output=True, text=True).stdout
     assert "--metrics PORT" in helptext
     assert "--metrics-host" not in helptext and "--metrics-bind" not in helptext

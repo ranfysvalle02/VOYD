@@ -57,7 +57,7 @@ def _wire(tmp_path, policy: str):
     path.write_text(policy)
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
          "--listen", str(port), "--target", mongo_host()],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:

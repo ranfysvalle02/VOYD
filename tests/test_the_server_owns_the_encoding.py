@@ -35,9 +35,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
 
-import voyd_wire as w  # noqa: E402
+from voyd.wire import proxy as w
 
 from voyd.declare import OPTIONS, load  # noqa: E402
 
@@ -240,7 +239,7 @@ def wired(tmp_path):
     port = free_port()
     name = f"voyd_test_autoembed_{uuid.uuid4().hex[:8]}"
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config",
+        [sys.executable, "-m", "voyd.wire.proxy", "--config",
          write(tmp_path, POLICY), "--listen", str(port),
          "--target", mongo_host()],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -304,7 +303,7 @@ def test_the_boundary_says_who_embeds_at_startup(tmp_path):
 
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config",
+        [sys.executable, "-m", "voyd.wire.proxy", "--config",
          write(tmp_path, POLICY), "--listen", str(port),
          "--target", mongo_host()],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

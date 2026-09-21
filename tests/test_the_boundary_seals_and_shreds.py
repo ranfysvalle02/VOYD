@@ -93,7 +93,7 @@ def _wire(tmp_path, database: str, *extra, policy: str = POLICY):
     path.write_text(policy)
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
          "--listen", str(port), "--target", mongo_host(),
          "--key-vault", database, *extra],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -363,7 +363,7 @@ def test_sealing_without_a_tenant_fails_at_load(tmp_path):
     path = tmp_path / "voydfile.py"
     path.write_text(UNSCOPED)
     done = subprocess.run(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
          "--listen", str(free_port()), "--target", mongo_host(),
          "--key-vault", "irrelevant"],
         cwd=ROOT, capture_output=True, text=True, timeout=60)
@@ -381,7 +381,7 @@ def test_sealing_with_no_key_vault_refuses_to_start(tmp_path):
     path = tmp_path / "voydfile.py"
     path.write_text(POLICY)
     done = subprocess.run(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
          "--listen", str(free_port()), "--target", mongo_host()],
         cwd=ROOT, capture_output=True, text=True, timeout=60)
     assert done.returncode == 2
@@ -400,7 +400,7 @@ class Notes:
     tenant_id = tenant()
 """)
     done = subprocess.run(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
          "--listen", str(free_port()), "--target", mongo_host(),
          "--key-vault", "unused"],
         cwd=ROOT, capture_output=True, text=True, timeout=60)
@@ -423,7 +423,7 @@ def test_the_boundary_says_that_it_now_holds_keys(tmp_path):
         path.write_text(POLICY)
         port = free_port()
         proc = subprocess.Popen(
-            [sys.executable, "tools/voyd_wire.py", "--config", str(path),
+            [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
              "--listen", str(port), "--target", mongo_host(),
              "--key-vault", name],
             cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -474,8 +474,7 @@ def test_a_sealed_collection_is_never_ranked_on_a_secondary():
     A pure unit test with no database anywhere near it, which is the point:
     this is a routing decision taken from the request, before it is sent.
     """
-    sys.path.insert(0, str(ROOT / "tools"))
-    import voyd_fanout
+    from voyd.wire import fanout
 
     from voyd.engine.admission import AdmissionSpec
 
@@ -485,10 +484,10 @@ def test_a_sealed_collection_is_never_ranked_on_a_secondary():
     guards = {"notes": _Guard()}
     body = {"aggregate": "notes", "pipeline": [{"$vectorSearch": {}}]}
 
-    assert voyd_fanout.routes_to_secondary(body, guards) is not None, (
+    assert fanout.routes_to_secondary(body, guards) is not None, (
         "the control: an unsealed collection still fans out, or this test "
         "would pass for the wrong reason")
-    assert voyd_fanout.routes_to_secondary(
+    assert fanout.routes_to_secondary(
         body, guards, sealed=frozenset({"notes"})) is None
 
 

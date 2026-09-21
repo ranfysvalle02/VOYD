@@ -238,7 +238,7 @@ class Meter:
     # The fix for that dropped the list and set every field from `GLOBAL`,
     # which removed the drift and cost every counter its visibility: mypy
     # could no longer see one of them, and those seventeen `attr-defined`
-    # errors were a third of the reason `tools/` went unchecked. A dynamic
+    # errors were a third of the reason `voyd/wire/` went unchecked. A dynamic
     # attribute is not cheaper than a declared one; it moves who fails to
     # notice from the author to the compiler.
     #
@@ -284,7 +284,7 @@ class Meter:
         if (name not in GLOBAL and name not in ("layout", "slab", "slot")
                 and not name.startswith("_")):
             raise AttributeError(
-                f"Meter has no counter {name!r}. Add it to voyd_metrics."
+                f"Meter has no counter {name!r}. Add it to metrics."
                 f"GLOBAL (and to HELP) so it is allocated in the slab and "
                 f"exposed, or this number would climb where nothing reads "
                 f"it")

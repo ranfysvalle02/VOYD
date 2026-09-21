@@ -64,7 +64,7 @@ def _policy(tmp_path, body: str) -> Path:
 
 def _run(policy: Path, *args: str, timeout: int = 180):
     return subprocess.run(
-        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+        [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
          "--target", mongo_host(), *args],
         cwd=ROOT, capture_output=True, text=True, timeout=timeout)
 

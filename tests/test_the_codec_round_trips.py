@@ -14,14 +14,11 @@ alone, with no database anywhere near it.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 bson = pytest.importorskip("bson")
-import voyd_wire as w  # noqa: E402
+from voyd.wire import proxy as w
 
 BODY = {"delete": "notes", "ordered": True, "$db": "app"}
 DELETES = [{"q": {"_id": 1}, "limit": 1}, {"q": {"tag": "x"}, "limit": 0}]
