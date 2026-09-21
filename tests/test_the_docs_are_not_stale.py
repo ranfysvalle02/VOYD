@@ -135,7 +135,61 @@ def test_a_claimed_test_count_is_not_lower_than_the_real_one():
                 f"sentence did not")
 
 
-# The canon. `docs/` went eighteen files -> eight -> ten -> six, because a
+# Written out because a README says "fourteen runnable programs", not "14".
+WORDS = {w: i for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve "
+    "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty "
+    "twenty-one twenty-two twenty-three twenty-four twenty-five".split())}
+
+# Every counted noun this repository writes into prose, and how to count the
+# real thing. Adding a row is how the next one gets watched.
+#
+# The list exists because `CONSIDERATIONS.md` named this gap in writing --
+# *"Nothing checks 'thirteen runnable programs' or 'five steps'. Those are on
+# you, and both were stale within one commit of being written."* -- and then
+# both went stale again anyway, in the same week, for the reason this codebase
+# states everywhere else: "on you" is not a mechanism. A guard that watches
+# one noun is a guard against one stale count.
+COUNTED = (
+    (r"\b([\w-]+|\d+) runnable programs?\b",
+     lambda: len(list(ROOT.glob("examples/*.py")))),
+    (r"\bin ([\w-]+|\d+) steps\b",
+     lambda: len(re.findall(r"(?m)^## Step ",
+                            (ROOT / "docs" / "AHA.md").read_text()))),
+)
+
+
+@pytest.mark.parametrize("pattern,count", COUNTED,
+                         ids=lambda v: v if isinstance(v, str) else "")
+def test_a_counted_noun_in_prose_matches_the_thing_it_counts(pattern, count):
+    """The gap the test above left open, found the way these are always found.
+
+    The count guard covered ``tests`` and nothing else, so when `shadow.py`
+    was added the README went on saying *thirteen runnable programs* and
+    every check in this file passed. The same week, `AHA.md` grew a sixth
+    step and two sentences went on saying *five*.
+
+    Exact rather than one-directional, unlike the test count: there is no
+    parametrisation here to make the real number legitimately larger, so a
+    reader who counts the directory and gets a different answer has found a
+    mistake either way.
+    """
+    real = count()
+    seen = 0
+    for doc in DOCS:
+        for claimed in re.findall(pattern, doc.read_text()):
+            seen += 1
+            n = int(claimed) if claimed.isdigit() else WORDS.get(claimed.lower())
+            assert n is not None, (
+                f"{doc.name} says {claimed!r}; spell a counted noun as a word "
+                f"this test knows or as a numeral")
+            assert n == real, (
+                f"{doc.name} claims {n} where there are {real}. The thing "
+                f"grew and the sentence did not")
+    assert seen, f"nothing claims {pattern!r} any more; drop the row with it"
+
+
+# The canon. `docs/` went eighteen files -> eight -> ten -> seven, because a
 # reader who cannot tell which three to read reads none of them. The cuts that
 # stuck removed two kinds of thing, and neither was documentation: a thinking
 # journal, and a *changelog* -- `ISSUES.md`, `ideas.md` and `opportunities.md`

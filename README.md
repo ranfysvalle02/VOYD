@@ -78,7 +78,7 @@ rule, but only if every read path, fallback and future caller supplies it.
 Everything else here is downstream of that — including the invariant it
 forces: **a rule that can express itself in a query or index filter but not per
 document is not a slower rule, it is a silent hole.** [`AHA.md`](docs/AHA.md)
-derives it in five steps, with the measurements.
+derives it in six steps, with the measurements.
 
 ---
 
@@ -86,80 +86,52 @@ derives it in five steps, with the measurements.
 
 ```bash
 docker compose up -d mongo
-uv run python examples/forget.py
+uv run python examples/forget.py                 # the thing itself
+uv run --extra drift python drift/exhibit.py     # the counter-argument
+uv run python examples/rosetta.py                # more than a soft-delete flag
 ```
 
-A document expires, becomes unreachable *while its row is still on disk*, then
-the reaper takes the row and its vector together. A pinned document beside it
-is untouched. No API key, no vendor.
+**`forget.py`** — a document expires, becomes unreachable *while its row is
+still on disk*, then the reaper takes the row and its vector together. A
+pinned document beside it is untouched.
 
-The smallest adoption — refusal on one collection, in the handful of lines a
-team actually adds — is [`examples/quickstart.py`](examples/quickstart.py):
-`find`-only on plain MongoDB first, then the same guarantee on the Atlas
-`$vectorSearch` path where the server owns the embedding.
-
-Then the counter-argument, which is also executable:
-
-```bash
-uv run --extra drift python drift/exhibit.py
-```
-
-Postgres holds the row, Qdrant holds the vector, MinIO holds the bytes, and a
-cron is supposed to keep them agreeing. Four owners, four clocks, four ways to drift. The
+**`exhibit.py`** — Postgres holds the row, Qdrant the vector, MinIO the bytes,
+and a cron is supposed to keep them agreeing. Four owners, four clocks. The
 deleted document answers the query.
 
-Then, before you install anything at all, run the scanner against **your own**
-repository — one stdlib file, no database, no credentials, no clone required:
+**`rosetta.py`** — soft-delete, TTL, a feature flag, row-level security and a
+token budget, written as five rules on **one** handle and enforced together on
+both halves. `deleted=true` is the smallest of them.
+
+No API key, no vendor, none of them over ten seconds. The smallest real
+adoption is [`examples/quickstart.py`](examples/quickstart.py): `find`-only on
+plain MongoDB first, then the same guarantee on the Atlas `$vectorSearch` path
+where the server owns the embedding.
+
+---
+
+## Then find out whether *you* have the problem
+
+Before installing anything. The scanner infers what your own reads already
+agree on — no configuration, no list of field names, and it sharpens rather
+than degrades on a large codebase — so the output is not "you might have a
+problem" but **you already have a convention, and here is the line where it
+already failed**:
 
 ```bash
-python scanner/voyd_scan path/to/your/repo
+python scanner/voyd_scan path/to/your/repo   # one stdlib file, no clone, no credentials
+uv run python examples/shadow.py             # count in production, change nothing
 ```
 
-It reports your own floor — but the pattern match is not the part that
-matters. Semgrep and CodeQL can already find "reads on collection X that do
-not name field Y" if somebody writes that rule. What they cannot do is work
-out what **Y** is without being told, and that inference is the tool: for each
-collection it counts what your reads actually filter on, and a field most of
-them name and some do not is a convention with a deviation. *The convention is
-the spec, so the deviation is the finding.* No configuration, no list of field
-names, and it gets stronger on bigger codebases rather than noisier.
+Shadow mode reaches the half a source scan cannot. Your existing read path
+keeps serving exactly what it served yesterday, and three lines beside it
+count how many of those documents were already gone — an exact number,
+available once, before you adopt anything.
 
-So the output is not "you might have a problem." It is **you already have a
-convention, and here is the exact line where it already failed** — this
-project's founding incident, computed from your own repository, on a field
-called `valid_until` or `is_active` or something nobody has invented yet.
-
-Unjudged reads — a filter built by a helper, which a source scan cannot see —
-are a proof obligation rather than a shrug, dischargeable in the source the
-way `# type: ignore` is, and `--strict` holds the count at zero once you get
-it there. The header is honest about what a source scan cannot see.
-
-Then measure the half a source scan cannot reach, still without changing
-anything a user sees. Shadow mode keeps your existing read path exactly as it
-is and counts, alongside it, how many of the documents it served were already
-gone:
-
-```bash
-uv run python examples/shadow.py        # the three lines, runnable
-uv run python bench/pilot.py            # the same flow, synthetic, asserted
-```
-
-That count is the pilot. [`PILOT.md`](PILOT.md) is built around it in four
-gates — your number, shadow, one read path, decide — each of which can end the
-trial, and it asks you to write down what result would make you say no
-*before* you run the first command. `bench/pilot.py` fills every line of the
-report that a synthetic run honestly can, and leaves the ones only real
-traffic can answer blank on purpose. A proof of the mechanism is not evidence
-of demand.
-
-And to see why this is more than a soft-delete flag, run
-[`examples/rosetta.py`](examples/rosetta.py): soft-delete, TTL, a feature flag,
-row-level security and a token budget written as five rules on **one** handle,
-enforced together on both halves — `deleted=true` is the smallest of them.
-
-```bash
-uv run python examples/rosetta.py
-```
+That count is the pilot. [`PILOT.md`](PILOT.md) runs it as four gates that
+each can end the trial, and asks you to write down what result would make you
+say no *before* the first command. Full argument for the scanner:
+[`scanner/README.md`](scanner/README.md).
 
 ---
 
@@ -297,9 +269,8 @@ rotation and shredding are exercised against something that can refuse.
 Enterprise key custody is not a synonym for one cloud vendor's managed
 service, and the open standard for it can be started in a subprocess.
 
-And [`STATE.md`](docs/STATE.md) lists what is wrong, unproven or imprecise in what
-already ships — now narrowly: the three *hosted* providers share every line of
-that code path, and what is unproven about them is vendor-specific.
+And [`STATE.md`](docs/STATE.md) lists what is wrong, unproven or imprecise in
+what already ships.
 
 ---
 
@@ -396,7 +367,7 @@ front door, the on-ramp and the pilot; everything else is reference material in
 
 | | |
 |---|---|
-| [`AHA.md`](docs/AHA.md) | the one idea, derived in five steps with the measurements. Everything else is downstream |
+| [`AHA.md`](docs/AHA.md) | the one idea, derived in six steps with the measurements. Everything else is downstream |
 | [`ADOPTING.md`](ADOPTING.md) | the first hour: one collection, one read path, under ten lines — and what you do *not* get by stopping there |
 | [`PILOT.md`](PILOT.md) | the trial, in four gates that each can end it — your own number before you install, then shadow mode, then one read path. Plus `bench/pilot.py`, the same flow against a real MongoDB |
 
@@ -408,7 +379,7 @@ front door, the on-ramp and the pilot; everything else is reference material in
 | [`policy-engines.md`](docs/policy-engines.md) | the converse of the one idea: a retrieval rule no index filter and no policy engine can express, checked against a live Casbin enforcer |
 | [`PORTABILITY.md`](docs/PORTABILITY.md) | the guarantee is portable; its *enforcement* is not. Three engines measured, and the rung most vector databases cannot reach |
 | [`drift/`](drift/README.md) | the counter-argument, executable — including the whole thesis ported to pgvector with no MongoDB in the file |
-| [`examples/`](examples/) | thirteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
+| [`examples/`](examples/) | fourteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
 | [`scanner/`](scanner/README.md) | `voyd-scan`: one stdlib file, zero dependencies, pointed at *your* repository — the count this whole argument is about |
 
 **What is wrong with it, and what happens next** — read this before trusting any of the above.

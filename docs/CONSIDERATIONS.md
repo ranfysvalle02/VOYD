@@ -246,8 +246,14 @@ checks links, anchors, source paths named in prose, and any "N tests" claim —
 the last one-directionally, since `@parametrize` means the real number is
 always at least the count of `def test_` functions.
 
-Nothing checks "thirteen runnable programs" or "five steps". Those are on
-you, and both were stale within one commit of being written.
+Counted nouns in prose — *"fourteen runnable programs"*, *"six steps"* — are
+checked **exactly**, against the directory and the headings they describe.
+That guard exists because this paragraph used to say those two were "on you,
+and both were stale within one commit of being written." They then went stale
+again, in the same week, while the sentence naming them as a risk sat right
+here. "On you" is not a mechanism, which is this repository's whole complaint
+about conventions; the fix was to add a row to `COUNTED` rather than to try
+harder. Adding a row is how the next counted noun gets watched.
 
 ---
 
