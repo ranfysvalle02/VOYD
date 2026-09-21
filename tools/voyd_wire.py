@@ -78,6 +78,7 @@ except ImportError:  # pragma: no cover - the one dependency, and it is pymongo'
     sys.exit("pip install pymongo   (for the bson library)")
 
 import voyd_fanout
+import voyd_preflight
 import voyd_seal
 import voyd_metrics
 from voyd.declare import OPTIONS, load
@@ -2940,6 +2941,32 @@ def _vault_from(args) -> dict | int:
             "collection": collection or "__keys"}
 
 
+def _preflight(args, guards: dict[str, Guard]) -> int:
+    """Ask before serving. Returns an exit code, 0 to continue.
+
+    Synchronous and finished before `serve` binds anything, which is the
+    whole point: the answer belongs in the same screen of output as the
+    guarantees the boundary is about to start making, not in a metric
+    somebody reads afterwards.
+    """
+    found, why = asyncio.run(voyd_preflight.inspect(
+        _vault_uri(args.target), args.verify,
+        voyd_preflight.declarations(guards, OPTIONS)))
+    for line in voyd_preflight.report(found, why):
+        print(line, flush=True)
+    if voyd_preflight.fatal(found) and not args.verify_only:
+        print("voyd-wire: refusing to start. The boundary would enforce a "
+              "policy this cluster cannot satisfy, and it would do it one "
+              "query at a time -- which is a worse way to find out than "
+              "this. Fix the line above, or drop --verify to start anyway",
+              file=sys.stderr)
+        return 3
+    if voyd_preflight.fatal(found):
+        return 3
+    print(flush=True)
+    return 0
+
+
 def _embeds_from(options: Mapping) -> dict:
     """Collection -> the model the server embeds it with.
 
@@ -3065,6 +3092,27 @@ def main(argv: list[str] | None = None) -> int:
                          "rung that gets you aws/azure/gcp/kmip, where "
                          "destroying the master key is somebody else's "
                          "audited operation")
+    ap.add_argument("--verify", metavar="DB", default=None,
+                    help="before serving, ask the cluster whether it "
+                         "matches the policy file: a TTL index behind every "
+                         "deadline(), an index leading with every tenant(), "
+                         "an autoEmbed field naming the model auto_embed() "
+                         "declares, a binData validator behind every "
+                         "sealed(). Read-only -- it issues listIndexes, "
+                         "$listSearchIndexes and listCollections, creates "
+                         "nothing, and closes its connection before the "
+                         "listener accepts anything. A contradiction (the "
+                         "index embeds with a different model than the "
+                         "policy names) refuses to start; a missing layer "
+                         "underneath refusal (no TTL index) is a warning. "
+                         "Needs a database because a policy file names "
+                         "collections and the *client* names the database, "
+                         "so this process genuinely cannot know it")
+    ap.add_argument("--verify-only", action="store_true",
+                    help="run --verify and exit without binding a port. "
+                         "The form a deploy gate wants: exit 0 if the "
+                         "cluster matches the policy, 3 if it contradicts "
+                         "it, and print the warnings either way")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -3101,6 +3149,14 @@ def main(argv: list[str] | None = None) -> int:
         vault_spec = _vault_from(args)
         if isinstance(vault_spec, int):
             return vault_spec
+        if args.verify_only and not args.verify:
+            print("voyd-wire: --verify-only needs --verify DB naming the "
+                  "database to check", file=sys.stderr)
+            return 2
+        if args.verify:
+            code = _preflight(args, guards)
+            if code or args.verify_only:
+                return code
         if args.workers < 1:
             print("voyd-wire: --workers must be at least 1", file=sys.stderr)
             return 2

@@ -13,14 +13,14 @@ yet. They are marked.
 
 ## 1. The one that actually matters
 
-**Nobody has used this but its author.** 100 commits, one contributor, zero
+**Nobody has used this but its author.** 101 commits, one contributor, zero
 external users, zero pilots. Every claim in this repository is verified by
 somebody who also wrote the claim.
 
 That is not a coverage problem and no amount of code fixes it. The suite is
 good at holding claims somebody thought to state; it has never once been the
 thing that caught a problem a *user* hit, because there have been no users.
-Eighteen defects this month, and the way they were found is the point.
+Nineteen defects this month, and the way they were found is the point.
 Eleven came from running something new: three from exercising paths nobody
 had exercised, four from the hostile pass in §4, two more from the
 hostile pass against fan-out in §3 -- a cheap query pattern withdrawing
@@ -36,7 +36,7 @@ read-preference claim in §3, where the defect was in the prose and three
 files had spent weeks talking a reader out of something the proxy could
 already do; and fan-out's identity check, which looked for a standalone
 `saslStart`, never fired against a real driver's speculative handshake, and
-was fail-open while it did not — the most serious of the eighteen, and the
+was fail-open while it did not — the most serious of the nineteen, and the
 only one a user could have been harmed by rather than merely misled; and two
 from the sealing work -- an erasure that revoked rows its key had never
 protected, making unencrypted documents of the same tenant unreachable as a
@@ -60,6 +60,18 @@ decryption is reached -- so both obvious ways to write that test produce a
 uniform batch and check nothing. A test that cannot fail is a screenshot,
 and this page has said that about examples for a while without checking
 whether it was true of the tests.
+
+And the nineteenth was not in the code at all. It was a paragraph on this
+page: §5 explained that the declaration and the index could disagree and
+that reading Atlas back was not worth the risk, having silently substituted
+the risk of *creating* an index for the risk of *reading* one. A reviewer
+asked why, which is the only reason it was found -- the suite cannot go red
+over a justification, no test covers prose, and the sentence had been read
+several times by the person who wrote it without the substitution showing.
+The fix was 400 lines and closed four classes of silent drift that had
+nothing to do with embedding. The thing worth taking from it is the ratio:
+one question from outside beat every pass over the same file from inside,
+which is what the top of this section has been claiming all along.
 
 That last one is worth the sentence it costs. It was written *and* reviewed
 in the same hour as the feature, by the same person, with the failure mode
@@ -553,7 +565,7 @@ documents?"
 
 ## 4. Coverage
 
-291 tests, ~6,043 lines, against 8,152 lines of `voyd/` and 5,304 of
+317 tests, ~6,523 lines, against 8,152 lines of `voyd/` and 5,886 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -613,7 +625,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (287 tests, ~96 seconds) with
+**Consider:** the suite is fast by default (313 tests, ~106 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
@@ -781,27 +793,53 @@ skipped. **Consider:** that is fail-open on the *window*, not on the erasure.
 A regex or `$nin` delete against the vault would erase correctly and leave
 the minute-long window open, and nothing currently refuses it.
 
-**The boundary declares who embeds; it does not create the index.** A
-policy file naming `auto_embed("voyage-3")` is enough for the wire to refuse
-a client-supplied `queryVector` on that collection -- a decision taken from
-the request, with no connection and no round trip. It is *not* enough to
-make the Atlas Vector Search index exist with `type: autoEmbed`; that is
-still `SearchEngine.ensure_indexes`, which means the library, which means
-somebody's Python process. **Consider:** the boundary could create it at
-startup, and `--key-vault` has already established that a flag may buy a
-connection of its own if it says so. The reason it does not yet is that
-index creation is a schema change against a cluster the proxy does not own,
-and getting it wrong is slower to notice than a refused query -- a wrong
-index definition is a relevance problem, which `LIMITS.md` already calls
-the hardest kind to attribute. Undecided.
+**The boundary declares who embeds; it does not create the index -- but it
+now checks.** This entry previously read, in full, that the declaration and
+the index could disagree and that nothing here read Atlas back, with a
+paragraph about why creating an index is a schema change against a cluster
+the proxy does not own.
 
-What follows from that gap is worth stating plainly: **the declaration and
-the index can disagree.** A voydfile saying `auto_embed("voyage-3")` against
-an index actually built with `voyage-3.5`, or with no `autoEmbed` field at
-all, is not detected. The wire would refuse client vectors -- correctly, by
-its own declaration -- for an index that needed one. Two declarations *in
-the policy file* must agree and are checked at load; the third party is
-Atlas, and nothing here reads it back.
+That paragraph was a category error, and it is worth leaving the correction
+visible rather than editing it away. *Creating* an index is a write and
+deserves the caution. *Reading one back* is a `$listSearchIndexes` call. The
+risk of the first was used to justify skipping the second, which is not a
+judgement call -- it is two different operations wearing one sentence.
+
+`--verify DB` now asks, read-only, before serving: a TTL index behind every
+`deadline()`, an index leading with every `tenant()`, an `autoEmbed` field
+naming the model every `auto_embed()` declares, a `binData` validator behind
+every `sealed()`. `--verify-only` exits instead of serving, which is the form
+a deploy gate wants. See `tools/voyd_preflight.py`; the argument for it is
+`capabilities.py`'s own -- a claim about software this package does not ship,
+with no expiry and nobody responsible for it, is asked rather than assumed.
+
+**It needs a database name, and that is not laziness.** A policy file names
+collections; the *client* names the database. This process therefore cannot
+know which database to check, and inferring one would be the exact mistake
+`capabilities.py` was written to stop. So it is an argument.
+
+**Consider:** creating the index from the declaration is still not done, and
+the caution above is the real reason now rather than a borrowed one. A wrong
+index definition is a relevance failure, which this page already calls the
+hardest kind to attribute, and a proxy that silently altered search indexes
+on a cluster it does not own would be a worse surprise than the one it fixes.
+The check closes the detection half; the creation half stays with the
+library, where an operator called `ensure_indexes` on purpose.
+
+**Still open, and now named rather than implied:** the preflight runs once,
+at startup. An index dropped or redefined while the boundary is running is
+not noticed, and the boundary will go on refusing client vectors for an
+index that stopped being an autoEmbed one an hour ago. A watcher is
+implementable -- `$listSearchIndexes` is cheap and change streams exist --
+and is not implemented. What would make it worth building is somebody
+hitting it.
+
+**What `--verify` cannot check**, because nothing on the wire can: whether
+the *documents already stored* were embedded with the model the index now
+declares. A re-indexed collection whose old rows carry vectors from last
+quarter's model is exactly what `embedded_with()` refuses per document, and
+that is the right place for it -- a per-row question has a per-row answer.
+The preflight reads definitions, not data.
 
 **Queryable Encryption is library-only and stays that way for now.** The
 wire seals with CSFLE, which is the mode whose `keyId` may be a JSON pointer
