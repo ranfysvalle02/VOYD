@@ -304,6 +304,18 @@ What it costs, stated rather than discovered:
   `voyd_fanout_unverified_total` counts it. Failing closed is the only
   behaviour available: the alternative is serving documents whose
   permission nobody established.
+- **It gives up on a collection that is not benefiting.** Fan-out pays when
+  the work it moves off the primary exceeds the work it adds back — true
+  for a `$vectorSearch` scanning 100,000 candidates to return ten, false
+  for a `find` returning most of a small collection, and nothing about the
+  request says which. So it is measured rather than guessed: the time the
+  secondary took to rank against the time the primary took to confirm,
+  per collection. When confirming stops being cheaper than the ranking it
+  bought, that collection goes back to the primary and says so once.
+  `--fan-out-give-up RATIO` tunes it (default `1.0`; `0` measures without
+  acting), and `voyd_fanout_withdrawn_total` counts it. Withdrawal is
+  one-way inside a process — re-admitting on a favourable sample is how a
+  boundary oscillates.
 
 **It needs a credential of its own, and that is a real change.** Every other
 upstream connection this proxy makes is the client's. A secondary connection

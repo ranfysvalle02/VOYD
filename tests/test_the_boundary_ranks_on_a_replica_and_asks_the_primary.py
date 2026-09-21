@@ -283,6 +283,32 @@ def replication_stopped(uri):
         client.close()
 
 
+def queries_on(node) -> int:
+    """`opcounters.query` on one member -- the server's own account of what
+    it was asked, rather than anything this process reports about itself."""
+    return node.admin.command("serverStatus")["opcounters"]["query"]
+
+
+def settled(count, tries: int = 25) -> int:
+    """Wait until a counter stops moving, then return it.
+
+    The replica set is shared across this file and a boundary torn down by
+    the previous test can still be draining a read onto a secondary while
+    the next one takes its baseline. That is worth waiting out rather than
+    absorbing into a tolerance: these assertions are the difference between
+    "no read reached that node" and "about none did", and the second one is
+    not worth making about a privilege check.
+    """
+    last = count()
+    for _ in range(tries):
+        time.sleep(0.1)
+        now_ = count()
+        if now_ == last:
+            return now_
+        last = now_
+    return last
+
+
 def texts(uri, name, flt):
     client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=8000)
     try:
@@ -464,12 +490,15 @@ def test_a_client_arriving_as_somebody_else_is_not_served_over_this_identity(
                                serverSelectionTimeoutMS=8000)
     client = pymongo.MongoClient(other, serverSelectionTimeoutMS=8000)
     try:
-        before = node.admin.command("serverStatus")["opcounters"]["query"]
+        def queries():
+            return queries_on(node)
+
+        before = settled(queries)
         for _ in range(6):
             got = sorted(d["text"] for d in
                          client[seeded.name].notes.find({"tenant_id": "acme"}))
             assert got == ["live"], "the answer changed, not just the route"
-        after = node.admin.command("serverStatus")["opcounters"]["query"]
+        after = queries()
     finally:
         client.close()
         node.close()
@@ -492,3 +521,177 @@ def test_a_fan_out_credential_that_does_not_work_degrades_to_the_primary(
     with _wire(tmp_path, replica_set, "--fan-out", broken,
                "--advertise-self") as uri:
         assert texts(uri, seeded.name, {"tenant_id": "acme"}) == ["live"]
+
+
+def test_the_same_username_in_a_different_auth_database_is_a_different_person(
+        rs_db, fanned):
+    """`admin.voyd` and `elsewhere.voyd` are two principals.
+
+    An identity check that compared only names would hand the second one
+    the first one's connection, which is the privilege change this whole
+    check exists to refuse -- just harder to see, because the log line
+    would have read `voyd` either way. The rig carries both users so this
+    is a test rather than a note in LIMITS, which is what it used to be.
+    """
+    _requires_auth()
+    port = fanned.split("localhost:")[1].split("/")[0]
+    # `elsewhere.voyd` may only read its own database, so the assertion has
+    # to be made there rather than in the throwaway one.
+    same_name = f"mongodb://voyd:voyd@localhost:{port}/?authSource=elsewhere"
+    node = pymongo.MongoClient(direct("localhost:27022"),
+                               serverSelectionTimeoutMS=8000)
+    client = pymongo.MongoClient(same_name, serverSelectionTimeoutMS=8000)
+    try:
+        client["elsewhere"].notes.insert_one({"tenant_id": "acme",
+                                              "text": "mine"})
+        def queries():
+            return queries_on(node)
+
+        before = settled(queries)
+        for _ in range(6):
+            got = [d["text"] for d in
+                   client["elsewhere"].notes.find({"tenant_id": "acme"})]
+            assert got == ["mine"]
+        after = queries()
+    finally:
+        client.close()
+        node.close()
+        # Cleanup goes *round* the boundary on purpose: dropping a guarded
+        # collection is refused through it, correctly, and a test that
+        # tidied up through the front door would be asserting that the
+        # refusal does not work.
+        raw = pymongo.MongoClient(RS_URI, serverSelectionTimeoutMS=8000)
+        try:
+            raw["elsewhere"].notes.drop()
+        finally:
+            raw.close()
+    assert after == before, (
+        "elsewhere.voyd was served over the connection authenticated as "
+        "admin.voyd: the identity check is comparing names, not principals")
+
+
+# --------------------------------------------------------------------------
+# Whether the split is worth doing, which is not the same question as
+# whether it is safe. Pure first.
+# --------------------------------------------------------------------------
+
+def test_a_read_that_pays_keeps_fanning_out():
+    """The `$vectorSearch` shape: a long scan, a cheap confirmation."""
+    payoff = voyd_fanout.Payoff(warmup=3)
+    for _ in range(20):
+        assert payoff.record("notes", ranked=0.100, verified=0.002) is None
+    assert payoff.withdrawn() == frozenset()
+
+
+def test_a_read_that_does_not_pay_is_withdrawn_and_says_why():
+    """The small-collection shape: the primary is asked for marks on nearly
+    everything it would have served anyway, so it does comparable work and
+    the client pays a round trip for the privilege."""
+    payoff = voyd_fanout.Payoff(warmup=3)
+    reasons = [payoff.record("notes", ranked=0.004, verified=0.006)
+               for _ in range(10)]
+    said = [r for r in reasons if r]
+    assert len(said) == 1, "it must withdraw once, not once per batch"
+    assert "paying for nothing" in said[0]
+    assert payoff.withdrawn() == {"notes"}
+
+
+def test_withdrawal_is_one_way():
+    """No path back inside one process, deliberately. Re-admitting on a
+    favourable sample is how a boundary oscillates, and the cost of staying
+    on the primary is a slower read rather than a wrong one."""
+    payoff = voyd_fanout.Payoff(warmup=2)
+    for _ in range(5):
+        payoff.record("notes", ranked=0.001, verified=0.010)
+    for _ in range(50):
+        assert payoff.record("notes", ranked=1.0, verified=0.001) is None
+    assert payoff.withdrawn() == {"notes"}
+
+
+def test_a_ratio_of_zero_measures_without_acting():
+    payoff = voyd_fanout.Payoff(ratio=0.0, warmup=2)
+    for _ in range(20):
+        assert payoff.record("notes", ranked=0.001, verified=0.500) is None
+    assert payoff.withdrawn() == frozenset()
+
+
+def test_one_collection_giving_up_does_not_withdraw_another():
+    payoff = voyd_fanout.Payoff(warmup=2)
+    for _ in range(10):
+        payoff.record("notes", ranked=0.001, verified=0.010)
+        payoff.record("papers", ranked=0.200, verified=0.001)
+    assert payoff.withdrawn() == {"notes"}
+
+
+def test_a_withdrawn_collection_is_not_routed_to_a_secondary():
+    body = {"find": "notes"}
+    assert voyd_fanout.routes_to_secondary(body, {"notes": object()}) == "find"
+    assert voyd_fanout.routes_to_secondary(
+        body, {"notes": object()}, frozenset({"notes"})) is None
+
+
+def test_the_boundary_gives_up_on_a_read_that_is_not_worth_it(rs_db, tmp_path,
+                                                              replica_set):
+    """End to end: a tiny collection read whole, over and over.
+
+    There is nothing for the secondary to save here -- the primary is asked
+    to confirm every document it would have returned anyway -- so the
+    boundary should stop routing it and say so. The answers must not change
+    when it does, which is the half of this that actually matters.
+    """
+    rs_db.notes.with_options(
+        write_concern=pymongo.WriteConcern(w=3)).insert_many(
+            [{"tenant_id": "acme", "text": f"n{i}"} for i in range(5)])
+    expected = sorted(f"n{i}" for i in range(5))
+    nodes = [pymongo.MongoClient(direct(f"localhost:{p}"),
+                                 serverSelectionTimeoutMS=8000)
+             for p in (27022, 27023)]
+
+    def secondary_queries():
+        return sum(queries_on(n) for n in nodes)
+
+    # A deliberately impatient ratio: give up unless confirming the marks
+    # costs less than a thousandth of the ranking, which nothing does. This
+    # asserts the *mechanism* fires and that answers survive it, not that
+    # any particular workload trips it at the 1.0 default -- tying a test
+    # to a real latency ratio on shared CI hardware would make it a
+    # measurement of the runner.
+    #
+    # The direction is worth stating because it reads backwards at a
+    # glance, and this test was written against the wrong one first: a
+    # *larger* ratio is more tolerant, because it is how much the check is
+    # allowed to cost relative to what it bought.
+    try:
+        with _wire(tmp_path, replica_set, "--fan-out", replica_set,
+                   "--fan-out-give-up", "0.001", "--advertise-self") as uri:
+            start = settled(secondary_queries)
+            for _ in range(12):
+                assert texts(uri, rs_db.name, {"tenant_id": "acme"}) == expected
+            warmed = settled(secondary_queries)
+            assert warmed > start, "nothing was ever ranked on a secondary"
+
+            for _ in range(12):
+                assert texts(uri, rs_db.name, {"tenant_id": "acme"}) == expected
+            after = secondary_queries()
+    finally:
+        for node in nodes:
+            node.close()
+    # A *rate* comparison rather than "exactly zero". The replica set is
+    # shared with every other test in this file, and a boundary torn down
+    # by one of them can land a read on a secondary while this one is
+    # counting -- which is worth tolerating precisely because the claim is
+    # about a collection no longer being routed, and one stray read from
+    # somebody else's connection is not evidence against it. The two halves
+    # do the same twelve reads, so anything but a collapse fails.
+    before_give_up, after_give_up = warmed - start, after - warmed
+    # Eight, not twelve: `Payoff` withdraws as soon as its warmup sample is
+    # full, so the first loop stops being routed part way through. Asserting
+    # twelve here was asserting that the feature does *not* work promptly,
+    # and it failed for exactly that reason.
+    assert before_give_up >= 4, (
+        f"only {before_give_up} reads reached a secondary during warmup; "
+        f"fan-out was not running and this test proves nothing")
+    assert after_give_up * 4 < before_give_up, (
+        f"the collection is still being ranked on a secondary after the "
+        f"boundary should have given up: {before_give_up} reads before, "
+        f"{after_give_up} after")

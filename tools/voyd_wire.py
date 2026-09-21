@@ -1087,8 +1087,13 @@ class Secondaries:
     """
 
     def __init__(self, uri: str, *, verbose: bool = True,
-                 meter: "voyd_metrics.Meter | None" = None):
+                 meter: "voyd_metrics.Meter | None" = None,
+                 give_up: float = 1.0):
         self.uri = uri
+        # Shared across every connection this worker serves. A per
+        # connection sample would be a handful of reads on a short-lived
+        # client, which is not enough to withdraw a collection on.
+        self.payoff = voyd_fanout.Payoff(ratio=give_up)
         self.verbose = verbose
         self.meter = meter
         self._nodes: list[tuple[str, int, bool]] = []
@@ -1097,14 +1102,33 @@ class Secondaries:
         self._resolving = asyncio.Lock()
         self._resolved = False
 
-    @property
-    def user(self) -> str | None:
-        """The username in the fan-out URI, for the identity check."""
+    def identity(self) -> tuple[str, str] | None:
+        """``(auth database, username)`` from the fan-out URI.
+
+        A *pair*, because a username on its own does not name anybody.
+        ``alice`` in ``admin`` and ``alice`` in ``reports`` are two
+        different principals with two different sets of privileges, and an
+        identity check that compared only the name would hand the first
+        one's connection to the second. That was a real hole in this check
+        for one commit, documented rather than found.
+        """
         try:
             from pymongo.uri_parser import parse_uri
-            return parse_uri(self.uri).get("username")
+            parsed = parse_uri(self.uri)
         except Exception:
             return None
+        username = parsed.get("username")
+        if not username:
+            return None
+        options = parsed.get("options") or {}
+        source = options.get("authSource") or parsed.get("database") or "admin"
+        return str(source), str(username)
+
+    @property
+    def user(self) -> str | None:
+        """Just the name, for log lines. Never for the check."""
+        found = self.identity()
+        return found[1] if found else None
 
     def _resolve(self) -> list[tuple[str, int, bool]]:
         from pymongo.uri_parser import parse_uri
@@ -1528,6 +1552,8 @@ class Conversation:
         self._next_ask = ASKED_BASE
         self.client_lock = asyncio.Lock()
         self.primary_lock = asyncio.Lock()
+        self.payoff = None
+        self.sent_at: dict[int, float] = {}
         # Starts *off* wherever the secondaries need a credential, and is
         # turned on only by a client proving the same identity. The other
         # way round -- on until somebody is caught -- is fail-open, and it
@@ -1634,8 +1660,26 @@ class Conversation:
 
         ids = voyd_fanout.needed_ids(batch)
         fields = voyd_fanout.verdict_fields(guard)
+        began = time.monotonic()
+        # How long the secondary took, measured from the moment `route`
+        # sent the command. A *duration*, which is worth saying because the
+        # first version of this passed the stored timestamp straight
+        # through as if it were one -- the ratio was then a monotonic clock
+        # against a few milliseconds, no collection ever looked unprofitable,
+        # and the whole mechanism silently never fired.
+        sent = self.sent_at.pop(resp_to, None)
+        ranked_in = None if sent is None else began - sent
         fresh = (await self.authoritative(db, collection, ids, fields)
                  if ids is not None else None)
+        verified_in = time.monotonic() - began
+        if (self.payoff is not None and ranked_in is not None
+                and fresh is not None):
+            why = self.payoff.record(collection, ranked_in, verified_in)
+            if why is not None:
+                print(f"voyd-wire: no longer ranking {collection} on a "
+                      f"secondary -- {why}", flush=True)
+                if self.meter is not None:
+                    self.meter.fanout_withdrawn_total += 1
         if fresh is None:
             # Unverifiable. Refuse the page rather than serve it: a batch
             # ranked on a replica whose marks could not be checked is
@@ -1681,7 +1725,7 @@ def _cursor_id(reply: Mapping) -> int | None:
     return None
 
 
-def authenticating(body: Mapping) -> tuple[bool, str | None]:
+def authenticating(body: Mapping) -> tuple[bool, tuple[str, str] | None]:
     """Is this an authentication attempt, and as whom?
 
     Two shapes, and missing the second one was a real bug rather than a
@@ -1697,16 +1741,29 @@ def authenticating(body: Mapping) -> tuple[bool, str | None]:
     which is in the clear -- the *proof* is what is protected, not the
     identity -- so reading it needs no credential.
 
-    Returns ``(attempted, username)``. ``(True, None)`` is the important
-    case: an authentication this function does not understand, X.509 or AWS
-    or OIDC, where the answer to "as whom" is unknown and the caller must
+    Returns ``(attempted, identity)`` where identity is
+    ``(auth database, username)``. ``(True, None)`` is the important case:
+    an authentication this function does not understand, X.509 or AWS or
+    OIDC, where the answer to "as whom" is unknown and the caller must
     treat it as "not us".
+
+    The auth database is half the answer and was missing for a commit.
+    ``alice`` authenticated against ``admin`` and ``alice`` authenticated
+    against ``reports`` are different principals; comparing names alone
+    would have let the second be served over the first's connection.
     """
     inner = body.get("speculativeAuthenticate")
     if isinstance(inner, Mapping):
+        # A speculative round names its database in `db`; the enclosing
+        # `hello` is always on `admin` and says nothing about the user.
+        source = inner.get("db")
         body = inner
-    elif not ({"saslStart", "authenticate"} & set(body)):
+    elif {"saslStart", "authenticate"} & set(body):
+        source = body.get("$db")
+    else:
         return False, None
+    if not isinstance(source, str):
+        return True, None
     payload = body.get("payload")
     raw = getattr(payload, "value", payload)
     if not isinstance(raw, (bytes, bytearray)):
@@ -1714,7 +1771,8 @@ def authenticating(body: Mapping) -> tuple[bool, str | None]:
     try:
         for part in raw.decode("utf8", "replace").split(","):
             if part.startswith("n="):
-                return True, part[2:].replace("=2C", ",").replace("=3D", "=")
+                name = part[2:].replace("=2C", ",").replace("=3D", "=")
+                return True, (source, name)
     except Exception:
         return True, None
     return True, None
@@ -1788,11 +1846,15 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
             # identities are the same name.
             attempted, who = authenticating(body)
             if attempted:
-                matched = who is not None and who == secondaries.user
-                if conv.fan_out_ok != matched and verbose and not matched:
-                    print(f"  voyd: client authenticated as {who!r}; "
+                mine = secondaries.identity()
+                matched = who is not None and who == mine
+                if verbose and not matched:
+                    shown = f"{who[0]}.{who[1]}" if who else "a mechanism "\
+                        "this boundary cannot read"
+                    theirs = f"{mine[0]}.{mine[1]}" if mine else "nobody"
+                    print(f"  voyd: client authenticated as {shown}; "
                           f"fan-out is off for this connection (secondaries "
-                          f"are reached as {secondaries.user!r})", flush=True)
+                          f"are reached as {theirs})", flush=True)
                 conv.fan_out_ok = matched
 
             # ---- the routing decision -----------------------------------
@@ -1801,7 +1863,8 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 more = body.get("getMore")
                 if isinstance(more, int):
                     dest = conv.home.get(more, "primary")
-                elif voyd_fanout.routes_to_secondary(body, guards):
+                elif voyd_fanout.routes_to_secondary(
+                        body, guards, secondaries.payoff.withdrawn()):
                     if conv.secondary_w is None:
                         opened = await secondaries.open()
                         if opened is not None:
@@ -1822,6 +1885,7 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                                 "mode": "secondaryPreferred"}
                             raw = encode_sections(req_id, resp_to, head[0],
                                                   patched, head[2], head[3])
+                        conv.sent_at[req_id] = time.monotonic()
                         if meter is not None:
                             meter.fanout_reads_total += 1
 
@@ -1902,6 +1966,7 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
 
             if source == "secondary":
                 raw = await conv.permit(raw, req_id, resp_to)
+                conv.sent_at.pop(resp_to, None)
             else:
                 was_delete = resp_to in rewritten
                 rewritten.discard(resp_to)
@@ -1941,7 +2006,8 @@ async def fanned_session(client_r, client_w, upstream: Upstream,
             return
 
         conv = Conversation(client_w, up_w, guards, verbose, meter)
-        conv.fan_out_ok = secondaries.user is None
+        conv.payoff = secondaries.payoff
+        conv.fan_out_ok = secondaries.identity() is None
         rewritten: set[int] = set()
         tasks = [
             asyncio.ensure_future(route(client_r, conv, upstream, secondaries,
@@ -2045,7 +2111,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           keyfile: str | None = None, max_connections: int = 200,
           drain_seconds: float = 20.0, advertise: str | None = None,
           workers: int = 1, metrics_port: int | None = None,
-          fan_out: str | None = None) -> None:
+          fan_out: str | None = None, give_up: float = 1.0) -> None:
     """Bind, announce, then run the boundary -- in this process or N of them.
 
     The listening socket is bound *here*, once, before any fork. That is
@@ -2096,7 +2162,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                   ssl_ctx=ssl_ctx, max_connections=max_connections,
                   drain_seconds=drain_seconds, advertise=advertise,
                   slab=slab, meters=meters, metrics_port=metrics_port,
-                  fan_out=fan_out)
+                  fan_out=fan_out, give_up=give_up)
         return
 
     if slab is not None and metrics_port is not None:
@@ -2105,6 +2171,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                               max_connections=max_connections,
                               drain_seconds=drain_seconds,
                               advertise=advertise, fan_out=fan_out,
+                              give_up=give_up,
                               meter=meters[0] if meters else None))
     summarise(counts)
 
@@ -2113,10 +2180,12 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
                target: str, guards: dict[str, Guard], verbose: bool, *,
                max_connections: int, drain_seconds: float,
                advertise: str | None, fan_out: str | None = None,
+               give_up: float = 1.0,
                meter: "voyd_metrics.Meter | None" = None) -> dict:
     """One worker: accept, serve, drain, and report what it counted."""
     upstream = Upstream(target, verbose=verbose, meter=meter)
-    secondaries = (Secondaries(fan_out, verbose=verbose, meter=meter)
+    secondaries = (Secondaries(fan_out, verbose=verbose, meter=meter,
+                               give_up=give_up)
                    if fan_out else None)
     live = Live()
     stopping = asyncio.Event()
@@ -2239,7 +2308,7 @@ def supervise(sock: socket.socket, workers: int, target: str,
               slab: "voyd_metrics.Slab | None" = None,
               meters: "list[voyd_metrics.Meter] | None" = None,
               metrics_port: int | None = None,
-              fan_out: str | None = None) -> None:
+              fan_out: str | None = None, give_up: float = 1.0) -> None:
     """N worker processes over one listening socket, and one honest total.
 
     Why processes at all, when the loop already removed the thread stacks:
@@ -2289,7 +2358,7 @@ def supervise(sock: socket.socket, workers: int, target: str,
                     sock, ssl_ctx, target, guards, verbose,
                     max_connections=max_connections,
                     drain_seconds=drain_seconds, advertise=advertise,
-                    fan_out=fan_out,
+                    fan_out=fan_out, give_up=give_up,
                     meter=meters[index] if meters else None))
             except BaseException:
                 traceback.print_exc()
@@ -2472,6 +2541,14 @@ def main(argv: list[str] | None = None) -> int:
                          "URI's identity, and fan-out switches itself off "
                          "for any connection whose client authenticated as "
                          "somebody else. See LIMITS.md \u00a73")
+    ap.add_argument("--fan-out-give-up", metavar="RATIO", type=float,
+                    default=1.0,
+                    help="stop ranking a collection on a secondary once "
+                         "confirming its marks on the primary costs this "
+                         "much of what the ranking saved (default 1.0: "
+                         "give up when the check costs as much as the read "
+                         "it was checking). 0 never gives up -- the "
+                         "measurement still runs and still reports")
     ap.add_argument("--advertise-self", action="store_true",
                     help="shorthand for --advertise localhost:<listen>")
     ap.add_argument("--max-connections", type=int, default=200, metavar="N",
@@ -2533,7 +2610,7 @@ def main(argv: list[str] | None = None) -> int:
               certfile=args.tls_cert, keyfile=args.tls_key,
               max_connections=args.max_connections, advertise=advertise,
               workers=args.workers, metrics_port=args.metrics,
-              fan_out=args.fan_out)
+              fan_out=args.fan_out, give_up=args.fan_out_give_up)
     except KeyboardInterrupt:
         summarise(guards)
     return 0

@@ -105,6 +105,15 @@ services:
           try {
             db.getSiblingDB("admin").createUser({user: "someone-else",
               pwd: "someone-else", roles: [{role: "readWriteAnyDatabase", db: "admin"}]})
+          } catch (e) { if (!/already exists/.test(e.message)) throw e }
+          // A third identity with the *same name* as the first, in a
+          // different auth database. admin.voyd and elsewhere.voyd are two
+          // principals, and an identity check comparing only usernames
+          // would hand one of them the other connection. That hole was
+          // real for one commit; this is what keeps it closed.
+          try {
+            db.getSiblingDB("elsewhere").createUser({user: "voyd",
+              pwd: "voyd", roles: [{role: "readWrite", db: "elsewhere"}]})
           } catch (e) { if (!/already exists/.test(e.message)) throw e }'
         # Hold the container open; the mongods are forked into the background.
         tail -f /data/rs27021/mongod.log

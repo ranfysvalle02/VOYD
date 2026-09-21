@@ -233,11 +233,26 @@ What it gave up is stated here rather than in the README's margin:
   case that matters, because this module cannot have been written with one
   in mind.
 
-**Consider:** the cost argument for fan-out assumes the scan dominates the
-lookup. For a `$vectorSearch` returning 10 of 100,000 that is obviously
-true. For a `find` returning most of a small collection it is obviously
-false, and the extra round trip is pure loss. Nothing measures this
-automatically and nothing refuses to fan out a read that will not benefit.
+**The cost argument is now measured rather than assumed.** It assumes the
+scan dominates the lookup -- obviously true for a `$vectorSearch` returning
+10 of 100,000, obviously false for a `find` returning most of a small
+collection, and nothing about the request distinguishes them. An operator
+flag naming a threshold would have been asking somebody to guess a number
+this process can measure, so `Payoff` compares how long the secondary took
+to rank against how long the primary took to confirm, per collection, and
+withdraws the collection when confirming stops being the cheaper half.
+
+**Consider:** withdrawal is one-way inside a process. There is no path back
+to fanning out a collection until a restart, deliberately -- re-admitting on
+a favourable sample is how a boundary oscillates, and the cost of staying on
+the primary is a slower read rather than a wrong one. A workload whose shape
+changes during a long-running process therefore stays withdrawn.
+
+**Consider:** the ratio reads backwards at a glance. A *larger*
+`--fan-out-give-up` is more tolerant, because it is how much the check is
+allowed to cost relative to what it bought. The end-to-end test for this was
+written against the wrong direction first and passed for the wrong reason
+until the assertion was tightened to watch the secondary's own counters.
 
 The other two were wrong, and wrong in the direction that talks a reader out
 of the tool. This page said the boundary does not "honour read preference, or

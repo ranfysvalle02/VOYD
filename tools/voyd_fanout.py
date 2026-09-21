@@ -176,7 +176,8 @@ def read_preference_of(body: Mapping) -> str | None:
     return None
 
 
-def routes_to_secondary(body: Mapping, guards: Mapping[str, Any]) -> str | None:
+def routes_to_secondary(body: Mapping, guards: Mapping[str, Any],
+                        withdrawn: frozenset = frozenset()) -> str | None:
     """Should this command be ranked on a secondary? The reason, or ``None``.
 
     Returning a reason rather than a bool is not decoration: it is what the
@@ -200,6 +201,9 @@ def routes_to_secondary(body: Mapping, guards: Mapping[str, Any]) -> str | None:
     if "$out" in str(body.get("pipeline", "")) or "$merge" in str(
             body.get("pipeline", "")):
         return None                      # a write wearing a read's name
+    if collection in withdrawn:
+        # Measured, on this deployment, as not worth the round trip.
+        return None
     if collection in guards and not correlatable(body):
         # Guarded and unverifiable is the one combination that must stay put.
         return None
@@ -260,3 +264,83 @@ def merge_marks(batch: list, authoritative: Mapping[Any, Mapping],
             judgeable.append(merged)
         originals.append(doc)
     return judgeable, originals
+
+
+class Payoff:
+    """Whether the rank/permit split is actually paying, per collection.
+
+    Fan-out is worth doing when the work it moves off the primary is larger
+    than the work it adds back. For a `$vectorSearch` scanning 100,000
+    candidates to return ten, that is overwhelmingly true. For a `find`
+    returning most of a small collection it is false: the primary is asked
+    for marks on nearly every document it would have served anyway, so it
+    does comparable work and the client pays an extra round trip for the
+    privilege.
+
+    Nothing about the request says which of those it is. The collection
+    size is unknown, the selectivity of a filter is unknown, and an
+    operator flag naming a threshold would be asking somebody to guess a
+    number this process can measure.
+
+    So it is measured, per collection, from the two things that are already
+    being timed:
+
+    - **ranked** -- how long the secondary took to answer. A proxy for the
+      work the primary did *not* do.
+    - **verified** -- how long the primary took to confirm the marks. The
+      work the primary does instead.
+
+    When `verified` stops being comfortably smaller than `ranked`, the
+    primary is doing about as much as it would have without any of this and
+    the split has become pure latency. That collection is withdrawn from
+    fan-out and says so once.
+
+    **It only ever withdraws.** There is no path back to fanning out a
+    collection inside one process, and that is deliberate rather than
+    unfinished: re-admitting on a favourable sample is how a boundary
+    oscillates, and the cost of staying on the primary is a slower read
+    rather than a wrong one. A restart re-decides.
+    """
+
+    def __init__(self, ratio: float = 1.0, warmup: int = 8,
+                 alpha: float = 0.3):
+        self.ratio = ratio
+        self.warmup = warmup
+        self.alpha = alpha
+        self._seen: dict[str, int] = {}
+        self._ranked: dict[str, float] = {}
+        self._verified: dict[str, float] = {}
+        self._withdrawn: set[str] = set()
+
+    def withdrawn(self) -> frozenset:
+        return frozenset(self._withdrawn)
+
+    def _blend(self, table: dict, key: str, value: float) -> float:
+        current = table.get(key)
+        table[key] = (value if current is None
+                      else current * (1 - self.alpha) + value * self.alpha)
+        return table[key]
+
+    def record(self, collection: str, ranked: float,
+               verified: float) -> str | None:
+        """Fold in one batch. Returns a reason if this just withdrew.
+
+        ``ratio <= 0`` disables withdrawal entirely, which is the escape
+        hatch for an operator who has measured their own workload and
+        disagrees -- the measurement keeps running and the metrics keep
+        reporting, only the acting stops.
+        """
+        if self.ratio <= 0 or collection in self._withdrawn:
+            return None
+        rank_avg = self._blend(self._ranked, collection, ranked)
+        verify_avg = self._blend(self._verified, collection, verified)
+        self._seen[collection] = self._seen.get(collection, 0) + 1
+        if self._seen[collection] < self.warmup:
+            return None
+        if verify_avg < rank_avg * self.ratio:
+            return None
+        self._withdrawn.add(collection)
+        return (f"confirming marks on the primary is costing "
+                f"{verify_avg * 1000:.1f}ms against {rank_avg * 1000:.1f}ms "
+                f"to rank on a secondary, so the split is paying for "
+                f"nothing")

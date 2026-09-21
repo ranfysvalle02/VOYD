@@ -75,6 +75,7 @@ GLOBAL = (
     "fanout_reads_total",
     "fanout_verified_total",
     "fanout_unverified_total",
+    "fanout_withdrawn_total",
 )
 
 
@@ -228,6 +229,7 @@ class Meter:
         self.fanout_reads_total = 0
         self.fanout_verified_total = 0
         self.fanout_unverified_total = 0
+        self.fanout_withdrawn_total = 0
 
     def flush(self, guards: dict) -> None:
         self.worker_flushes_total += 1
@@ -286,6 +288,13 @@ HELP = {
         "confirm their marks. Any sustained value here is a primary that "
         "is failing the lookups, and the boundary is failing closed -- "
         "correct, and costing every fanned-out read on that collection."),
+    "fanout_withdrawn_total": (
+        "counter",
+        "Collections withdrawn from fan-out because confirming their marks "
+        "on the primary stopped being cheaper than the ranking it bought. "
+        "Not an error: it is the boundary declining to pay a round trip "
+        "for nothing. Climbing on a collection you expected to benefit "
+        "means the read is less selective than you think."),
     "admitted_total": ("counter", "Documents a prompt was allowed to see."),
     "refused_total": ("counter", "Documents refused on the read path."),
     "revoked_total": ("counter", "Deletes rewritten as revocations."),
