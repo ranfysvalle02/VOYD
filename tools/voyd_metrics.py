@@ -102,8 +102,14 @@ class Layout:
         return self.names.index((field, collection, reason))
 
 
+# The supervisor's own numbers, written by the parent and never by a
+# worker. They live in a header ahead of the slots for the same reason the
+# slots are per worker: exactly one process writes each word.
+HEADER = ("workers_configured", "workers_live", "worker_restarts_total")
+
+
 class Slab:
-    """One shared page per worker. Single writer, many readers, no locks.
+    """One shared page per worker, plus a header the parent owns.
 
     Anonymous `mmap` created before the fork, so every worker inherits the
     same pages. A worker only ever writes its own slot, and the reader
@@ -116,30 +122,85 @@ class Slab:
         self.workers = max(workers, 1)
         self.layout = layout
         self.stride = layout.size + 1            # +1 for the flush timestamp
-        self.buf = mmap.mmap(-1, self.stride * self.workers * 8)
+        self.head = len(HEADER)
+        self.buf = mmap.mmap(
+            -1, (self.head + self.stride * self.workers) * 8)
+        self.set_header(workers_configured=self.workers,
+                        workers_live=self.workers)
+
+    # -- the header, written by the supervisor ----------------------------
+
+    def set_header(self, **fields: int) -> None:
+        for name, value in fields.items():
+            struct.pack_into("<q", self.buf, HEADER.index(name) * 8,
+                             int(value))
+
+    def header(self) -> dict[str, int]:
+        return {name: struct.unpack_from("<q", self.buf, i * 8)[0]
+                for i, name in enumerate(HEADER)}
+
+    def bump(self, name: str, by: int = 1) -> None:
+        self.set_header(**{name: self.header()[name] + by})
+
+    # -- the slots, written by the workers --------------------------------
+
+    def _base(self, slot: int) -> int:
+        return (self.head + slot * self.stride) * 8
 
     def write(self, slot: int, values: list[int], at: float) -> None:
-        base = slot * self.stride * 8
+        base = self._base(slot)
         struct.pack_into(f"<{self.layout.size}q", self.buf, base, *values)
         struct.pack_into("<q", self.buf, base + self.layout.size * 8,
                          int(at * 1000))
 
-    def read(self) -> tuple[list[int], float]:
-        """Every slot, summed, with the age of the stalest one."""
-        totals = [0] * self.layout.size
-        newest = 0
+    def clear(self, slot: int) -> None:
+        """Forget a slot entirely. Used when a worker is replaced.
+
+        Its counters go with it. That is a real loss and the alternative
+        is worse: leaving them means a restarted worker's fresh counts are
+        added to a dead worker's, and a counter that double counts across
+        a restart is one an operator cannot reason about at all.
+        `worker_restarts_total` is what marks the discontinuity.
+        """
+        base = self._base(slot)
+        self.buf[base:base + self.stride * 8] = b"\x00" * (self.stride * 8)
+
+    def ages(self) -> list[float]:
+        """How long since each slot was written. -1 for never."""
+        out = []
+        now = time.time()
         for slot in range(self.workers):
-            base = slot * self.stride * 8
+            stamp = struct.unpack_from(
+                "<q", self.buf,
+                self._base(slot) + self.layout.size * 8)[0]
+            out.append(-1.0 if stamp == 0 else now - stamp / 1000)
+        return out
+
+    def read(self) -> tuple[list[int], float]:
+        """Every slot, summed, with the age of the *stalest* live one.
+
+        Stalest, not freshest, and the difference is the whole point. An
+        earlier version reported the freshest, which meant one wedged
+        worker among eight was completely invisible: the other seven kept
+        the number at zero while a third of the traffic went unrefused by
+        a loop that had stopped flushing. Measured -- a `SIGKILL`ed worker
+        left `voyd_metrics_age_seconds` reading 0.095.
+
+        A staleness number that only reports the healthiest worker is a
+        liveness check that cannot fail.
+        """
+        totals = [0] * self.layout.size
+        for slot in range(self.workers):
+            base = self._base(slot)
             got = struct.unpack_from(f"<{self.layout.size}q", self.buf, base)
             stamp = struct.unpack_from("<q", self.buf,
                                        base + self.layout.size * 8)[0]
             if stamp == 0:
                 continue                 # a worker that has not flushed yet
-            newest = max(newest, stamp)
             for i, value in enumerate(got):
                 totals[i] += value
-        age = (time.time() - newest / 1000) if newest else -1.0
-        return totals, age
+        seen = [age for age in self.ages() if age >= 0]
+        return totals, (max(seen) if seen else -1.0)
 
 
 class Meter:
@@ -202,8 +263,9 @@ HELP = {
     "messages_from_upstream_total": ("counter", "Wire messages from upstream."),
     "worker_flushes_total": (
         "counter",
-        "Counter flushes per worker. Flat while traffic moves means a "
-        "worker's loop is wedged -- alert on this before anything else."),
+        "Flushes summed over every worker. For liveness use "
+        "voyd_worker_flush_age_seconds instead: this total keeps climbing "
+        "while one worker is wedged, because the healthy ones carry it."),
     "admitted_total": ("counter", "Documents a prompt was allowed to see."),
     "refused_total": ("counter", "Documents refused on the read path."),
     "revoked_total": ("counter", "Deletes rewritten as revocations."),
@@ -220,14 +282,36 @@ def render(slab: Slab) -> bytes:
     layout = slab.layout
     lines: list[str] = []
 
-    lines.append("# HELP voyd_metrics_age_seconds Age of the freshest worker "
-                 "flush. Counters are flushed on a timer so the message path "
-                 "does not pay for reporting; -1 means nothing has flushed.")
+    head = slab.header()
+    lines.append("# HELP voyd_metrics_age_seconds Age of the STALEST worker "
+                 "flush -- the worst one, so a single wedged worker among "
+                 "many is visible. Counters flush on a timer so the message "
+                 "path does not pay for reporting; -1 means none has flushed.")
     lines.append("# TYPE voyd_metrics_age_seconds gauge")
     lines.append(f"voyd_metrics_age_seconds {age:.3f}")
-    lines.append("# HELP voyd_workers Worker processes sharing the listener.")
-    lines.append("# TYPE voyd_workers gauge")
-    lines.append(f"voyd_workers {slab.workers}")
+
+    lines.append("# HELP voyd_worker_flush_age_seconds Age of each worker's "
+                 "last flush, by slot. This is the liveness signal: a slot "
+                 "climbing while the others stay flat is one wedged or dead "
+                 "worker, which no aggregate can show you.")
+    lines.append("# TYPE voyd_worker_flush_age_seconds gauge")
+    for slot, each in enumerate(slab.ages()):
+        lines.append(f'voyd_worker_flush_age_seconds{{worker="{slot}"}} '
+                     f"{each:.3f}")
+
+    lines.append("# HELP voyd_workers_configured Workers asked for.")
+    lines.append("# TYPE voyd_workers_configured gauge")
+    lines.append(f"voyd_workers_configured {head['workers_configured']}")
+    lines.append("# HELP voyd_workers_live Workers the supervisor can still "
+                 "see. Below configured means one died; alert on the "
+                 "difference, not on either number alone.")
+    lines.append("# TYPE voyd_workers_live gauge")
+    lines.append(f"voyd_workers_live {head['workers_live']}")
+    lines.append("# HELP voyd_worker_restarts_total Workers replaced after "
+                 "dying. Any value above zero is a crash that happened; a "
+                 "climbing one is a crash loop.")
+    lines.append("# TYPE voyd_worker_restarts_total counter")
+    lines.append(f"voyd_worker_restarts_total {head['worker_restarts_total']}")
 
     grouped: dict[str, list[tuple[dict, int]]] = {}
     for (field, collection, reason), value in zip(layout.names, totals):

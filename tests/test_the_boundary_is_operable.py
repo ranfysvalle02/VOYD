@@ -33,7 +33,15 @@ pymongo = pytest.importorskip("pymongo")
 ROOT = Path(__file__).resolve().parents[1]
 
 
-# ---- the failover signal, which cannot be caused on demand --------------
+# ---- the failover signal, on synthetic replies --------------------------
+#
+# This header used to say "which cannot be caused on demand", and that was
+# an excuse rather than a fact: `replSetStepDown` with `force` on the
+# single-node replica set Atlas Local already is holds a real election.
+# The whole path is exercised against one in
+# `test_the_boundary_survives_hostile_conditions.py`. These stay because
+# they pin the *parsing* -- every code, and the nested case -- which an
+# election cannot enumerate.
 
 @pytest.mark.parametrize("reply,expected", [
     ({"ok": 0.0, "code": 10107, "codeName": "NotWritablePrimary"}, True),

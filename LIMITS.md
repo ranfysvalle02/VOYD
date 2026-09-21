@@ -148,6 +148,18 @@ treat the target as a standalone, which silently disables retryable writes.
 
 ### Open
 
+**A worker that is alive but wedged is a metrics problem, not a
+supervision one.** The parent replaces workers that *die* — `SIGKILL` on
+one of three is detected, the slot is cleared, a replacement is forked and
+`voyd_worker_restarts_total` records the discontinuity. It cannot detect
+one that is alive and not working, because from the outside that is a
+process sitting in a syscall. `voyd_worker_flush_age_seconds{worker="N"}`
+is the signal: one slot climbing while the others stay flat.
+**Consider:** nothing acts on that automatically. Alerting on it is the
+operator's job, and there is no `--restart-wedged-after` because a
+timeout that kills a worker mid-request would turn a slow upstream into
+dropped connections.
+
 **`--workers` orphans on `SIGKILL`.** Workers leave the parent's process
 group so the parent is the only thing that signals them -- that is what
 stops a terminal's `SIGINT` reaching a worker twice and killing it mid-drain
@@ -166,6 +178,15 @@ problems and only the first one is solved.
 *next* connection. The request that received `NotWritablePrimary` is
 returned to the client, which retries — correct, and worth knowing before
 somebody reports it as a bug.
+
+This is now measured rather than reasoned about. `replSetStepDown` with
+`force` on the single-node replica set Atlas Local already is holds a real
+election, so the whole path has a test: the client sees two
+`NotPrimaryError`s, the boundary reads the server's own error and
+invalidates, the driver retries, and a `delete` issued across the election
+still lands as a revocation with the mark on it and every row still on
+disk. The claim that this "cannot be caused on demand" was an excuse, and
+it is gone.
 
 **No upstream pooling, deliberately.** A MongoDB connection carries
 authentication, sessions, cursors and transactions; sharing one would hand a
@@ -257,7 +278,7 @@ documents?"
 
 ## 4. Coverage
 
-156 tests, ~2,820 lines, against 8,078 lines of `voyd/` and 2,521 of
+165 tests, ~3,280 lines, against 8,078 lines of `voyd/` and 2,731 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -275,13 +296,51 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (152 tests, ~22 seconds) with
+**Consider:** the suite is fast by default (161 tests, ~55 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
 it as one. CI clears the deselection and a test pins those two
 facts together — but that arrangement is exactly how a test quietly stops
 being run, so check it is still true before trusting it.
+
+---
+
+### What a hostile pass found
+
+The transport was rewritten in a day and had a day of exercise, which is
+the wrong amount for concurrency. A pass that caused the failures on
+purpose — clients that stop reading, vanish mid-reply, or half close;
+workers killed and workers frozen; an election under load — found four
+real defects, and all four are now tests in
+`test_the_boundary_survives_hostile_conditions.py`.
+
+**A half close cost the caller its last reply.** A client that calls
+`shutdown(SHUT_WR)` is saying "no more requests" and is still reading. The
+request direction hitting EOF tore the reply direction down with it. Not a
+regression from the event loop — the threaded version did the same, which
+is why nothing caught it.
+
+**One `SIGKILL` produced four restarts.** The first supervisor closed the
+listening socket in the parent, so every replacement inherited a closed fd
+and died at once: a crash loop manufactured by the thing meant to recover
+from one. A listening socket's accept queue belongs to the socket, not to
+a process, so the parent holding the fd steals nothing.
+
+**A dead worker was invisible.** Capacity dropped by its share,
+`voyd_workers` went on reporting the number asked for, and nothing logged
+anything.
+
+**`voyd_metrics_age_seconds` reported the freshest worker.** So a wedged
+worker among healthy ones was hidden completely — measured, a `SIGKILL`ed
+worker left it reading 0.095. A staleness number that only reports the
+healthiest worker is a liveness check that cannot fail.
+
+What the same pass did *not* break, which is worth recording too:
+backpressure held (20 stalled clients with 4,000 unread ~1MB replies grew
+the process 55MB, not 4GB), fifty resets mid-reply cost fifty connections
+and not the listener, garbage on the port cost one connection, and the
+boundary survived a full `mongod` restart without one of its own.
 
 ---
 

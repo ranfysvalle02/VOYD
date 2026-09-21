@@ -142,6 +142,16 @@ MAX_MESSAGE = 48_000_000
 HEADER = 16
 
 
+class Hangup(ConnectionError):
+    """The peer stopped sending, cleanly, on a message boundary.
+
+    Distinguished from every other disconnect because a client that half
+    closes is *not* abandoning the replies it already asked for -- it is
+    saying "no more requests". Treating the two the same is why a
+    `shutdown(SHUT_WR)` used to cost the caller its last answer.
+    """
+
+
 class ProtocolError(Exception):
     """The framing is wrong. Close the connection rather than guess.
 
@@ -196,10 +206,18 @@ async def read_message_async(
     """
     try:
         hdr = await reader.readexactly(HEADER)
-        msg_len, req_id, resp_to, opcode = frame(hdr)
+    except asyncio.IncompleteReadError as exc:
+        # Nothing at all where a header should start is the peer saying it
+        # is finished, on a boundary. Bytes and then nothing is a truncated
+        # message, which is a broken stream and not the same event.
+        if not exc.partial:
+            raise Hangup("peer stopped sending") from exc
+        raise ConnectionError("disconnected mid-header") from exc
+    msg_len, req_id, resp_to, opcode = frame(hdr)
+    try:
         body = await reader.readexactly(msg_len - HEADER)
     except asyncio.IncompleteReadError as exc:
-        raise ConnectionError("disconnected") from exc
+        raise ConnectionError("disconnected mid-message") from exc
     return hdr + body, msg_len, req_id, resp_to, opcode
 
 
@@ -701,7 +719,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                rewritten: set[int],
                upstream: Upstream | None = None,
                advertise: str | None = None,
-               meter: "voyd_metrics.Meter | None" = None) -> None:
+               meter: "voyd_metrics.Meter | None" = None) -> str:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -807,6 +825,10 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 raw = (delete_reply(raw, req_id, resp_to) if was_delete
                        else enforce(raw, req_id, resp_to, guards, verbose))
             await send(writer, raw)
+    except Hangup:
+        # Not an error, and the one disconnect the caller may still be
+        # owed something for.
+        return "hangup"
     except ProtocolError as exc:
         print(f"  voyd: dropped a connection: {exc}", flush=True)
     except (ConnectionError, OSError):
@@ -823,6 +845,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         raise
     except Exception:
         traceback.print_exc()
+    return "closed"
 
 
 # What a replica set says when the node you are talking to is no longer the
@@ -1077,7 +1100,8 @@ class Live:
 async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter,
                   upstream: Upstream, guards: dict[str, Guard], verbose: bool,
                   live: Live, advertise: str | None = None,
-                  meter: "voyd_metrics.Meter | None" = None) -> None:
+                  meter: "voyd_metrics.Meter | None" = None,
+                  half_close_seconds: float = 10.0) -> None:
     """One client connection, start to finish, as one coroutine pair.
 
     A MongoDB connection is stateful -- authentication, sessions, cursors
@@ -1108,19 +1132,39 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
         common = {"guards": guards, "verbose": verbose,
                   "rewritten": rewritten, "upstream": upstream,
                   "advertise": advertise, "meter": meter}
-        tasks = [
-            asyncio.ensure_future(pump(client_r, up_w, client_w,
-                                       to_server=True, **common)),
-            asyncio.ensure_future(pump(up_r, client_w, up_w,
-                                       to_server=False, **common)),
-        ]
+        forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
+                                             to_server=True, **common))
+        back = asyncio.ensure_future(pump(up_r, client_w, up_w,
+                                          to_server=False, **common))
+        tasks = [forward, back]
         try:
-            # Either direction ending ends the connection: a client that
-            # hung up has no reply to receive, and an upstream that closed
-            # has nothing more to say. Waiting for both instead would hold
-            # a slot open on the half-closed socket until keepalive
+            # Either direction ending ends the connection: an upstream that
+            # closed has nothing more to say, and a client that vanished
+            # has no reply to receive. Waiting for both unconditionally
+            # would hold a slot open on a half-dead socket until keepalive
             # noticed, which is minutes.
+            #
+            # With one exception, and it is the whole reason these two
+            # futures have names. A client that called `shutdown(SHUT_WR)`
+            # is saying "no more requests" -- it is still reading, and it
+            # is still owed the answers it already asked for. Tearing the
+            # reply direction down on that is how a half close used to
+            # cost the caller its last answer.
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if (forward.done() and not forward.cancelled()
+                    and not forward.exception()
+                    and forward.result() == "hangup" and not back.done()):
+                # Pass the half close through, so the server finishes its
+                # replies and closes rather than waiting for a request
+                # that is never coming.
+                try:
+                    if up_w.can_write_eof():
+                        up_w.write_eof()
+                except (OSError, ConnectionError, ssl.SSLError):
+                    pass
+                # Bounded, because a client that half closes and then
+                # never reads must not hold a slot forever.
+                await asyncio.wait([back], timeout=half_close_seconds)
         finally:
             for task in tasks:
                 task.cancel()
@@ -1399,8 +1443,11 @@ def supervise(sock: socket.socket, workers: int, target: str,
     parent adds them up and prints once -- see `tally` for why N partial
     summaries would be worse than none.
     """
-    children: list[tuple[int, int]] = []          # (pid, read fd)
-    for index in range(workers):
+    stopping = False
+    slots: dict[int, tuple[int, int]] = {}       # index -> (pid, read fd)
+    tallies: list[dict] = []
+
+    def spawn(index: int) -> None:
         read_fd, write_fd = os.pipe()
         pid = os.fork()
         if pid == 0:
@@ -1440,12 +1487,33 @@ def supervise(sock: socket.socket, workers: int, target: str,
             # parent's atexit handlers or flush its buffers a second time.
             os._exit(code)
         os.close(write_fd)
-        children.append((pid, read_fd))
+        slots[index] = (pid, read_fd)
 
-    # The parent holds no connections, so it must not hold the socket
-    # either -- an accept queue with a listener that never accepts is a
-    # client hanging for no reason.
-    sock.close()
+    def collect(index: int) -> bool:
+        """Read a dead worker's tally. True if it managed to leave one."""
+        _pid, read_fd = slots.pop(index)
+        try:
+            with os.fdopen(read_fd) as incoming:
+                blob = incoming.read()
+            tallies.append(json.loads(blob))
+            return True
+        except (ValueError, OSError):
+            return False
+
+    for index in range(workers):
+        spawn(index)
+
+    # The parent keeps the listening socket open, and must. An earlier
+    # version closed it here on the reasoning that a process which never
+    # calls `accept` has no business holding a listener -- which is wrong
+    # twice. A listening socket's accept queue belongs to the socket, not
+    # to a process, so holding the fd steals nothing from the workers.
+    # And closing it meant every *replacement* worker inherited a closed
+    # fd and died at once: one `SIGKILL` produced four restarts in two
+    # seconds, a crash loop manufactured by the supervisor that was
+    # supposed to be recovering from one. Found by killing a worker and
+    # reading `voyd_worker_restarts_total`, which said 4 where it should
+    # have said 1.
 
     # Metrics are served from the parent, which is the only process that
     # can see every worker's slot. It is also the process with no event
@@ -1455,7 +1523,9 @@ def supervise(sock: socket.socket, workers: int, target: str,
         voyd_metrics.serve(metrics_port, slab)
 
     def forward(signum, _frame):
-        for pid, _fd in children:
+        nonlocal stopping
+        stopping = True
+        for pid, _fd in list(slots.values()):
             try:
                 os.kill(pid, signum)
             except ProcessLookupError:
@@ -1467,20 +1537,76 @@ def supervise(sock: socket.socket, workers: int, target: str,
         except ValueError:
             pass
 
-    tallies: list[dict] = []
-    for pid, read_fd in children:
-        with os.fdopen(read_fd) as incoming:
-            blob = incoming.read()
+    # ------------------------------------------------------------------
+    # Supervision. Without this the parent slept until shutdown, and a
+    # worker killed mid-run was simply gone: capacity dropped by its
+    # share, `voyd_workers` went on reporting the number asked for, and
+    # nothing anywhere said so. Measured -- `SIGKILL` on one of three left
+    # two serving, the metric still reading 3, and no log line at all.
+    # ------------------------------------------------------------------
+    started = dict.fromkeys(slots, time.monotonic())
+    backoff = 0.0
+    while not stopping and slots:
         try:
-            tallies.append(json.loads(blob))
-        except ValueError:
-            # A worker that died without reporting is worth saying out
-            # loud: the total below is now missing its share, and a
-            # silently low refusal count is the one number here that must
-            # never be quietly wrong.
-            print(f"voyd-wire: worker {pid} exited without a tally; the "
-                  f"totals below undercount by its share", flush=True)
-        os.waitpid(pid, 0)
+            dead, status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if dead == 0:
+            time.sleep(0.2)
+            continue
+        index = next((i for i, (pid, _fd) in slots.items() if pid == dead),
+                     None)
+        if index is None:
+            continue
+        left_a_tally = collect(index)
+        if slab is not None:
+            slab.set_header(workers_live=len(slots))
+        why = (f"signal {os.WTERMSIG(status)}" if os.WIFSIGNALED(status)
+               else f"status {os.WEXITSTATUS(status)}")
+        if stopping:
+            break
+        print(f"voyd-wire: worker {dead} (slot {index}) died with {why}"
+              + ("" if left_a_tally else ", losing its counts")
+              + "; replacing it", flush=True)
+        if slab is not None:
+            # Its counters go with it. Leaving them would add a dead
+            # worker's totals to its replacement's, and a counter that
+            # double counts across a restart is one nobody can reason
+            # about. `worker_restarts_total` marks the discontinuity.
+            slab.clear(index)
+            slab.bump("worker_restarts_total")
+        # A worker that dies immediately is a crash loop, and respawning
+        # it flat out would spin a core producing log lines. Back off, but
+        # never give up: the other workers are still serving, and a
+        # boundary that shuts itself down because one worker is unhappy
+        # has turned a degradation into an outage.
+        if time.monotonic() - started.get(index, 0) < 1.0:
+            backoff = min(backoff * 2 or 0.25, 5.0)
+            time.sleep(backoff)
+        else:
+            backoff = 0.0
+        spawn(index)
+        started[index] = time.monotonic()
+        if slab is not None:
+            slab.set_header(workers_live=len(slots))
+
+    # Shutdown. Everything still alive was signalled by `forward`.
+    for index in list(slots):
+        pid, _fd = slots[index]
+        collect(index)
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+    if slab is not None:
+        slab.set_header(workers_live=0)
+    missing = workers - len(tallies)
+    if missing > 0:
+        # A worker that died without reporting is worth saying out loud:
+        # the total below is missing its share, and a silently low refusal
+        # count is the one number here that must never be quietly wrong.
+        print(f"voyd-wire: {missing} worker(s) exited without a tally; the "
+              f"totals below undercount by their share", flush=True)
     summarise(merge(tallies))
 
 

@@ -222,7 +222,12 @@ def test_metrics_are_summed_across_workers_while_it_runs(db, tmp_path):
         proc.terminate()
         proc.wait(timeout=30)
 
-    assert "voyd_workers 3" in body
+    assert "voyd_workers_configured 3" in body
+    assert "voyd_workers_live 3" in body
+    assert "voyd_worker_restarts_total 0" in body
+    # One series per worker, because an aggregate cannot show you that one
+    # of three has stopped flushing.
+    assert body.count("voyd_worker_flush_age_seconds{") == 3, body
     assert 'voyd_admitted_total{collection="notes"} 10' in body, body
     assert 'voyd_refused_total{collection="notes"} 5' in body, body
     assert ('voyd_refused_by_reason_total{collection="notes",'
