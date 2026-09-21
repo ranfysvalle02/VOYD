@@ -643,6 +643,35 @@ counts shredded rows. One test in the suite was relying on it:
 
 Held up by `tests/test_a_derived_read_cannot_launder_a_forgotten_fact.py`.
 
+**And the same hole on the plain `find` path, which is the worse one.**
+Found by asking what *else* reaches the per-document check carrying
+documents whose marks it cannot read. A reduction was one answer. A
+projection is the other:
+
+    find({})                    ->  [1]
+    find({}, {"text": 1})       ->  [1, 2, 3]
+    find({}, {"forgotten": 0})  ->  [1, 2, 3]
+
+One live row, one expired, one revoked, through the proxy with an
+ordinary driver. `enforce` reads the marks off the documents in the batch;
+the projection removed them; and absent is not refused, because absent is
+how a *living* document looks -- no deadline means pinned, no revocation
+mark means live. The whole batch was admitted.
+
+This needs no aggregation and no intent. `find({}, {"text": 1})` is what
+an ORM selecting columns emits, what a driver's `projection=` produces,
+what anybody trimming a payload writes. It turned the guarantee off for
+that read, silently, in the direction of returning more.
+
+Closed the same way as the reductions, because it is the same problem: if
+the verdict cannot be read off the reply, put it in the query, where a
+projection cannot reach it. The rewrite goes into `filter` (or
+`findAndModify`'s `query`), never into the projection -- a boundary that
+added fields to satisfy itself and left them in the answer would be
+paying for the guarantee with the client's contract. `findAndModify`
+spells its projection `fields`, and covering one spelling and not the
+other is the mistake `findOneAndDelete` already was.
+
 **Still open in the same family:** a `$lookup` *from* an unguarded
 collection *into* a guarded one is not seen at all, because the command
 names the unguarded collection and no guard is found. The allowlist covers
@@ -652,7 +681,7 @@ the guarded side only.
 
 ## 4. Coverage
 
-433 tests, ~7,686 lines, against 8,220 lines of `voyd/` and 6,601 of
+475 tests, ~8,251 lines, against 8,220 lines of `voyd/` and 7,062 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -1099,33 +1128,75 @@ which on a replica set reads perfectly and rejects every write.
 
 ---
 
-## 6b. What the proxy still cannot do for itself
+## 6b. Who is asking, and what it still costs
 
-**Caller-scoped rules do not run on the wire.** `restricted_to()` and the
-clearance rule declare `needs_caller`, and this process holds no caller, so
-`expressible_clauses` returns `None` for them and a reduction on such a
-collection is refused rather than answered. The per-document path has the
-same gap: `Guard.filter` passes no claims.
+**Caller-scoped rules run on the wire now.** `restricted_to()` and the
+clearance rule declare `needs_caller`, and this process used to hold no
+caller, so `expressible_clauses` returned `None` for them and
+`Guard.filter` passed no claims -- the last thing the library front door
+could do and the wire could not.
 
-This is the last thing standing between the proxy and being the only front
-door, and the hard half is already built for a different reason. The
-boundary reads the client's authenticated identity off the SCRAM handshake
-for the fan-out check (`authenticating`), and `Conversation.ask_primary`
-runs a command *on the client's own connection* -- "the socket, the
-authentication and the identity are all the client's". `connectionStatus`
-answered on that connection returns `authenticatedUserRoles`, which is the
-server's account of who this is rather than a claim the client asserted.
-That distinction is the whole design constraint: `for_caller` in
-`admission/core.py` already says a handle that believed
-`{"clearance": "secret"}` because it was passed one "would be an
-authorisation system whose only input is the attacker's".
+The claims come from the *deployment*, and that is the design rather than
+an implementation detail. `for_caller` in `admission/core.py` says it
+outright: a handle that believed `{"clearance": "secret"}` because it was
+passed one "would be an authorisation system whose only input is the
+attacker's". A proxy is in a worse position still, because the client is
+the only thing talking to it. So the boundary asks `connectionStatus` on
+the client's own connection and reads `authenticatedUserRoles` -- the
+server's account of who authenticated there, which a client cannot forge
+without forging the authentication. A role *is* a group, which is what
+`db.createRole({role: "legal"})` already means, so `restricted_to("groups")`
+needs no further declaration.
 
-What is missing is not the idea, it is the plumbing: `ask_primary` exists
-only on the fan-out `Conversation`, and the plain path -- the default, the
-one most connections take -- has no way to ask anything. Doing this
-properly means giving the plain path the same primitive, deciding where a
-role becomes a claim, and caching the answer per connection rather than
-per read.
+Asked lazily, once per connection, and only for a collection whose rules
+ask: a policy with no caller-aware rule pays nothing, and an authenticated
+connection cannot become somebody else.
+
+**What it cost to get right, because both bugs were the interesting kind.**
+
+*The ordering.* Identity was resolved after the push-down that needs it,
+so every caller-scoped reduction was refused for want of an identity the
+boundary already had the means to ask for. Refusing is the safe direction,
+which is exactly why it survived a test run -- it looked like the
+documented behaviour.
+
+*Judging a reply twice.* With the refusal pushed into the query, the rows
+come back already filtered and what arrives is a *reduction over* them.
+Running the per-document check on that asks the rules about documents that
+no longer exist, and one rule answers badly: `Restricted` refuses a
+document with no audience, because untagged is not public. A `$group`
+result has no audience. So the boundary filtered correctly server-side and
+then threw its own answer away -- `count_documents()` returning 0 on a
+collection the same caller could `find()` two rows in. Deadline and
+revocation hid it for weeks' worth of tests by being absent-tolerant.
+Replies to a pushed-down read are now recognised and left alone, and the
+cursor is matched on the `getMore` *request*, because the batch that
+drains a cursor comes back with `id: 0` and has nothing left to match on.
+
+**Both request loops answer the same way, and that took moving one.**
+`Conversation` carried its own copy of "ask on the client's own
+connection" and no identity at all, so a `--fan-out` connection to a
+caller-scoped collection saw empty claims and refused everything -- safe,
+and *different from the default path*, which is the part that matters. One
+boundary meaning two things depending on a flag is the drift this package
+is about. Both now share one `Backchannel` and one `CallerIdentity`, and
+`test_the_fan_out_path_learns_the_same_identity` is what keeps them
+sharing it.
+
+**Still open: `Clearance`.** It declares `claim="clearance"` and wants an
+ordered level, and nothing in a MongoDB role says which level a role
+corresponds to. The wire supplies `user`, `db`, `groups` and `roles`; a
+clearance rule finds no claim, and "no claim is the lowest, not the
+highest", so it refuses every document to everybody. Fail-closed, which is
+the right direction and the wrong outcome -- and it presents as "VOYD
+broke my reads" with nothing connecting it to a line in the policy file.
+
+So it is **announced at boot** rather than discovered: a rule whose claim
+`claims_from` cannot produce prints a warning naming the claim, what the
+wire can supply instead, and the fact that every read of that collection
+will be refused. Closing it properly wants a declared role-to-level
+mapping in the policy file, and inventing one before somebody needs it is
+how this package grows surface it has to keep honest forever.
 
 ---
 

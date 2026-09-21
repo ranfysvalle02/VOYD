@@ -58,7 +58,7 @@ So this repository applies it to itself, and not as a slogan:
 - **[CLAIMS.md](CLAIMS.md)** maps every guarantee to the file that would go
   red if it stopped holding. The mapping is checked in both directions by
   `tests/test_every_claim_names_its_evidence.py` — a claim with no test, or
-  a test no claim points at, fails the suite. Currently 27 claims, 27 files,
+  a test no claim points at, fails the suite. Currently 28 claims, 28 files,
   and a bijection.
 - **[LIMITS.md](LIMITS.md)** counts this project's own defects, names its
   own bad numbers, and opens with the one that matters: nobody has used this
@@ -239,6 +239,53 @@ can express that —
 
 A policy file that is wrong fails when it is *loaded*, not when a query comes
 back with the wrong rows.
+
+### `restricted_to()` on the wire, and where the claims come from
+
+The one rule that needs to know *who is asking*, which for a long time was
+the one thing the library handle could do and the wire could not. The
+question is not how to pass claims to the boundary — it is why the
+boundary should believe any. `for_caller` in `admission/core.py` puts it
+bluntly: a handle that believed `{"clearance": "secret"}` because it was
+handed one **would be an authorisation system whose only input is the
+attacker's.** A proxy is worse off still, because the client is the only
+thing talking to it.
+
+So the boundary does not accept claims. It asks the deployment:
+
+```
+connectionStatus  ->  authenticatedUsers:     [{user: "lawyer", db: "app"}]
+                      authenticatedUserRoles: [{role: "legal",  db: "app"}]
+```
+
+Run on the client's *own* connection, so the socket, the authentication
+and the identity are all theirs — and the answer is the server's account
+of who authenticated there, which no client can forge without forging the
+authentication itself. A role **is** a group: `db.createRole({role:
+"legal"})` is how a deployment already spells this, so
+
+```python
+audience = restricted_to("groups")
+```
+
+against a document listing `["legal", "deal-desk"]` needs nothing further.
+Two credentials, one query, different rows:
+
+```
+lawyer  ->  find({})  ->  the memos whose audience names a role they hold
+seller  ->  find({})  ->  a different set, same query, same proxy
+```
+
+Asked once per connection, lazily, and only for a collection whose rules
+ask — an authenticated connection cannot become somebody else, and a
+policy with no caller-aware rule never pays the round trip.
+
+**What it cannot do, said here rather than discovered.** `Clearance` wants
+an *ordered level*, and nothing in a MongoDB role says which level a role
+corresponds to. It therefore finds no claim, and no claim is the lowest
+rather than the highest, so it would refuse everything. The boundary says
+so at boot with the collection named, instead of letting it look like
+broken reads. See `LIMITS.md` §6b.
 
 ## It sizes its own fetch
 

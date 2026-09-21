@@ -264,3 +264,53 @@ def test_an_expired_row_keeps_its_vector_until_it_is_erased(through):
 
     assert list(wired.notes.find({})) == []
     assert direct.notes.find_one({"_id": 1})["embedding"] == VEC
+
+
+# --- a projection must not be able to blind the boundary -------------------
+
+def test_a_projection_cannot_hide_a_forgotten_fact(through):
+    """The bypass, through a real proxy with an ordinary driver.
+
+    `enforce` reads the marks off the documents in the batch. A projection
+    removes them, and every rule that reads one then finds nothing --
+    which is not a refusal, because absent is how a *living* document
+    looks: no deadline means pinned, no revocation mark means live. So the
+    whole batch was admitted. Measured before the fix:
+
+        find({})                    ->  [1]
+        find({}, {"text": 1})       ->  [1, 2, 3]
+        find({}, {"forgotten": 0})  ->  [1, 2, 3]
+
+    This is not an attack. `find({}, {"text": 1})` is what an ORM
+    selecting columns emits, and it turned the guarantee off for that
+    read.
+    """
+    wired, direct = through
+    direct.notes.insert_many([
+        {"_id": 1, "text": "live"},
+        {"_id": 2, "text": "EXPIRED", "expire_at": PAST},
+        {"_id": 3, "text": "REVOKED",
+         "forgotten": {"at": PAST, "reason": "leak"}},
+    ])
+
+    assert sorted(d["_id"] for d in wired.notes.find({})) == [1]
+    assert sorted(d["_id"] for d in wired.notes.find({}, {"text": 1})) == [1], (
+        "an inclusion projection dropped the marks and the boundary "
+        "admitted the forgotten rows")
+    assert sorted(d["_id"] for d in
+                  wired.notes.find({}, {"forgotten": 0})) == [1], (
+        "an exclusion projection removed the mark it was checked against")
+
+
+def test_the_projection_the_client_asked_for_is_what_it_gets(through):
+    """The rewrite goes in the *query*, not the projection, so the shape
+    of the reply is untouched. A boundary that started returning fields
+    nobody asked for would be paying for the guarantee with the contract."""
+    wired, direct = through
+    direct.notes.insert_one({"_id": 1, "text": "live", "extra": "x"})
+
+    got = list(wired.notes.find({}, {"text": 1}))
+
+    assert got == [{"_id": 1, "text": "live"}], (
+        f"the client asked for `text` and got {got} -- the boundary added "
+        f"fields to satisfy itself and left them in the answer")

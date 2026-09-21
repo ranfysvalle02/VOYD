@@ -31,7 +31,7 @@ of fifty and asserted a page of one, and it passed under sabotage. See
 | Revoking a source reaches the summary, the answer and the embedding built on it | `tests/test_a_refusal_travels_and_is_gated.py` |
 | A `$vectorSearch` hit is refused on the path that never passes through a query | `tests/test_search_refuses_on_the_path_that_bypasses_the_query.py` |
 | `numCandidates` is sized from the measured refusal rate, not a constant | `tests/test_the_boundary_sizes_its_own_fetch.py` |
-| A read whose reply is not the stored documents — `distinct`, `count`, a pipeline that groups or reshapes — reduces over admitted documents only, because the refusal is pushed into its query; and it is refused outright in the three cases where that push-down would be narrower than the guarantee | `tests/test_a_derived_read_cannot_launder_a_forgotten_fact.py` |
+| A read the boundary cannot judge per document — `distinct`, `count`, a pipeline that groups or reshapes, **or a `find` whose projection hides the marks** — has the refusal pushed into its query instead, and is refused outright in the cases where that push-down would be narrower than the guarantee | `tests/test_a_derived_read_cannot_launder_a_forgotten_fact.py` |
 
 ## The wire
 
@@ -47,6 +47,7 @@ of fifty and asserted a page of one, and it passed under sabotage. See
 | The vector dies with the fact: an erasure through the wire nulls every declared derived encoding, because an embedding is a lossy copy of the text and not a pointer to it | `tests/test_the_vector_dies_with_the_fact.py` |
 | The proxy builds what it enforces — `--ensure` creates the collection, the TTL index, the tenant index and the server-embedded vector index the policy declares, and `--verify`, written separately, then has nothing to report | `tests/test_the_proxy_provisions_what_it_enforces.py` |
 | The secondary ranks and the primary permits, so replication lag never becomes a second delete-is-a-wish window | `tests/test_the_boundary_ranks_on_a_replica_and_asks_the_primary.py` |
+| Caller-scoped rules run on the wire, and the claims are the *server's* account of who authenticated — `connectionStatus` on the client's own connection, never anything the client asserted | `tests/test_the_boundary_learns_who_is_asking.py` |
 
 ## Erasure
 

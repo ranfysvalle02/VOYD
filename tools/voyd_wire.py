@@ -140,8 +140,30 @@ class Guard:
                                  rules=(Deadline(at_field=at_field),
                                         revoked(mark_field))))
 
-    def filter(self, docs: list[dict]) -> list[dict]:
+    @property
+    def needs_caller(self) -> bool:
+        """Does any rule here decide by *who is asking*?
+
+        Cached nowhere on purpose: it is a tuple scan over two or three
+        rules, and a boundary that memoised it would have one more piece of
+        state to get stale when a policy is reloaded.
+        """
+        return any(getattr(r, "needs_caller", False) for r in self.spec.rules)
+
+    def filter(self, docs: list[dict], caller: dict | None = None) -> list[dict]:
         handle = self.handle
+        if self.needs_caller:
+            # `for_caller` clones rather than assigns, which matters more
+            # here than in the library: one `Guard` is shared by every
+            # connection this proxy serves, so binding an identity onto
+            # `self.handle` would show one client's rows to whoever asked
+            # second. That is the concurrency bug `for_caller`'s docstring
+            # is about, and the wire is where it would actually happen.
+            #
+            # `caller=None` -- the question could not be answered -- binds
+            # empty claims rather than skipping the rules, so an unknown
+            # caller is refused by them instead of waved past.
+            handle = handle.for_caller(caller or {})
         if self.spec.tenant:
             # A declared tenant is enforced per document, and the proxy has
             # no filters to read it from -- so it takes the scope from the
@@ -726,7 +748,8 @@ LEADING_STAGES = frozenset({"$vectorSearch", "$search", "$geoNear"})
 FOREIGN_STAGES = frozenset({"$lookup", "$unionWith", "$graphLookup"})
 
 
-def expressible_clauses(guard: Guard) -> list[dict] | None:
+def expressible_clauses(guard: Guard,
+                        caller: dict | None = None) -> list[dict] | None:
     """This guard's refusal as query clauses, or `None` if it cannot be.
 
     `None` is the load-bearing return. Every rule has to express itself or
@@ -737,8 +760,18 @@ def expressible_clauses(guard: Guard) -> list[dict] | None:
     clauses: list[dict] = []
     for rule in guard.spec.rules:
         if getattr(rule, "needs_caller", False):
-            return None                 # this process is nobody
-        clause = rule.clause()
+            # This process used to be nobody. It can now ask the server who
+            # the client authenticated as -- see `CallerIdentity` -- so the
+            # rule gets its claims and answers as a query like any other.
+            # Still `None` when the identity is unknown: a reduction over
+            # rows whose permission nobody established is the leak, not a
+            # degraded version of preventing it.
+            if caller is None:
+                return None
+            for_caller = getattr(rule, "clause_for", None)
+            clause = for_caller(caller) if for_caller else None
+        else:
+            clause = rule.clause()
         if clause is None:
             return None                 # enforced on the way out, and there
         clauses.append(clause)          # is no way out here
@@ -777,6 +810,82 @@ def _and_in(query: Any, clauses: list[dict]) -> dict:
     return out
 
 
+def deciding_fields(guard: Guard) -> set[str]:
+    """The document fields this guard's verdict is read from.
+
+    Asked of the spec rather than hardcoded, because a policy file renames
+    any of them -- a boundary protecting `expire_at` while the policy says
+    `ttl` is protecting a field nobody uses.
+    """
+    spec = guard.spec
+    names = {n for n in (spec.at_field, spec.mark_field, spec.lineage_field)
+             if isinstance(n, str)}
+    for rule in spec.rules:
+        for attr in ("field", "at_field"):
+            value = getattr(rule, attr, None)
+            if isinstance(value, str):
+                names.add(value)
+    if spec.tenant:
+        names.add(spec.tenant)
+    return names
+
+
+def projection_blinds(projection: Any, needed: set[str]) -> bool:
+    """Would this projection leave the verdict unable to be taken?
+
+    The hole this closes is not exotic. `find({}, {"text": 1})` is the most
+    ordinary query anybody writes, and it was enough: the documents come
+    back real, with their marks projected away, and every rule that reads a
+    mark finds nothing. Absent is not refused -- a document with no
+    deadline is a pinned one, and a document with no revocation mark is a
+    live one -- so the whole batch was admitted. Measured against one live,
+    one expired and one revoked row:
+
+        find({})                        ->  [1]
+        find({}, {"text": 1})           ->  [1, 2, 3]
+        find({}, {"forgotten": 0})      ->  [1, 2, 3]
+
+    Nobody has to be attacking anything. An ORM that selects columns, a
+    driver's `projection=`, a developer trimming a payload -- each one
+    silently turns the boundary off for that query.
+    """
+    if not isinstance(projection, Mapping) or not projection:
+        return False
+    # `_id` is exempt from the inclusion/exclusion question by the server
+    # and is never a field a rule reads, so it does not decide the kind.
+    kinds = {bool(v) for k, v in projection.items() if k != "_id"}
+    named = {k.split(".")[0] for k in projection if isinstance(k, str)}
+    if kinds == {False}:                # exclusion: does it remove a mark?
+        return bool(named & needed)
+    if not kinds:
+        # Only `_id` was named, and the two spellings are opposites.
+        # `{"_id": 0}` removes nothing and is safe; `{"_id": 1}` is an
+        # *inclusion* of `_id` alone, which drops every mark there is.
+        # The first version of this exempted `_id` wholesale and let the
+        # second through unjudged -- found by sweeping the shapes rather
+        # than by thinking of it, which is the honest account.
+        return bool(projection.get("_id")) and bool(needed)
+    # Inclusion, or the mixed form the server rejects anyway: every field
+    # the verdict reads has to survive it.
+    return not needed <= named
+
+
+def blinded_find(body: Mapping, guards: dict[str, Guard]) -> Guard | None:
+    """The guard whose marks this command's projection would strip.
+
+    `find` only. An `aggregate` that projects is already caught by
+    `reducing_stage` -- `$project` is not a stage that hands the stored
+    document back -- and `findAndModify` spells its projection `fields`.
+    """
+    for verb, where in (("find", "projection"), ("findAndModify", "fields")):
+        guard = guard_for(guards, body, verb)
+        if guard is None:
+            continue
+        if projection_blinds(body.get(where), deciding_fields(guard)):
+            return guard
+    return None
+
+
 def reducing_stage(pipeline: list) -> str | None:
     """The first stage whose output is not the stored document."""
     for stage in pipeline:
@@ -790,7 +899,8 @@ def reducing_stage(pipeline: list) -> str | None:
 
 
 def rewrite_derived_read(raw: bytes, req_id: int, resp_to: int,
-                         guards: dict[str, Guard], verbose: bool
+                         guards: dict[str, Guard], verbose: bool,
+                         caller: dict | None = None
                          ) -> tuple[bytes | None, bytes | None]:
     """`(rewritten_request, refusal)` -- at most one of them is not `None`.
 
@@ -821,7 +931,7 @@ def rewrite_derived_read(raw: bytes, req_id: int, resp_to: int,
     if isinstance(inner, Mapping):
         _unused, refusal = rewrite_derived_read(
             encode_op_msg(req_id, resp_to, 0, dict(inner)),
-            req_id, resp_to, guards, verbose=False)
+            req_id, resp_to, guards, False, caller)
         if refusal is not None:
             return None, refusal
         if _needs_pushdown(inner, guards):
@@ -832,11 +942,39 @@ def rewrite_derived_read(raw: bytes, req_id: int, resp_to: int,
                                  verbose)
         return None, None
 
+    # A `find` whose projection strips the marks. The documents are real
+    # and the verdict cannot be taken on them, which is the same shape as
+    # a reduction and gets the same answer: put the refusal in the query,
+    # where the projection cannot reach it.
+    blinded = blinded_find(body, guards)
+    if blinded is not None:
+        clauses = expressible_clauses(blinded, caller)
+        if clauses is None:
+            return None, _refuse(
+                req_id, blinded.collection,
+                "this projection removes the fields the verdict is read "
+                "from, and this policy has a rule that cannot be asked as "
+                "a query, so the refusal has nowhere else to go", verbose)
+        if blinded.spec.tenant and not pins_the_tenant(
+                body.get("filter") or body.get("query"), blinded.spec.tenant):
+            return None, _refuse(
+                req_id, blinded.collection,
+                f"this projection removes the fields the verdict is read "
+                f"from, and the query does not say which "
+                f"{blinded.spec.tenant!r} it is about", verbose)
+        patched = dict(body)
+        where = "filter" if "find" in body else "query"
+        patched[where] = _and_in(body.get(where), clauses)
+        if verbose:
+            print(f"  voyd: {blinded.collection}: the projection hides the "
+                  f"marks, so the refusal went into the query", flush=True)
+        return encode_op_msg(req_id, resp_to, flags, patched), None
+
     for command in DERIVED_COMMANDS:
         guard = guard_for(guards, body, command)
         if guard is None:
             continue
-        clauses = expressible_clauses(guard)
+        clauses = expressible_clauses(guard, caller)
         query = body.get("query")
         if clauses is None:
             return None, _refuse(req_id, guard.collection,
@@ -873,7 +1011,7 @@ def rewrite_derived_read(raw: bytes, req_id: int, resp_to: int,
     if stage is None:
         return None, None               # ordinary retrieval: untouched bytes
 
-    clauses = expressible_clauses(guard)
+    clauses = expressible_clauses(guard, caller)
     if clauses is None:
         return None, _refuse(req_id, guard.collection,
                              f"`{stage}` does not hand back the stored "
@@ -940,6 +1078,78 @@ def _refuse(req_id: int, collection: str, why: str,
             f"being left out. Read the documents through the boundary and "
             f"reduce them on your side."),
     })
+
+
+def _was_reduced(raw: bytes, resp_to: int, reduced: set[int] | None,
+                 cursors: set[int] | None) -> bool:
+    """Was this reply already filtered by a pushed-down query?
+
+    Recognised by request id, which the request side records. What this
+    adds is the *cursor*: a reduction can span several batches, and page
+    two must be treated the same way page one was -- one read answered two
+    different ways is worse than either answer.
+
+    The cursor is tracked here and matched on the `getMore` **request**
+    rather than on its reply, because the last batch of a drained cursor
+    comes back with ``id: 0`` and there would be nothing left to match on.
+    """
+    if reduced is None or resp_to not in reduced:
+        return False
+    reduced.discard(resp_to)
+    if cursors is not None:
+        peek = decode_op_msg(raw, LAZY)
+        cursor = peek[1].get("cursor") if peek else None
+        if isinstance(cursor, Mapping):
+            cursor_id = cursor.get("id")
+            if isinstance(cursor_id, int) and cursor_id:
+                cursors.add(cursor_id)      # more batches are coming
+    return True
+
+
+# What `claims_from` puts in front of a rule. A rule asking for anything
+# else is not wrong -- it is enforceable through the library handle, where
+# an application supplies its own claims -- but it cannot be answered here.
+SUPPLIABLE_CLAIMS = frozenset({"user", "db", "groups", "roles"})
+
+
+def unsuppliable_claims(guard: Guard) -> list[str]:
+    """Claims this guard's rules need and the wire cannot produce.
+
+    `Clearance` is the live example: it wants an ordered level, and nothing
+    in a MongoDB role says which level a role corresponds to. Answering it
+    would take a declared role-to-level mapping in the policy file, and
+    inventing one before somebody needs it is how this package grows
+    surface it has to keep honest forever. So it is reported, not guessed.
+    """
+    wanted = []
+    for rule in guard.spec.rules:
+        if not getattr(rule, "needs_caller", False):
+            continue
+        claim = getattr(rule, "claim", None)
+        if isinstance(claim, str) and claim not in SUPPLIABLE_CLAIMS:
+            wanted.append(claim)
+    return sorted(set(wanted))
+
+
+def _wants_a_caller(guards: dict[str, Guard], body: Mapping) -> bool:
+    """Does this command touch a collection whose rules ask who is asking?
+
+    The gate on paying a round trip. Cheap on purpose -- it reads the
+    handful of fields a command names its collection in, and a deployment
+    that declares no caller-aware rule never gets past the first line.
+    """
+    if not any(g.needs_caller for g in guards.values()):
+        return False
+    for verb in ("find", "aggregate", "distinct", "count", "getMore",
+                 "findAndModify", "delete", "update", "insert"):
+        target = body.get(verb)
+        if isinstance(target, str) and target in guards:
+            return guards[target].needs_caller
+    # A `getMore` names its collection in `collection`, not in the verb.
+    more = body.get("collection")
+    if isinstance(more, str) and more in guards:
+        return guards[more].needs_caller
+    return False
 
 
 def guard_for(guards: dict[str, Guard], body: Mapping,
@@ -1118,7 +1328,7 @@ def strip_compression(raw: bytes, req_id: int, resp_to: int) -> bytes:
 
 
 def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
-            verbose: bool) -> bytes:
+            verbose: bool, caller: dict | None = None) -> bytes:
     """Apply admission to a cursor batch on its way back to the client.
 
     Everything that is not a guarded cursor batch is forwarded byte for byte.
@@ -1159,7 +1369,7 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
     # declared guard is about to judge. Still lazy: the rules name a handful
     # of top-level fields, so a vector never becomes a list of floats -- and a
     # document that survives is re-encoded from the bytes it arrived in.
-    kept = guard.filter(batch)
+    kept = guard.filter(batch, caller)
     if len(kept) == len(batch):
         return raw                      # nothing refused: do not touch the bytes
 
@@ -1230,7 +1440,8 @@ def seal_refusal(req_id: int, resp_to: int, why: str) -> bytes:
 async def judge(raw: bytes, req_id: int, resp_to: int,
                 guards: dict[str, Guard], verbose: bool,
                 vault: "voyd_seal.Vault | None",
-                meter: "voyd_metrics.Meter | None" = None) -> bytes:
+                meter: "voyd_metrics.Meter | None" = None,
+                caller: dict | None = None) -> bytes:
     """`enforce`, plus decryption for the collections that declared it.
 
     **The fast path is byte-for-byte the old one.** With no `--key-vault`,
@@ -1251,14 +1462,14 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
     process -- but it is wasted work worth naming.
     """
     if vault is None:
-        return enforce(raw, req_id, resp_to, guards, verbose)
+        return enforce(raw, req_id, resp_to, guards, verbose, caller)
 
     peek = decode_op_msg(raw, LAZY)
     if peek is None:
         return raw
     collection = _collection_of(peek[1])
     if not vault.seals(collection):
-        return enforce(raw, req_id, resp_to, guards, verbose)
+        return enforce(raw, req_id, resp_to, guards, verbose, caller)
 
     # Eager, unlike the fast path: these documents are about to be rebuilt
     # with a decrypted field in them, so there is no forwarding the bytes
@@ -1286,7 +1497,7 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
     if guard is not None:
         if tally:
             guard.note_sealed(tally)
-        kept = guard.filter(plain)
+        kept = guard.filter(plain, caller)
     else:
         kept = plain
 
@@ -1317,6 +1528,17 @@ class _Pump(TypedDict):
     vault: "voyd_seal.Vault | None"
     embeds: Mapping | None
     meter: "voyd_metrics.Meter | None"
+    # Shared by both directions, like `rewritten` and for the same reason:
+    # the request side asks who this connection is, and the reply side is
+    # the one that sees the answer come back. Not named `back` -- `pump`'s
+    # third positional argument already is, and the splat would collide.
+    back_channel: "Backchannel"
+    who: "CallerIdentity"
+    # Request ids whose refusal was pushed into the query, and the cursors
+    # those requests opened. See `reduced` in `pump` for why a reply has to
+    # remember this.
+    reduced: set[int]
+    reduced_cursors: set[int]
 
 
 async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -1327,7 +1549,11 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                advertise: str | None = None,
                vault: "voyd_seal.Vault | None" = None,
                embeds: Mapping | None = None,
-               meter: "voyd_metrics.Meter | None" = None) -> str:
+               meter: "voyd_metrics.Meter | None" = None,
+               back_channel: "Backchannel | None" = None,
+               who: "CallerIdentity | None" = None,
+               reduced: set[int] | None = None,
+               reduced_cursors: set[int] | None = None) -> str:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -1386,6 +1612,27 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 head = decode_sections(raw)
                 body = head[1] if head else {}
 
+                # Who is asking, established *before* the command goes
+                # upstream, because the reply arrives on the other
+                # direction and `enforce` is synchronous when it gets
+                # there. Resolving it there would mean either blocking a
+                # reply pump on a round trip or judging a batch without
+                # the claims -- and the second one silently admits.
+                #
+                # Lazily, and only for a collection whose rules actually
+                # ask: a policy with no caller-aware rule never pays the
+                # round trip, and it is paid once per connection because
+                # an authenticated connection cannot become somebody else.
+                #
+                # First, and that ordering is a bug this had: the
+                # push-down below builds its `$match` out of these
+                # claims, so resolving afterwards left every
+                # caller-scoped reduction refused for want of an
+                # identity the boundary already had the means to ask
+                # for.
+                if who is not None and _wants_a_caller(guards, body):
+                    await who.resolve(verbose)
+
                 # A destructive verb this boundary cannot express as a
                 # revocation is answered here rather than forwarded: the
                 # reply goes straight back and the server never sees it.
@@ -1397,11 +1644,40 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     # it gets an error. Never neither: see the note above
                     # `rewrite_derived_read` for why one call answers both.
                     pushed, refusal = rewrite_derived_read(
-                        raw, req_id, resp_to, guards, verbose)
+                        raw, req_id, resp_to, guards, verbose,
+                        who.claims if who else None)
                     if pushed is not None:
                         raw = pushed
                         head = decode_sections(raw)
                         body = head[1] if head else body
+                        # The rows were filtered by the server, and what
+                        # comes back is a *reduction over* them -- a count,
+                        # a group, a projection. Judging that reply per
+                        # document would be asking the rules about
+                        # documents that no longer exist, and one rule
+                        # answers badly: `Restricted` refuses a document
+                        # with no audience, because untagged is not public.
+                        # A `$group` result has no audience, so the
+                        # boundary filtered correctly server-side and then
+                        # threw its own answer away. Measured as
+                        # `count_documents() == 0` on a collection the same
+                        # caller could `find()` two rows in.
+                        if reduced is not None:
+                            reduced.add(req_id)
+
+                # A `getMore` continuing a reduced read is the same read.
+                # Matched on the request, where the cursor id is still in
+                # the message -- the reply that drains a cursor reports
+                # `id: 0` and carries nothing to recognise it by.
+                more = body.get("getMore")
+                if (reduced is not None and reduced_cursors is not None
+                        and isinstance(more, int)):
+                    if more in reduced_cursors:
+                        reduced.add(req_id)
+                    # A client may also abandon it; `killCursors` is the
+                    # other way this entry stops being needed.
+                    if body.get("batchSize") == 0:
+                        reduced_cursors.discard(more)
                 if refusal is not None:
                     await send(back, refusal)
                     continue
@@ -1453,6 +1729,15 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                             meter.sealed_writes_total += (
                                 vault.sealed_writes - before)
             elif opcode == OP_MSG:
+                # This proxy's own question, answered. It is not the
+                # client's reply and must never reach it -- forwarding one
+                # hands a driver a response to a command it never sent,
+                # which desynchronises the stream exactly like a wrong
+                # `responseTo` does. First, so nothing below can rewrite,
+                # judge or count a message the client is not owed.
+                if back_channel is not None and back_channel.answer(resp_to,
+                                                                    raw):
+                    continue
                 if advertise:
                     rebuilt = rewrite_topology(raw, req_id, resp_to, advertise)
                     if rebuilt is not None:
@@ -1478,9 +1763,14 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         if why:
                             upstream.invalidate(why)
 
-                raw = (delete_reply(raw, req_id, resp_to) if was_delete
-                       else await judge(raw, req_id, resp_to, guards,
-                                        verbose, vault, meter))
+                already = _was_reduced(raw, resp_to, reduced,
+                                       reduced_cursors)
+                if was_delete:
+                    raw = delete_reply(raw, req_id, resp_to)
+                elif not already:
+                    raw = await judge(raw, req_id, resp_to, guards,
+                                      verbose, vault, meter,
+                                      who.claims if who else None)
             await send(writer, raw)
     except Hangup:
         # Not an error, and the one disconnect the caller may still be
@@ -2102,10 +2392,14 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
         # writing them out twice: the two directions of this connection must
         # be handed *identical* state or the boundary means different things
         # depending on which way a message is travelling.
+        channel = Backchannel(up_w)
         common: _Pump = {"guards": guards, "verbose": verbose,
                          "rewritten": rewritten, "upstream": upstream,
                          "advertise": advertise, "vault": vault,
-                         "embeds": embeds, "meter": meter}
+                         "embeds": embeds, "meter": meter,
+                         "back_channel": channel,
+                         "who": CallerIdentity(channel),
+                         "reduced": set(), "reduced_cursors": set()}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
         back = asyncio.ensure_future(pump(up_r, client_w, up_w,
@@ -2157,6 +2451,164 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
 ASKED_BASE = 0x7F00_0000
 
 
+
+class Backchannel:
+    """The boundary's own questions, asked on the client's own connection.
+
+    Extracted from `Conversation`, which had the only copy, because the
+    plain path -- the default, and the one most connections take -- needed
+    the same primitive and a second spelling of "send a command and match
+    its reply" is the drift this file keeps finding in itself.
+
+    Why it is still not "a connection of its own": the socket, the
+    authentication and the identity are all the client's. What is borrowed
+    is a gap between its requests, which is also why every question asked
+    here has to be one the client's own credentials are allowed to ask.
+    """
+
+    def __init__(self, primary_w: asyncio.StreamWriter | None = None):
+        self.primary_w = primary_w
+        self.asked: dict[int, asyncio.Future] = {}
+        self._next = ASKED_BASE
+        self.lock = asyncio.Lock()
+
+    def answer(self, resp_to: int, raw: bytes) -> bool:
+        """Resolve a pending question. True when the reply was *ours*.
+
+        The return value is load-bearing: a caller that forwards on a
+        `True` has just handed the client a reply to a command it never
+        sent, which desynchronises the driver as surely as a wrong
+        `responseTo` does.
+        """
+        future = self.asked.get(resp_to)
+        if future is None:
+            return False
+        if not future.done():
+            future.set_result(raw)
+        return True
+
+    async def ask(self, command: dict, timeout: float = 20.0) -> dict | None:
+        """Run one command on the client's connection. `None` on any failure.
+
+        `None` rather than an exception, and every caller treats it as "the
+        question could not be answered" rather than as an answer. On the
+        permission path that distinction is the whole guarantee: not
+        knowing who is asking has to refuse, never admit.
+        """
+        if self.primary_w is None:
+            return None
+        self._next += 1
+        req_id = self._next
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self.asked[req_id] = future
+        try:
+            async with self.lock:
+                # One `write` per whole message, and that is load-bearing
+                # rather than tidy. Two coroutines share this writer now --
+                # the request pump forwarding the client, and this asking
+                # its own question -- and what keeps their bytes from
+                # interleaving is that each appends a complete message to
+                # the buffer with no await inside. The `drain` below may
+                # yield; by then the bytes are already ordered. Splitting
+                # either write in two would corrupt the stream in a way
+                # that looks like a driver bug.
+                self.primary_w.write(encode_op_msg(req_id, 0, 0, command))
+                await self.primary_w.drain()
+            raw = await asyncio.wait_for(future, timeout)
+        except (asyncio.TimeoutError, ConnectionError, OSError):
+            return None
+        finally:
+            self.asked.pop(req_id, None)
+        decoded = decode_op_msg(raw)
+        return dict(decoded[1]) if decoded else None
+
+
+class CallerIdentity:
+    """Who the server says this connection authenticated as.
+
+    **The claims come from the server, never from the client**, and that is
+    not a preference. `for_caller` in `admission/core.py` says it outright:
+    a handle that believed ``{"clearance": "secret"}`` because it was
+    passed one "would be an authorisation system whose only input is the
+    attacker's". A proxy is in an even worse position to trust the client,
+    because the client is the only thing talking to it.
+
+    So the question is put to the deployment. ``connectionStatus`` answered
+    on this connection returns ``authenticatedUsers`` and
+    ``authenticatedUserRoles`` -- the server's own account of who
+    authenticated here, which the client cannot forge without forging the
+    authentication itself.
+
+    Asked once and cached, because it cannot change: a MongoDB connection
+    authenticates and stays that identity. Asked *lazily*, on the first
+    read against a collection whose rules need a caller, so a deployment
+    that declares no such rule pays nothing at all.
+
+    ``None`` claims mean the question could not be answered, and that is
+    kept distinct from ``{}`` -- "nobody is authenticated", which is a real
+    answer on a deployment without auth. The rules refuse either way; the
+    difference is what an operator is told.
+    """
+
+    def __init__(self, back: Backchannel):
+        self.back = back
+        self.claims: dict | None = None
+        self.asked = False
+        self.why: str | None = None
+
+    async def resolve(self, verbose: bool = False) -> dict | None:
+        if self.asked:
+            return self.claims
+        self.asked = True
+        reply = await self.back.ask({"connectionStatus": 1, "$db": "admin"})
+        if reply is None or not reply.get("ok"):
+            self.why = ("the deployment did not answer connectionStatus, so "
+                        "who is asking is unknown")
+            if verbose:
+                print(f"  voyd: {self.why}", flush=True)
+            return None
+        self.claims = claims_from(reply)
+        if verbose:
+            who = self.claims.get("user") or "nobody"
+            groups = ",".join(self.claims.get("groups") or []) or "none"
+            print(f"  voyd: this connection is {who!r} to the server; "
+                  f"groups={groups}", flush=True)
+        return self.claims
+
+
+def claims_from(status: Mapping) -> dict:
+    """`connectionStatus` as the claims a rule reads.
+
+    The mapping is deliberately thin. A role *is* a group -- that is what
+    `db.createRole({role: "legal"})` makes -- so `restricted_to("groups")`
+    against a document listing ``["legal", "deal-desk"]`` works with no
+    further declaration, which is the case this is for.
+
+    Bare role names only, not ``db.role``. Qualified names would also match
+    a document that happened to spell them that way, and being generous is
+    the wrong direction in a check that decides who sees what: a name this
+    does not produce fails closed.
+    """
+    info = status.get("authInfo")
+    info = info if isinstance(info, Mapping) else {}
+    users = info.get("authenticatedUsers") or []
+    roles = info.get("authenticatedUserRoles") or []
+    first = users[0] if users and isinstance(users[0], Mapping) else {}
+    groups = sorted({str(r["role"]) for r in roles
+                     if isinstance(r, Mapping)
+                     and isinstance(r.get("role"), str)})
+    return {
+        "user": first.get("user"),
+        "db": first.get("db"),
+        "groups": groups,
+        # The same list under the name the deployment calls it, so a policy
+        # can say `restricted_to("roles")` if that reads better to the
+        # person writing it. One source, two spellings of the question.
+        "roles": groups,
+    }
+
+
 class Conversation:
     """One client, one primary connection, and at most one secondary.
 
@@ -2189,10 +2641,14 @@ class Conversation:
         self.secondary_r = None
         self.secondary_w = None
         self.home: dict[int, str] = {}
-        self.asked: dict[int, asyncio.Future] = {}
-        self._next_ask = ASKED_BASE
+        # One implementation of "ask on the client's own connection",
+        # shared with the plain path. This class had the only copy and the
+        # default path needed the same primitive; two spellings of
+        # request-id matching is the drift this file keeps finding in
+        # itself, so the copy moved out rather than being duplicated.
+        self.back = Backchannel(primary_w)
+        self.who = CallerIdentity(self.back)
         self.client_lock = asyncio.Lock()
-        self.primary_lock = asyncio.Lock()
         self.payoff = None
         # request id -> (sent at, shape). The shape travels with the
         # timing so the routing decision and the accounting cannot end up
@@ -2216,30 +2672,15 @@ class Conversation:
             self.client_w.write(payload)
             await self.client_w.drain()
 
-    async def ask_primary(self, command: dict, timeout: float = 20.0) -> dict | None:
+    async def ask_primary(self, command: dict,
+                          timeout: float = 20.0) -> dict | None:
         """Run one command on the client's own primary connection.
 
-        This is the only place the boundary speaks rather than forwards, and
-        it is worth being precise about why that is still not "a connection
-        of its own": the socket, the authentication and the identity are all
-        the client's. What is borrowed is a gap between its requests.
+        Kept as a name because `authoritative` and the mark lookups read
+        better for it; the implementation is `Backchannel.ask`, which the
+        plain path uses too.
         """
-        self._next_ask += 1
-        req_id = self._next_ask
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future = loop.create_future()
-        self.asked[req_id] = future
-        try:
-            async with self.primary_lock:
-                self.primary_w.write(encode_op_msg(req_id, 0, 0, command))
-                await self.primary_w.drain()
-            raw = await asyncio.wait_for(future, timeout)
-        except (asyncio.TimeoutError, ConnectionError, OSError):
-            return None
-        finally:
-            self.asked.pop(req_id, None)
-        decoded = decode_op_msg(raw)
-        return dict(decoded[1]) if decoded else None
+        return await self.back.ask(command, timeout)
 
     async def authoritative(self, db: str, collection: str, ids: list,
                             fields: set | None) -> dict | None:
@@ -2351,7 +2792,7 @@ class Conversation:
             kept: list = []
         else:
             judgeable, originals = voyd_fanout.merge_marks(batch, fresh, fields)
-            allowed = guard.filter(judgeable)
+            allowed = guard.filter(judgeable, self.who.claims)
             try:
                 permitted = {d["_id"] for d in allowed}
                 kept = [o for o in originals if o["_id"] in permitted]
@@ -2450,7 +2891,7 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
     that one of them calls the other.
     """
     async def send_primary(payload: bytes) -> None:
-        async with conv.primary_lock:
+        async with conv.back.lock:
             conv.primary_w.write(payload)
             await conv.primary_w.drain()
 
@@ -2476,12 +2917,19 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
             body = head[1] if head else {}
             original = raw
 
+            # Who is asking, on this path too. Before the push-down below,
+            # which builds its `$match` out of these claims -- resolving
+            # afterwards leaves every caller-scoped reduction refused for
+            # want of an identity already available.
+            if _wants_a_caller(guards, body):
+                await conv.who.resolve(verbose)
+
             refusal = refuse_unrewritable(raw, req_id, req_id, guards)
             if refusal is None and embeds:
                 refusal = refuse_client_vector(raw, req_id, req_id, embeds)
             if refusal is None:
                 pushed, refusal = rewrite_derived_read(
-                    raw, req_id, resp_to, guards, verbose)
+                    raw, req_id, resp_to, guards, verbose, conv.who.claims)
                 if pushed is not None:
                     raw = pushed
                     original = raw
@@ -2641,10 +3089,7 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
 
             # This proxy's own mark lookup, answered. It is not the
             # client's reply and must never reach it.
-            if source == "primary" and resp_to in conv.asked:
-                future = conv.asked.get(resp_to)
-                if future is not None and not future.done():
-                    future.set_result(raw)
+            if source == "primary" and conv.back.answer(resp_to, raw):
                 continue
 
             if advertise and source == "primary":
@@ -2684,7 +3129,7 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
                         print(f"  voyd: a secondary refused a read "
                               f"({peek[1].get('errmsg', 'no reason given')}"
                               f"); retrying it on the primary", flush=True)
-                    async with conv.primary_lock:
+                    async with conv.back.lock:
                         conv.primary_w.write(again)
                         await conv.primary_w.drain()
                     continue
@@ -2695,7 +3140,8 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
                 rewritten.discard(resp_to)
                 raw = (delete_reply(raw, req_id, resp_to) if was_delete
                        else await judge(raw, req_id, resp_to, guards,
-                                        verbose, vault, meter))
+                                        verbose, vault, meter,
+                                        conv.who.claims))
             await conv.to_client(raw)
     except Hangup:
         return "hangup"
@@ -2884,6 +3330,21 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
         print(f"voyd-wire: guarding {name}: {g.spec.describe()}"
               + (", delete -> revoke" if g.on_delete == "revoke" else ""),
               flush=True)
+        for claim in unsuppliable_claims(g):
+            # Said at boot, loudly, because the alternative is correct and
+            # useless: a rule whose claim this boundary cannot fill gets
+            # no claim, "no claim is the lowest, not the highest", and the
+            # collection refuses every document to everybody. That is
+            # fail-closed, which is the right direction and the wrong
+            # outcome -- and it presents as "VOYD broke my reads", with
+            # nothing anywhere connecting it to a line in the policy file.
+            print(f"voyd-wire: WARNING: {name} declares a rule needing the "
+                  f"claim {claim!r}, and the wire can only supply 'user', "
+                  f"'db', 'groups' and 'roles' -- the server's answer to "
+                  f"connectionStatus. Every read of {name} will be refused. "
+                  f"Use restricted_to('groups') against your MongoDB roles, "
+                  f"or enforce this one through the library handle",
+                  flush=True)
     print(f"voyd-wire: up to {max_connections} concurrent connections"
           + (f" per worker, {workers} workers "
              f"({max_connections * workers} total)" if workers > 1 else ""),

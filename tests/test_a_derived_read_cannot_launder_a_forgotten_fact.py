@@ -307,3 +307,168 @@ def test_a_malformed_caller_and_clause_is_kept_not_quietly_dropped():
     out, why = through({"count": GUARDED, "query": {"$and": "garbage"}})
     assert why is None, why
     assert out is not None and out["query"]["$and"][0] == "garbage"
+
+
+# --- the same hole on the plain `find` path --------------------------------
+#
+# Found by asking what else reaches `enforce` carrying documents the rules
+# cannot read. A reduction was one answer. A projection is the other, and
+# it is the worse of the two: `find({}, {"text": 1})` is the most ordinary
+# query anybody writes, needs no aggregation, and was enough to turn the
+# boundary off for that read. Measured against one live, one expired and
+# one revoked row, through the proxy:
+#
+#     find({})                    ->  [1]
+#     find({}, {"text": 1})       ->  [1, 2, 3]
+#     find({}, {"forgotten": 0})  ->  [1, 2, 3]
+
+def test_a_projection_that_hides_the_marks_moves_the_refusal_into_the_query():
+    out, why = through({"find": GUARDED, "filter": {"owner": "a"},
+                        "projection": {"text": 1}})
+    assert why is None, why
+    assert out is not None
+    assert out["filter"]["owner"] == "a", "the caller's query survives"
+    assert out["filter"]["$and"], "and the boundary's is added to it"
+
+
+def test_an_exclusion_that_removes_a_mark_is_caught_too():
+    for projection in ({"forgotten": 0}, {"expire_at": 0},
+                       {"text": 0, "forgotten": 0}):
+        out, why = through({"find": GUARDED, "filter": {},
+                            "projection": projection})
+        assert why is None, why
+        assert out is not None and out["filter"]["$and"], projection
+
+
+def test_a_projection_that_keeps_every_mark_is_left_alone():
+    """Rewriting a query that did not need it would be cost with no
+    guarantee -- `enforce` can already judge these documents."""
+    keeps = {"text": 1, "expire_at": 1, "forgotten": 1}
+    assert through({"find": GUARDED, "filter": {},
+                    "projection": keeps}) == (None, None)
+    assert through({"find": GUARDED, "filter": {},
+                    "projection": {"text": 0}}) == (None, None)
+    assert through({"find": GUARDED, "filter": {}}) == (None, None)
+
+
+def test_an_id_only_projection_removes_nothing():
+    """`{"_id": 0}` is neither an inclusion nor an exclusion of anything a
+    rule reads, and treating it as one would rewrite every driver's
+    `distinct`-shaped find for no reason."""
+    assert through({"find": GUARDED, "filter": {},
+                    "projection": {"_id": 0}}) == (None, None)
+
+
+def test_find_and_modify_spells_its_projection_differently():
+    """`fields`, not `projection` -- and a guarantee that covers one
+    spelling and not the other is the hole this file is named for. It is
+    the same mistake `findOneAndDelete` was."""
+    out, why = through({"findAndModify": GUARDED, "query": {},
+                        "fields": {"text": 1}, "remove": True})
+    assert why is None, why
+    assert out is not None and out["query"]["$and"]
+
+
+def test_a_blinded_find_is_refused_when_the_refusal_cannot_be_a_query():
+    """Same three cases as a reduction: if the rules cannot all be asked
+    as a query, there is nowhere else for the refusal to go, because the
+    projection has already removed what the per-document check reads."""
+    class Unexpressible:
+        field = "sealed"
+        bypassable = True
+
+        def clause(self):
+            return None
+
+        def reachable(self, doc):
+            return True
+
+    _out, why = through({"find": GUARDED, "filter": {},
+                         "projection": {"text": 1}},
+                        rules=(Deadline(at_field="expire_at"),
+                               Unexpressible()))
+    assert why is not None and "cannot be asked as a query" in why
+
+
+def test_a_blinded_find_on_a_tenant_must_pin_it():
+    _out, why = through({"find": GUARDED, "filter": {},
+                         "projection": {"text": 1}}, tenant="org")
+    assert why is not None and "org" in why
+
+    out, why = through({"find": GUARDED, "filter": {"org": "acme"},
+                        "projection": {"text": 1}}, tenant="org")
+    assert why is None, why
+    assert out is not None and out["filter"]["org"] == "acme"
+
+
+# --- the sweep -------------------------------------------------------------
+#
+# The two holes in this file were each found by thinking of one shape. That
+# is not a method, and the `_id`-only case proves it: written to exempt
+# `{"_id": 0}`, which removes nothing, the same branch waved through
+# `{"_id": 1}` -- an *inclusion* of `_id` alone, which drops every mark
+# there is. It was found by enumerating shapes rather than by thinking of
+# it, so the enumeration lives here instead of in a scratch file.
+
+UNJUDGEABLE = [
+    ("find, include a field",  {"find": GUARDED, "projection": {"text": 1}}),
+    ("find, _id only",         {"find": GUARDED, "projection": {"_id": 1}}),
+    ("find, exclude a mark",   {"find": GUARDED, "projection": {"forgotten": 0}}),
+    ("find, dotted mark",      {"find": GUARDED, "projection": {"forgotten.at": 1}}),
+    ("findAndModify fields",   {"findAndModify": GUARDED, "remove": True,
+                                "fields": {"text": 1}}),
+    ("$project",               {"aggregate": GUARDED,
+                                "pipeline": [{"$project": {"text": 1}}]}),
+    ("$group",                 {"aggregate": GUARDED,
+                                "pipeline": [{"$group": {"_id": None}}]}),
+    ("$replaceRoot",           {"aggregate": GUARDED,
+                                "pipeline": [{"$replaceRoot": {"newRoot": "$x"}}]}),
+    ("$unset a mark",          {"aggregate": GUARDED,
+                                "pipeline": [{"$unset": "forgotten"}]}),
+    ("$set a mark to null",    {"aggregate": GUARDED,
+                                "pipeline": [{"$set": {"forgotten": None}}]}),
+    ("$searchMeta",            {"aggregate": GUARDED,
+                                "pipeline": [{"$searchMeta": {}}]}),
+    ("distinct",               {"distinct": GUARDED, "key": "text"}),
+    ("count",                  {"count": GUARDED}),
+    ("explain a distinct",     {"explain": {"distinct": GUARDED, "key": "t"}}),
+    ("$lookup elsewhere",      {"aggregate": GUARDED,
+                                "pipeline": [{"$lookup": {"from": "o", "as": "j"}}]}),
+]
+
+JUDGEABLE = [
+    ("a plain find",           {"find": GUARDED, "filter": {}}),
+    ("a projection keeping every mark",
+     {"find": GUARDED, "projection": {"text": 1, "expire_at": 1,
+                                      "forgotten": 1}}),
+    ("excluding something else",
+     {"find": GUARDED, "projection": {"text": 0}}),
+    ("_id excluded only",      {"find": GUARDED, "projection": {"_id": 0}}),
+    ("$match and $sort",       {"aggregate": GUARDED,
+                                "pipeline": [{"$match": {}}, {"$sort": {"a": 1}}]}),
+    ("$vectorSearch",          {"aggregate": GUARDED,
+                                "pipeline": [{"$vectorSearch": {"index": "v"}}]}),
+]
+
+
+@pytest.mark.parametrize("label,body", UNJUDGEABLE,
+                         ids=[lbl for lbl, _ in UNJUDGEABLE])
+def test_every_unjudgeable_shape_is_rewritten_or_refused(label, body):
+    """Never forwarded as it arrived. Rewritten where the refusal can be a
+    query, refused where it cannot -- but never handed to a per-document
+    check that has nothing to read."""
+    out, why = through(body)
+    assert (out is not None) or (why is not None), (
+        f"{label} was forwarded unchanged, so the boundary will judge a "
+        f"reply it cannot read the marks off")
+
+
+@pytest.mark.parametrize("label,body", JUDGEABLE,
+                         ids=[lbl for lbl, _ in JUDGEABLE])
+def test_every_judgeable_shape_is_left_alone(label, body):
+    """The other direction, and it is not ceremony: a rule that rewrote
+    everything would pass the test above while making every ordinary read
+    pay for it -- and `filter_batch` already covers these exactly."""
+    assert through(body) == (None, None), (
+        f"{label} was rewritten; the per-document check can already judge "
+        f"it, so the rewrite is cost with no guarantee")
