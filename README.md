@@ -1,25 +1,82 @@
 # VOYD
 
-**Ranking is not permission.**
+**Retrieval is the only data path in a mature stack with no enforcement
+point.**
 
-A vector index ranks by relevance and is never asked the other question — *may
-this fact reach a prompt?* So retrieval answers with a confident score and no
-idea whether the hit was allowed to be there: an expired row the sweeper has
-not reached, a fact somebody revoked, a vector from a model you swapped last
-quarter.
+Every other one has had this solved for years. HTTP has middleware. SQL has
+views and row-level security. The filesystem has permission bits the kernel
+checks whether or not you remembered to ask. Each of those is a place where
+the answer to *may this caller see this?* is given once, below the
+application, where no call site can forget it.
 
-Delete is a wish. MongoDB's TTL monitor runs about once a minute (measured
-here: 60.0s); an S3 lifecycle rule runs about once a day. In that window your
-index keeps returning the deleted document as a normal, well-scored result,
-with nothing logged and nothing to page on.
+Vector retrieval has a ranking function and a hope. `$vectorSearch` scores
+relevance and is never asked the other question, so the answer gets
+reimplemented inside every query — a tenant filter here, an `expire_at`
+clause there, one per call site, in each service, in each language, forever.
 
+**And the failure is silent in the worst possible direction.** A missing
+authorization filter returns *more* documents, not fewer. It does not raise,
+it does not log, and on a retrieval workload it reads as **better recall**.
+There is no error to page on and no test that naturally fails. Somebody's
+revoked credential is in a prompt and the dashboard is green.
+
+So: **ranking is not permission.** Delete does not help either — MongoDB's
+TTL monitor runs about once a minute (measured here: 60.0s), an S3 lifecycle
+rule about once a day, and in that window the index keeps returning the
+deleted document as a normal, well-scored result. Delete is a wish.
 **Refuse is a contract** — answered on every read, immediately, whatever the
 sweeper is doing.
 
-### Three ways to make a fact go away, and only one of them is immediate
+VOYD is that enforcement point, and it is placed where it cannot be
+bypassed: **the wire**. One connection string, no import, no code. Which is
+the whole design, because a boundary you can forget to use is not one.
 
-This is the whole design in one table. Every claim below is a consequence of
-it, and the last column is the part that decides which one you actually need:
+---
+
+## A statement of intent is not a guarantee
+
+That is the thesis underneath all of it, and it is bigger than vector
+search. Everything above is one instance of it, and so is every defect this
+project has found in itself:
+
+| the intent | the window it actually had | found in |
+|---|---|---|
+| `delete` removes the fact | ~60s of TTL monitor lag | the premise above |
+| a destroyed key makes it unreadable | ~60s of libmongocrypt key cache | `tools/voyd_seal.py` |
+| a replica's copy is current | unbounded replication lag | `tools/voyd_fanout.py` |
+| the index embeds with the declared model | nobody had ever asked it | `tools/voyd_preflight.py` |
+| this test proves the claim in its name | it asserted a page of one | `LIMITS.md` §1 |
+| this counter is on a dashboard | it was never flushed | `tools/voyd_metrics.py` |
+
+Three unrelated subsystems, three independent discoveries, one defect: a
+*delete-is-a-wish window*. Then the same shape again in the configuration,
+the test suite, and the metrics. The lesson generalises past data entirely —
+**what did you verify, versus what did you declare and assume?**
+
+So this repository applies it to itself, and not as a slogan:
+
+- **[CLAIMS.md](CLAIMS.md)** maps every guarantee to the file that would go
+  red if it stopped holding. The mapping is checked in both directions by
+  `tests/test_every_claim_names_its_evidence.py` — a claim with no test, or
+  a test no claim points at, fails the suite. Currently 23 claims, 23 files,
+  and a bijection.
+- **[LIMITS.md](LIMITS.md)** counts this project's own defects, names its
+  own bad numbers, and opens with the one that matters: nobody has used this
+  but its author.
+- Every performance figure comes from `tools/voyd_bench.py`, which checks
+  the boundary was still refusing while it was being fast.
+
+None of that makes the code correct. It makes the difference between *a
+claim* and *an attached claim* visible, which is the only honest thing a
+README can offer — and it is the floor, not the ceiling. One of the tests on
+that map was a screenshot for two commits.
+
+---
+
+## Three ways to make a fact go away, and only one is immediate
+
+The mechanics, in one table. Every claim below is a consequence of it, and
+the last column is the part that decides which one you actually need:
 
 | | when | reaches |
 |---|---|---|
@@ -723,34 +780,25 @@ waiting on it.
 **What would actually change this project** is in
 [LIMITS.md](LIMITS.md) §1 and it is not on this page: nobody has used it but
 its author. Zero external users, zero pilots, and every claim here verified
-by the person who wrote the claim. Eighteen defects last month, and not one
-of them was caught by the suite going red — they came from running it. One
+by the person who wrote the claim. Nineteen defects last month, and not one
+of them was caught by the suite going red — they came from running it, or
+from somebody asking why a paragraph said what it said. One
 team, two weeks, their own corpus is worth more than anything else that
 could be built next.
 
-The suite is **315 tests**, and it is the foundation rather than a census —
+The suite is **366 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
-above it a lie:
+above it a lie. Each one and the file that holds it up is
+**[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim with
+no test, or a test file no claim points at, fails the suite.
 
-| | |
-|---|---|
-| the wire codec round-trips | including the document sequence that carries a write, where the one silent bug lived |
-| the boundary refuses | expired, revoked, unreadable-deadline, off-tenant — **with no database anywhere near it** |
-| a policy file compiles, or fails at *load* | five ways to be wrong, each refused by name |
-| a plain driver gets all of it | real `mongod`, real proxy, real driver |
-| the write path forgets without deleting | the deadline moves *earlier only*; a quarantine stays pinned; a revocation cannot be lifted |
-| encryption is the answer refusal cannot give | plaintext is not on disk, shredding one tenant leaves the others readable |
-| **the boundary seals and shreds** | a plain driver with no encryption configured writes ciphertext; an erasure is unreachable *immediately* and unreadable everywhere after |
-| a refusal travels | revoke a source, the summary and the answer and the embedding go with it |
-| the boundary sizes its own fetch | `numCandidates` from the measured refusal rate, not a constant |
-| it is operable | TLS termination, a capped message size, keepalive, a draining `SIGTERM` |
-| the suite does not leak databases | a stale search index starves the next index build |
-| a client cannot walk past it | `hello` is rewritten, so the guarantee is not a connection-string option somebody remembers |
-| **the server owns the encoding** | a client's own `queryVector` is refused by name, with no database anywhere near the decision |
-| **the policy is checked against the cluster** | a declaration the index contradicts refuses to start; a missing TTL index warns; a probe that failed never reports a clean bill |
-| **the server embeds and refusal still holds** | against a **live Atlas cluster**, because this one cannot run anywhere else |
+Two rows on that page are worth singling out. **The boundary refuses** is
+asserted with no database anywhere near it, because a per-document check
+that cannot run without one is a check that could not have moved to a wire.
+And **the server embeds and refusal still holds** runs against a **live
+Atlas cluster**, because that one cannot run anywhere else.
 
-That last row is worth its ninety seconds. Atlas Local registers no embedding
+That last one is worth its ninety seconds. Atlas Local registers no embedding
 models, so it *declines* an `auto_embed` declaration and falls back to a
 client-supplied vector — a test that accepted the fallback would assert the
 opposite of what it claims. Against a real cluster the application never
@@ -759,7 +807,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 315 tests, 106 seconds -- the inner loop
+pytest              # 366 tests, 105 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 

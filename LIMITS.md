@@ -13,7 +13,7 @@ yet. They are marked.
 
 ## 1. The one that actually matters
 
-**Nobody has used this but its author.** 102 commits, one contributor, zero
+**Nobody has used this but its author.** 103 commits, one contributor, zero
 external users, zero pilots. Every claim in this repository is verified by
 somebody who also wrote the claim.
 
@@ -565,7 +565,28 @@ documents?"
 
 ## 4. Coverage
 
-319 tests, ~6,552 lines, against 8,152 lines of `voyd/` and 5,909 of
+**Every claim is attached to a file, and that mapping is checked.**
+`CLAIMS.md` names each guarantee and the test that would go red if it stopped
+holding; `tests/test_every_claim_names_its_evidence.py` asserts the mapping
+in both directions and refuses a citation it cannot parse. Currently 23
+claims, 23 test files, a bijection.
+
+**What that is worth, stated narrowly.** It closes the gap between a README
+sentence and a file that runs in CI. It does *not* know whether a test is any
+good, and this page has the counter-example: a test on that very map had a
+docstring about a page of fifty documents, asserted a page of one, and passed
+under sabotage for two commits (§1). Attachment is a floor. A reader who
+takes "23 of 23 attached" as "23 guarantees verified" has made exactly the
+substitution this project is about.
+
+**Consider:** the obvious next step is to check that each cited file's
+assertions relate to the claim, and there is no honest way to do that
+mechanically. What would help is the thing §1 asks for -- somebody outside
+reading a claim, disagreeing, and finding the test that should have caught
+them being wrong.
+
+
+370 tests, ~6,750 lines, against 8,152 lines of `voyd/` and 5,909 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -625,7 +646,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (315 tests, ~106 seconds) with
+**Consider:** the suite is fast by default (366 tests, ~105 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
