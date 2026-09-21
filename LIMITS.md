@@ -108,9 +108,18 @@ own 48MB ceiling. Bounded connections, closed rather than queued. A draining
 
 **One node, no topology.** It picks the primary at startup and re-resolves
 when the server says to. It does not load-balance reads, honour read
-preference, or retry a write the client already saw fail. Clients must use
-`directConnection=true` so they do not chase the hosts the cluster
-advertises straight past it.
+preference, or retry a write the client already saw fail.
+
+`--advertise-self` rewrites `hello` so clients stay on the boundary rather
+than following the cluster's host list, which is what makes this
+*enforcement* rather than a `directConnection=true` the caller has to
+remember. Two fields are deliberately passed through untouched:
+`isWritablePrimary` and `secondary`. Forcing them true would keep clients
+pinned during a failover, which sounds like an improvement and is the
+opposite — that flag is the signal a driver uses to notice its upstream is
+no longer writable, and masking it means the client writes happily into an
+outage. `setName` is kept for the same class of reason: strip it and drivers
+treat the target as a standalone, which silently disables retryable writes.
 
 **A failover costs the in-flight requests.** Re-resolution happens on the
 *next* connection. The request that received `NotWritablePrimary` is
@@ -161,8 +170,11 @@ mistaken for it.
 runs under the encryption tests even though a name-scan cannot see it.
 `capabilities.py` (130 lines) is the one with no real excuse.
 
-**Consider:** the suite is fast by default (99 tests, 14 seconds) with real
-index builds deselected. CI clears the deselection and a test pins those two
+**Consider:** the suite is fast by default (106 tests, ~16 seconds) with
+real index builds and the live-Atlas tests deselected. `-m ""` includes
+them and takes minutes, varying with cloud latency -- that variance is the
+flag working, not a flake, and it is worth knowing before somebody reports
+it as one. CI clears the deselection and a test pins those two
 facts together — but that arrangement is exactly how a test quietly stops
 being run, so check it is still true before trusting it.
 

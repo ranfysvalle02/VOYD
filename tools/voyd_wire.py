@@ -501,6 +501,74 @@ def refuse_unrewritable(raw: bytes, req_id: int, resp_to: int,
     return None
 
 
+# Fields in a `hello` reply that name *other machines*. A driver reads these
+# and connects to them directly, which is the whole of how a replica set
+# works and the whole of how a boundary gets walked past.
+TOPOLOGY_FIELDS = ("hosts", "passives", "arbiters")
+
+
+def rewrite_topology(raw: bytes, req_id: int, resp_to: int,
+                     advertise: str) -> bytes | None:
+    """Answer `hello` with this boundary's address instead of the cluster's.
+
+    Until this existed the boundary depended on the client passing
+    `directConnection=true` -- which is *client configuration*, not
+    enforcement. A driver without it reads the `hosts` array and connects to
+    the real nodes, straight past the policy. Measured against a local
+    deployment it does not even fail safe: the client reads the container's
+    internal hostname, cannot resolve it, and gives up. Against Atlas those
+    hosts resolve perfectly, so the same bug is a silent bypass rather than
+    an error.
+
+    **What is rewritten, and what is deliberately not.** This is where a
+    topology rewrite goes wrong, so each field is a decision:
+
+    - ``hosts``, ``me``, ``primary`` -> this boundary. That is the lie that
+      makes the client stay.
+    - ``passives``, ``arbiters`` -> emptied. They name other machines.
+    - ``setName`` -> **kept**. Stripping it makes a driver treat the target
+      as a standalone, which silently disables retryable writes -- a
+      correctness regression handed over as a topology tidy-up.
+    - ``isWritablePrimary`` / ``secondary`` -> **passed through untouched**.
+      Forcing these true is the tempting version and it is the dangerous
+      one: that flag is exactly the signal a driver uses to notice a
+      failover, so masking it means the client keeps writing happily to a
+      boundary whose upstream is now a secondary, and nothing anywhere
+      notices. A boundary that lies about writability has made itself the
+      outage.
+    """
+    decoded = decode_op_msg(raw)
+    if decoded is None:
+        return None
+    flags, reply = decoded
+
+    # A `hello` reply is the one that describes a server to a driver. This
+    # check is a fast path and a statement of intent, *not* the safety
+    # property -- deleting it changes no behaviour, which a sabotage run
+    # proved rather than a reviewer guessing. The guarantee that an
+    # unrelated message is forwarded byte for byte is the `out == reply`
+    # comparison at the bottom: nothing is re-encoded unless a field
+    # actually changed.
+    if "maxWireVersion" not in reply or not (
+            set(reply) & {"isWritablePrimary", "ismaster", "hosts", "me"}):
+        return None
+
+    out = dict(reply)
+    for field in TOPOLOGY_FIELDS:
+        if field in out:
+            out[field] = [advertise] if field == "hosts" else []
+    if "me" in out:
+        out["me"] = advertise
+    if "primary" in out:
+        # Only meaningful if the upstream still believes it has one. Saying
+        # "the primary is me" while the upstream says there is none would be
+        # the same lie as forcing writability.
+        out["primary"] = advertise
+    if out == reply:
+        return None
+    return encode_op_msg(req_id, resp_to, flags, out)
+
+
 def delete_reply(raw: bytes, req_id: int, resp_to: int) -> bytes:
     """Make an ``update`` reply look like the ``delete`` reply it answers.
 
@@ -584,7 +652,8 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
          guards: dict[str, Guard], verbose: bool,
          rewritten: set[int], lock: threading.Lock,
          upstream: Upstream | None = None,
-         finished: threading.Semaphore | None = None) -> None:
+         finished: threading.Semaphore | None = None,
+         advertise: str | None = None) -> None:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -645,6 +714,11 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                     if swapped is not None:
                         raw = swapped
             elif opcode == OP_MSG:
+                if advertise:
+                    rebuilt = rewrite_topology(raw, req_id, resp_to, advertise)
+                    if rebuilt is not None:
+                        dst.sendall(rebuilt)
+                        continue
                 with lock:
                     was_delete = resp_to in rewritten
                     rewritten.discard(resp_to)
@@ -884,7 +958,8 @@ class Live:
 
 def session(client: socket.socket, upstream: Upstream,
             guards: dict[str, Guard], verbose: bool,
-            done: threading.Semaphore, live: Live) -> None:
+            done: threading.Semaphore, live: Live,
+            advertise: str | None = None) -> None:
     """One client connection, start to finish, on one thread pair.
 
     A MongoDB connection is stateful -- authentication, sessions, cursors
@@ -920,7 +995,8 @@ def session(client: socket.socket, upstream: Upstream,
             target=pump, args=(src, dst),
             kwargs={"to_server": to_server, "guards": guards,
                     "verbose": verbose, "rewritten": rewritten, "lock": lock,
-                    "upstream": upstream, "finished": finished},
+                    "upstream": upstream, "finished": finished,
+                    "advertise": advertise},
             daemon=True).start()
 
     # Both directions have to end before the slot is free, or a burst of
@@ -950,7 +1026,7 @@ def summarise(guards: dict[str, Guard]) -> None:
 def serve(listen_port: int, target: str, guards: dict[str, Guard],
           verbose: bool, *, certfile: str | None = None,
           keyfile: str | None = None, max_connections: int = 200,
-          drain_seconds: float = 20.0) -> None:
+          drain_seconds: float = 20.0, advertise: str | None = None) -> None:
     upstream = Upstream(target, verbose=verbose)
     server = listener(listen_port, certfile, keyfile)
 
@@ -964,6 +1040,14 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
               flush=True)
     print(f"voyd-wire: up to {max_connections} concurrent connections",
           flush=True)
+    if advertise:
+        print(f"voyd-wire: advertising itself as {advertise}; clients stay "
+              f"here rather than following the cluster's own host list",
+              flush=True)
+    else:
+        print("voyd-wire: NOT rewriting topology -- clients must pass "
+              "directConnection=true or they will walk past this boundary",
+              flush=True)
     print("voyd-wire: connect any driver to "
           f"mongodb{'+tls' if certfile else ''}://localhost:{listen_port}/"
           "?directConnection=true\n", flush=True)
@@ -1025,7 +1109,8 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
             client.close()
             continue
         threading.Thread(target=session,
-                         args=(client, upstream, guards, verbose, slots, live),
+                         args=(client, upstream, guards, verbose, slots, live,
+                               advertise),
                          daemon=True).start()
 
     # Wait for the connections that were already open. Bounded, because a
@@ -1073,6 +1158,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tls-key", metavar="PEM",
                     help="the private key for --tls-cert, if it is not in "
                          "the same file")
+    ap.add_argument("--advertise", metavar="HOST:PORT", default=None,
+                    help="rewrite `hello` so clients see this address "
+                         "instead of the cluster's own hosts. Without it a "
+                         "driver that does not pass directConnection=true "
+                         "reads the real host list and connects past this "
+                         "boundary entirely. Defaults to localhost:<listen> "
+                         "when --advertise-self is given")
+    ap.add_argument("--advertise-self", action="store_true",
+                    help="shorthand for --advertise localhost:<listen>")
     ap.add_argument("--max-connections", type=int, default=200, metavar="N",
                     help="concurrent client connections; further ones are "
                          "closed rather than queued, because a driver "
@@ -1106,9 +1200,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.tls_key and not args.tls_cert:
             print("voyd-wire: --tls-key needs --tls-cert", file=sys.stderr)
             return 2
+        advertise = args.advertise
+        if args.advertise_self and not advertise:
+            advertise = f"localhost:{args.listen}"
         serve(args.listen, args.target, guards, not args.quiet,
               certfile=args.tls_cert, keyfile=args.tls_key,
-              max_connections=args.max_connections)
+              max_connections=args.max_connections, advertise=advertise)
     except KeyboardInterrupt:
         summarise(guards)
     return 0

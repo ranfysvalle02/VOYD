@@ -39,6 +39,7 @@ Point the boundary at your database:
 # a local mongod
 python tools/voyd_wire.py --config voydfile.py --target localhost:27017
 
+# --advertise-self pins clients here instead of the cluster's own hosts
 # or Atlas -- SRV is resolved, TLS is used, the primary is found
 python tools/voyd_wire.py --config voydfile.py \
     --target "mongodb+srv://user:pass@cluster0.xxxxx.mongodb.net/"
@@ -201,7 +202,7 @@ the hash-chain ledger and the context index are gone, along with ~817 tests
 and ~35,000 words of documentation that described them. What is left is the
 boundary, the policy file, and the wire.
 
-The suite is **103 tests**, and it is the foundation rather than a census —
+The suite is **110 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie:
 
@@ -217,6 +218,7 @@ above it a lie:
 | the boundary sizes its own fetch | `numCandidates` from the measured refusal rate, not a constant |
 | it is operable | TLS termination, a capped message size, keepalive, a draining `SIGTERM` |
 | the suite does not leak databases | a stale search index starves the next index build |
+| a client cannot walk past it | `hello` is rewritten, so the guarantee is not a connection-string option somebody remembers |
 | **the server embeds and refusal still holds** | against a **live Atlas cluster**, because this one cannot run anywhere else |
 
 That last row is worth its ninety seconds. Atlas Local registers no embedding
@@ -228,7 +230,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 99 tests, 14 seconds -- the inner loop
+pytest              # 106 tests, 16 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 
