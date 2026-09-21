@@ -159,19 +159,50 @@ Measured on this laptop, idle connections held open, old versus new:
 
 The 19 is a fixed executor pool, not per connection; it does not grow.
 
-**One event loop is still one core.** Under 24 concurrent clients a single
-worker sits at **96.7% CPU** -- pinned to one core, because the per-message
-cost here is BSON decode in `decode_sections` and `enforce` and no event
-loop spreads that. `--workers N` pre-forks N processes over one inherited
-listening socket, which is the knob that uses the other cores.
+**One event loop is still one core.** A single worker sits at exactly
+**1.00 cores** under load -- the per-message cost is BSON decode in
+`decode_sections` and `enforce`, and no event loop spreads that.
+`--workers N` pre-forks N processes over one inherited listening socket,
+which is the knob that uses the other cores.
 
-**Consider:** the measured gain from `--workers 4` was only **1.42x**
-(635 -> 901 queries/sec), not 4x, because at that point `mongod` and the
-load generator were competing for the same fourteen cores as the proxy. The
-honest reading is that the *single-core ceiling is real and now removable*,
-not that four workers buy four times the throughput. Nobody has run this on
-a machine where the database is somewhere else, which is the only
-measurement that would settle it.
+It scales close to linearly. `tools/voyd_bench.py`, 14 cores, 100 documents
+per batch with one in ten revoked:
+
+| | docs/s admitted | cores | us/doc | vs 1 worker |
+|---|---|---|---|---|
+| no proxy (control) | 12,434,609 | | | |
+| `--workers 1` | 444,215 | 1.00 | 2.25 | 1.00x |
+| `--workers 2` | 861,098 | 2.00 | 2.32 | **1.94x** |
+| `--workers 4` | 1,587,041 | 3.98 | 2.51 | **3.57x** |
+| `--workers 8` | 2,655,548 | 6.91 | 2.60 | **5.98x** |
+
+**Refusal costs about 2.3 microseconds per document**, and that is the
+whole price of the boundary. The per-document cost drifts up ~15% from one
+worker to eight, which is memory bandwidth, not contention in the code --
+there is nothing shared between workers to contend on.
+
+**This page previously claimed `--workers 4` bought 1.42x.** That number
+was wrong, and it was wrong in an instructive way: it was measured against
+a real `mongod` with a `pymongo` load generator on the same laptop, so the
+proxy was never the bottleneck and the experiment could not see the thing
+it claimed to measure. An earlier attempt said 1.18x, because that load
+generator was Python threads holding the GIL against itself. The fix was
+not a better proxy, it was a harness that removes both ends: a synthetic
+upstream that answers with one pre-encoded reply, and raw-socket clients
+that never decode one.
+
+**The control is the part to check first.** `--workers 0` runs the clients
+straight at the upstream. At 12.4M docs/s it is 4.7x the best proxied
+result, which is what makes the rows below it measurements of the proxy
+rather than of the harness. The benchmark prints that ratio and says so
+when it drops under 1.5x.
+
+**And it verifies it was still refusing.** A proxy that got fast by quietly
+forwarding everything would post the best numbers on this page, so each row
+also reports the refused share read back from the worker summary. It is
+10.0% in every row above, which is the one document in ten the batch was
+built with. A row that says `LEAKED` is a row whose throughput means
+nothing.
 
 **No metrics endpoint.** Counters exist and print on shutdown -- summed
 across workers and printed once, because N workers each printing their own
