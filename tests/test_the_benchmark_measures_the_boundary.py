@@ -80,3 +80,45 @@ def test_the_sweep_runs_end_to_end_and_the_control_beats_the_proxy():
     assert "the harness had room" in out.stdout, out.stdout
     assert "refused 10.0%" in out.stdout, out.stdout
     assert "LEAKED" not in out.stdout, out.stdout
+
+
+# --------------------------------------------------------------------------
+# The shape of the document is a claim about the workload.
+#
+# For a long time this harness could only build `{_id, i, text}` with a short
+# pad, and every throughput number on LIMITS.md was therefore an answer about
+# documents this boundary does not exist to protect. A retrieval corpus
+# returns vectors, and a 1536-float array costs more to materialise than
+# every other field in the document put together -- which is the entire cost
+# `enforce` was optimised against. A benchmark that cannot express the
+# expensive case will report that the expensive case is cheap.
+# --------------------------------------------------------------------------
+
+def test_the_batch_can_carry_embeddings_because_the_workload_does():
+    raw = b.reply(docs=4, refuse_every=0, pad=10, dims=8)
+    batch = w.decode_op_msg(raw)[1]["cursor"]["firstBatch"]
+    assert len(batch) == 4
+    assert all(len(d["embedding"]) == 8 for d in batch), (
+        "a proxy benchmarked only on short documents is being asked the "
+        "easy question")
+
+
+def test_no_dimensions_is_the_old_shape_so_the_old_rows_stay_comparable():
+    """`--dims 0` must not quietly become `--dims 0.0` or an empty array.
+
+    The earlier numbers on LIMITS.md were measured without this flag. If the
+    default changed their shape, they would have to be deleted rather than
+    compared against -- so the default is pinned, not assumed.
+    """
+    batch = w.decode_op_msg(b.reply(docs=3, refuse_every=0, pad=10))[1]
+    for doc in batch["cursor"]["firstBatch"]:
+        assert "embedding" not in doc
+
+
+def test_embeddings_do_not_disturb_which_documents_are_refusable():
+    """The vector is payload; the verdict must still come from the mark."""
+    plain = w.decode_op_msg(b.reply(docs=20, refuse_every=5, pad=10))[1]
+    fat = w.decode_op_msg(b.reply(docs=20, refuse_every=5, pad=10, dims=4))[1]
+    marked = [[d["_id"] for d in r["cursor"]["firstBatch"] if d.get("forgotten")]
+              for r in (plain, fat)]
+    assert marked[0] == marked[1] == [0, 5, 10, 15]

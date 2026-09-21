@@ -71,7 +71,7 @@ def request() -> bytes:
     return w.encode_sections(1, 0, 0, {"find": COLLECTION, "$db": "benchdb"})
 
 
-def reply(docs: int, refuse_every: int, pad: int) -> bytes:
+def reply(docs: int, refuse_every: int, pad: int, dims: int = 0) -> bytes:
     """One cursor batch, some of it refusable.
 
     `refuse_every` is not decoration. `enforce` returns the original bytes
@@ -79,10 +79,25 @@ def reply(docs: int, refuse_every: int, pad: int) -> bytes:
     admissible measures the decode and skips the re-encode -- half the
     work, and the cheaper half. A batch with refusals in it exercises the
     path a real guarded collection takes.
+
+    `dims` is not decoration either, and for longer than it should have been
+    this function could not express it. **The shape of the document is a
+    claim about the workload.** A batch of `{_id, i, text}` is cheap to
+    decode in a way a retrieval corpus is not: the thing this boundary sits
+    in front of returns vectors, and a 1536-float array costs more to
+    materialise than every other field in the document put together. A
+    proxy benchmarked only on short documents is being asked the easy
+    question. Default 0 so the older numbers on this page stay comparable.
     """
+    vector = [0.1] * dims if dims else None
     batch = []
     for i in range(docs):
-        doc = {"_id": i, "i": i, "text": "x" * pad}
+        doc: dict = {"_id": i, "i": i, "text": "x" * pad}
+        if vector is not None:
+            # Same list object in every document: this is BSON-encoded once
+            # into a canned reply, so there is nothing to alias and nothing
+            # downstream that could mutate it.
+            doc["embedding"] = vector
         if refuse_every and i % refuse_every == 0:
             doc["forgotten"] = True
         batch.append(doc)
@@ -96,11 +111,11 @@ def reply(docs: int, refuse_every: int, pad: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 def be_upstream(port: int, docs: int, refuse_every: int, pad: int,
-                procs: int) -> None:
+                procs: int, dims: int = 0) -> None:
     """Answer everything with the same batch, as fast as a socket allows."""
     import threading
 
-    canned = reply(docs, refuse_every, pad)
+    canned = reply(docs, refuse_every, pad, dims)
     head, tail = canned[:8], canned[12:]
 
     listen = socket.socket()
@@ -308,7 +323,8 @@ def run(args) -> int:
     upstream = subprocess.Popen(
         [sys.executable, __file__, "--role", "upstream", "--port", str(up_port),
          "--docs", str(args.docs), "--refuse-every", str(args.refuse_every),
-         "--pad", str(args.pad), "--upstream-procs", str(args.upstream_procs)],
+         "--pad", str(args.pad), "--dims", str(args.dims),
+         "--upstream-procs", str(args.upstream_procs)],
         cwd=ROOT)
     rows = []
     try:
@@ -462,6 +478,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="one document in N is revoked. Zero refusals skips "
                          "the re-encode, which is half the work")
     ap.add_argument("--pad", type=int, default=200)
+    ap.add_argument("--dims", type=int, default=0,
+                    help="give every document an embedding of N floats. The "
+                         "retrieval-shaped workload: 1536 is OpenAI's and "
+                         "Voyage's common width. Default 0 keeps the short "
+                         "documents the earlier rows on this page used")
     ap.add_argument("--upstream-procs", type=int, default=4)
     ap.add_argument("--with-metrics", action="store_true",
                     help="run with --metrics on, to show that flushing "
@@ -473,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.role == "upstream":
         signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
         be_upstream(args.port, args.docs, args.refuse_every, args.pad,
-                    args.upstream_procs)
+                    args.upstream_procs, args.dims)
         return 0
 
     args.workers = [int(x) for x in str(args.workers).split(",") if x != ""]

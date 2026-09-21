@@ -259,48 +259,79 @@ also reports the refused share read back from the worker summary. It is
 built with. A row that says `LEAKED` is a row whose throughput means
 nothing.
 
-### What the proxy stopped paying for
+### What the proxy stopped paying for, and what it started paying
 
 `enforce` used to decode every reply body in full before asking whether it
-was even a cursor batch on a guarded collection. On a RAG corpus that is
-the expensive possible mistake: the rules read two or three top-level
-fields, and the decode was building a Python float per dimension per
-document in order to reach them. Reading the body lazily and asking the
-cheap questions first -- is there a cursor, what is its collection, is that
-collection declared -- moves the work to the one batch that is about to be
-judged.
+was even a cursor batch on a guarded collection. Reading the body lazily
+(`RawBSONDocument`) and asking the cheap questions first -- is there a
+cursor, what is its collection, is that collection declared -- means a
+reply nobody guards is forwarded after four field reads.
 
-Measured on a 100-document batch carrying 1536-dimension embeddings, 2.06MB
-on the wire, one document in ten refused:
+**The first framing of this change was wrong, and the bench is what said
+so.** It was committed as "decode less", which is true of exactly one of
+the three paths. Measured in process on a 100-document batch carrying
+1536-dimension embeddings, 2.06MB on the wire:
 
 | path | before | after | |
 |---|---|---|---|
-| unguarded collection | 2.72ms | 0.11ms | **24.3x** |
-| guarded, 10% refused | 5.66ms | 3.22ms | **1.76x** |
-| reply with no cursor | ~0 | ~0 | |
+| unguarded collection | 2.73ms | 0.11ms | **24.0x** |
+| guarded, 10% refused | 6.13ms | 3.93ms | **1.6x** |
+| guarded, nothing refused | 3.03ms | 3.23ms | **0.9x** |
 
-The first row is the one that matters in a deployment, because most
-collections on a connection are not declared and every one of their replies
-was paying full price to be forwarded unchanged.
+Three different mechanisms, only one of which is the one advertised:
 
-**The remaining 3.22ms is mostly not avoidable by decoding less.**
-`RawBSONDocument` inflates a whole document on the first field read, so a
-guarded batch pays for its embeddings exactly once, which is what the old
-path did too. A hand-written scan for named top-level fields measures
-0.12ms against 2.77ms -- a real 24x still sitting there -- and it is not
-being taken. Hand-rolled BSON parsing on the enforcement path fails in the
-direction of admitting something, and the prototype already produced a
-naive datetime where the decoder produces a naive datetime *for a different
-reason*. That is the class of bug this repository is named after, offered
-in exchange for a millisecond nobody has yet asked for. It stays here as a
-number, not a branch, until somebody's p99 makes the case.
+1. **Unguarded is the real prize, and it is decoding less.** The batch is
+   never materialised at all.
+2. **Guarded-and-refusing got faster at the *re-encode*, not the decode.**
+   A surviving document is spliced back as the bytes it arrived in instead
+   of being re-serialised from decoded values.
+3. **Guarded-and-refusing-nothing got 10% slower.** Both paths must inflate
+   every document to judge it -- `RawBSONDocument` inflates a whole document
+   on the first field read, so nothing is saved -- and the wrapper is not
+   free. That is a regression on what may well be the most common steady
+   state in a healthy deployment: a read where nothing has expired.
+
+**That trade is deliberate.** It pays 10% on the cheap case to buy 1.6x on
+the case that costs twice as much, and 24x on traffic that is most of a
+real connection. A deployment where nothing is ever refused would be better
+off without this change -- and would also not need this project.
+
+End to end, through the harness, 4 workers, three runs each, embeddings on:
+
+| | docs/s before | docs/s after | |
+|---|---|---|---|
+| 10% refused | 35,042 | 45,169 | **1.29x** |
+| nothing refused | 48,667 | 47,650 | 0.98x |
+
+The proxied result moves from **7.0x** slower than the control to **5.5x**.
+Variance across runs was under 3%.
+
+**The benchmark could not previously say any of this**, because its
+documents were `{_id, i, text}` with a 200-byte pad and no vector. The
+shape of a document is a claim about the workload, and short documents were
+quietly asking the easy question of a boundary that exists to sit in front
+of a retrieval corpus, where a 1536-float array costs more to materialise
+than every other field put together. `--dims` now exists and defaults to 0,
+so the older rows on this page remain comparable and remain answers to a
+question nobody was asking.
+
+**The remaining cost is mostly not avoidable by decoding less.** A
+hand-written scan for named top-level fields measures 0.12ms against
+2.77ms -- a real 24x still sitting there on the guarded path -- and it is
+not being taken. Hand-rolled BSON parsing on the enforcement path fails in
+the direction of admitting something, and the prototype already produced a
+naive datetime for a different reason than the decoder produces one. That
+is the class of bug this repository is named after, offered in exchange for
+a millisecond nobody has asked for. It stays a number, not a branch, until
+somebody's p99 makes the case.
 
 **Decoding lazily is a speed change inside the enforcement path**, which is
 the worst place to put one: a decoder that disagrees with the old decoder
 about a deadline does not get slower, it gets wrong and quiet. So the two
 are pinned against each other in `test_the_codec_round_trips.py` -- same
-values, same verdicts, same absent timezone, and every field of a surviving
-document spliced back from the bytes it arrived in.
+values, same verdicts, same absent timezone, an unguarded reply returned as
+the identical object, and every field of a surviving document spliced back
+from the bytes it arrived in.
 
 ---
 
@@ -326,7 +357,7 @@ documents?"
 
 ## 4. Coverage
 
-171 tests, ~3,560 lines, against 8,078 lines of `voyd/` and 2,731 of
+174 tests, ~3,602 lines, against 8,078 lines of `voyd/` and 2,731 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -366,7 +397,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (167 tests, ~54 seconds) with
+**Consider:** the suite is fast by default (170 tests, ~54 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
