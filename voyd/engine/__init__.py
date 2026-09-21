@@ -60,7 +60,7 @@ from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED,
                          quarantined, revoked, why_refused)
 from .custody import Aws, Azure, Ephemeral, Gcp, Kmip, LocalFile
 from .keyring import Keyring, KeyringSpec, Queryable, Sealed
-from .search import SearchEngine, SearchSpec, cosine
+from .search import SearchEngine, SearchSpec
 from .time import UTC, aware, deadline, live, living, now
 from .trait import Trait
 
@@ -79,7 +79,7 @@ from .trait import Trait
 # thing that happens.
 __all__ = [
     # ---- the clock it pins ----
-    "now", "deadline", "live", "living", "aware", "UTC", "cosine",
+    "now", "deadline", "live", "living", "aware", "UTC",
 
     # ---- declaring a collection ----
     "Admission", "AdmissionSpec", "Page", "why_refused",

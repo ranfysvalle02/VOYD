@@ -1,31 +1,30 @@
-"""Hybrid search over Atlas, with the sharp edges already filed off.
+"""Search indexes: declaring them, building them, and checking they match.
 
-Three tiers, best first, chosen from probed capabilities:
+`voyd-wire --ensure` calls `ensure_indexes`; `--verify` calls `drifted`.
+Querying happens on the wire, against whatever mongot returns, so nothing
+here issues a `$vectorSearch` -- `_vector_stage` builds the shape so the
+boundary can recognise and refuse a client-supplied vector on an index the
+server embeds.
 
-1. ``hybrid``  -- ``$rankFusion`` over ``$vectorSearch`` + ``$search``
-2. ``vector``  -- ``$vectorSearch`` alone
-3. ``cosine``  -- exact, in-process, correct at small scale and a cliff past it
+Two behaviours here were expensive to learn.
 
-Two behaviours here were expensive to learn and are the main reason this is a
-library rather than a snippet:
+**A search index that is missing or still building returns zero rows instead
+of raising.** It is indistinguishable from "nothing matched", so a cold start
+would silently report an empty database. `ensure_indexes` waits for the index
+to become queryable and says so when it gives up waiting.
 
-**A search index that is missing or still building returns zero rows instead of
-raising.** It is indistinguishable from "nothing matched". So startup waits for
-the index to become queryable, and queries refuse the Atlas path until it is --
-otherwise a cold start silently reports an empty database.
+**A declared index and a live one drift, silently.** An index built last
+quarter against a spec somebody has since edited answers happily and answers
+wrong. `drifted()` compares the two, `_reconcile` corrects what can be
+corrected in place, and `stale` names what could not.
 
-**Degrading is loud.** The cosine fallback loads every vector into Python. Fine
-for a demo, a cliff in production. Every fallback is logged at ERROR and counted.
-
-Tenant scoping is pushed *into the index* (a filter field on the vector leg, a
-``compound.must`` on the lexical leg) so the boundary is enforced by mongot
+Tenant scoping is pushed *into the index* (a filter field on the vector leg,
+a ``compound.must`` on the lexical leg) so the boundary is enforced by mongot
 rather than by remembering to add a filter -- including inside both
 ``$rankFusion`` legs, where a miss leaks every tenant's data.
 
-**Deadlines are deliberately not pushed into the index.** They are enforced in
-the read path instead: callers apply ``live()`` to each hit (``memory.py`` in
-this package does, and so should any application storing a deadline on a
-searchable row). That is a decision, not an omission, and these are
+**Deadlines are deliberately not pushed into the index.** They are enforced
+in the read path instead. That is a decision, not an omission, and these are
 the measurements behind it -- all taken against Atlas Local, MongoDB 8.x:
 
 - ``living()`` works verbatim as a ``$vectorSearch`` filter. Both ``$or`` and
@@ -45,35 +44,24 @@ the measurements behind it -- all taken against Atlas Local, MongoDB 8.x:
   given as a lexical definition and fails with ``"mappings" is required``.
 
 So pushing deadlines down would mean a vector-index change that cannot be
-migrated, on an existing deployment, to save fetching a few rows that are
-already being filtered correctly -- and enforcing it on only one leg would
-leave the two ``$rankFusion`` legs disagreeing about which documents exist,
-which is worse than filtering both uniformly afterwards. The read path is the
-layer that cannot drift, and it is also the only layer that works on the
-cosine fallback, where there is no index to push anything into.
-
-What *is* enforced here is that an index matches what the application declared:
-see ``drifted()``.
+migrated, on an existing deployment, to save fetching a few rows the boundary
+is already refusing correctly -- and enforcing it on only one leg would leave
+the two ``$rankFusion`` legs disagreeing about which documents exist, which is
+worse than filtering both uniformly afterwards.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from dataclasses import dataclass, field
 from typing import Any
 
 from pymongo.errors import CollectionInvalid, OperationFailure
 
-from .errors import ScopeError, require_scope
 
 log = logging.getLogger("engine.search")
 
-# Hard ceilings. Cosine is exact and linear -- past this it is a cliff, not a
-# fallback. A single query must not become a collection scan of unbounded size.
-COSINE_CAP = 10_000
-MAX_LIMIT = 100
 
 
 def _declared_vector_fields(definition: dict) -> set[tuple]:
@@ -131,19 +119,6 @@ def drifted(kind: str, wanted: dict, latest: dict | None) -> bool:
     if kind == "vectorSearch":
         return _declared_vector_fields(wanted) != _declared_vector_fields(latest)
     return _declared_text_fields(wanted) != _declared_text_fields(latest)
-
-
-def cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return -1.0
-    dot = na = nb = 0.0
-    for x, y in zip(a, b):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na == 0.0 or nb == 0.0:
-        return -1.0
-    return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
 @dataclass(frozen=True)
@@ -233,15 +208,12 @@ class SearchSpec:
 
 @dataclass
 class SearchEngine:
-    """Owns index lifecycle and querying for a set of collections."""
+    """Owns index lifecycle for a set of collections."""
 
     db: Any
     capabilities: Any
     specs: dict[str, SearchSpec] = field(default_factory=dict)
     ready: bool = False
-    degraded: int = 0
-    scope_refused: int = 0
-    cosine_capped: int = 0
     # Indexes whose live definition no longer matches the declared spec and
     # which could not be corrected. Named, because the consequence is silent.
     stale: list[str] = field(default_factory=list)
@@ -250,23 +222,9 @@ class SearchEngine:
     # application still has to supply vectors.
     auto_embed_declined: list[str] = field(default_factory=list)
     auto_embed_active: list[str] = field(default_factory=list)
-    cosine_cap: int = COSINE_CAP
 
     def register(self, spec: SearchSpec) -> None:
         self.specs[spec.collection] = spec
-
-    @property
-    def tier(self) -> str:
-        if not self.capabilities.search:
-            return "cosine"
-        if not self.ready:
-            return "cosine (indexes building)"
-        return self.capabilities.search_tier
-
-    @property
-    def _usable(self) -> bool:
-        """Only query Atlas once its indexes can actually answer."""
-        return self.capabilities.search and self.ready
 
     # ---- index lifecycle ----------------------------------------------
 
@@ -459,53 +417,7 @@ class SearchEngine:
         live = {i["name"] for i in idx if i.get("queryable")}
         return {spec.vector_index, spec.text_index} <= live
 
-    # ---- querying ------------------------------------------------------
-
-    async def query(self, collection: str, vector: list[float], *,
-                    text: str | None = None, limit: int = 5,
-                    filters: dict | None = None,
-                    candidates: int | None = None) -> list[dict]:
-        """Rank documents. ``candidates`` sizes the pool `$vectorSearch`
-        draws from before returning ``limit``.
-
-        Left alone it is the old constant, `max(50, limit * 10)`. The caller
-        who should set it is the admission boundary, because it is the only
-        component that knows what fraction of a ranked page it is about to
-        throw away -- see ``Receipts.over_fetch``.
-        """
-        spec = self.specs[collection]
-        try:
-            flt = require_scope(spec.collection, spec.tenant_field, filters)
-        except ScopeError:
-            # Missing tenant or a non-scalar one -- an operator in the tenant
-            # position matches every tenant on all three tiers.
-            self.scope_refused += 1
-            raise
-        limit = max(1, min(int(limit), MAX_LIMIT))
-
-        if self.capabilities.search and not self.ready:
-            self.degraded += 1
-            log.warning("search indexes not queryable yet; using in-process cosine")
-
-        if self._usable:
-            try:
-                if self.capabilities.rank_fusion and text:
-                    return await self._hybrid(spec, vector, text, flt,
-                                              limit, candidates)
-                return await self._vector(spec, vector, flt, limit,
-                                          text=text, candidates=candidates)
-            except OperationFailure as exc:
-                self.degraded += 1
-                log.error(
-                    "Atlas search failed (%s); degrading to in-process cosine. "
-                    "This scales linearly with collection size -- investigate "
-                    # `or {}`: OperationFailure.details is Optional, and an
-                    # AttributeError raised *here* would replace a degraded
-                    # search with a crash in the code that reports it.
-                    "rather than ignore.",
-                    (exc.details or {}).get("codeName", exc))
-
-        return await self._cosine(spec, vector, flt, limit)
+    # ---- the query shape this index answers ----------------------------
 
     def _vector_stage(self, spec, vector, text, flt, limit,
                       candidates: int | None = None) -> dict:
@@ -542,61 +454,3 @@ class SearchEngine:
             "numCandidates": candidates or max(50, limit * 10),
             "limit": limit, "filter": flt,
         }}
-
-    async def _vector(self, spec, vector, flt, limit, text=None,
-                      candidates: int | None = None) -> list[dict]:
-        pipeline = [
-            self._vector_stage(spec, vector, text, flt, limit, candidates),
-            {"$addFields": {"score": {"$meta": "vectorSearchScore"},
-                            "source": spec.collection}},
-        ]
-        cur = await self.db[spec.collection].aggregate(pipeline)
-        return [d async for d in cur]
-
-    async def _hybrid(self, spec, vector, text, flt, limit,
-                      candidates: int | None = None) -> list[dict]:
-        """Vector + lexical, fused server-side. One round trip, no hand-rolled
-        score normalisation, no reranking in Python."""
-        must = [{"equals": {"path": k, "value": v}} for k, v in flt.items()]
-        pipeline = [
-            {"$rankFusion": {"input": {"pipelines": {
-                "vector": [self._vector_stage(spec, vector, text, flt, limit,
-                                              candidates)],
-                "lexical": [
-                    {"$search": {"index": spec.text_index, "compound": {
-                        "must": must,
-                        "should": [{"text": {"query": text,
-                                             "path": list(spec.text_paths)}}],
-                        "minimumShouldMatch": 1,
-                    }}},
-                    {"$limit": limit},
-                ],
-            }}}},
-            {"$addFields": {"score": {"$meta": "score"}, "source": spec.collection}},
-            {"$limit": limit},
-        ]
-        cur = await self.db[spec.collection].aggregate(pipeline)
-        return [d async for d in cur]
-
-    async def _cosine(self, spec, vector, flt, limit) -> list[dict]:
-        """Exact and correct, and linear in collection size. The tier you are
-        told about rather than silently given. Capped so a degraded
-        deployment cannot OOM the process."""
-        q = {**flt, spec.vector_path: {"$ne": None}}
-        scored: list[dict] = []
-        scanned = 0
-        async for d in self.db[spec.collection].find(q):
-            scanned += 1
-            if scanned > self.cosine_cap:
-                self.cosine_capped += 1
-                self.degraded += 1
-                log.error(
-                    "cosine fallback hit cap %s on %s; refusing to grow. "
-                    "This is the scale cliff -- fix search indexes.",
-                    self.cosine_cap, spec.collection)
-                break
-            d["source"] = spec.collection
-            d["score"] = cosine(vector, d.get(spec.vector_path) or [])
-            scored.append(d)
-        scored.sort(key=lambda d: d["score"], reverse=True)
-        return scored[:limit]
