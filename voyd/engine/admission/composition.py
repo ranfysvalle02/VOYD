@@ -86,6 +86,14 @@ class CoreState(Protocol):
     def reachable(self, docs: Iterable[dict], *,
                   when: datetime | None = ...) -> list[dict]: ...
 
+    # ---- the tenant, on both halves ------------------------------------
+    # ``_scoped_for`` is how a read path binds the tenant its filters already
+    # require, so the per-document check on the way out tests the same value
+    # the query pushed down. Declared here rather than reached for, which is
+    # what this file is: the read paths' dependency on it is intended.
+    def _scoped_for(self, filters: dict | None) -> Any: ...
+    def _off_scope(self, doc: dict) -> bool: ...
+
     # ---- the named escape hatch ----------------------------------------
     def _unfiltered(self) -> Any: ...
 

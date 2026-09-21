@@ -23,17 +23,18 @@ nobody expects.
    `{"tenant_id": {"$ne": "globex"}}` passes a presence check and then matches
    every tenant. `$vectorSearch`'s filter accepts `$ne`, so a presence check
    plus a vector index is a leak with a green test suite.
-4. **And the scope alone is a query-half rule.** Hand the egress boundary a
-   batch you assembled yourself -- which is what a search hit *is* -- and both
-   tenants come back. The scope is enforced in the query and in the index
-   filter; it is not a per-document check. By this package's own step 4 that
-   is an asymmetry, and the remedy is one line most people would not know to
-   write:
+4. **And the tenant holds on the way out too.** Hand the egress boundary a
+   batch you assembled yourself -- which is what a search hit *is* -- and it
+   is filtered per document against the tenant the read is bound to. An
+   unbound read *raises* rather than quietly returning every tenant, the same
+   way `find({})` does, because those are the same mistake reached by
+   different roads.
 
-       Restricted(field="tenant_id", claim="tenant_id")
-
-   With that rule installed and the handle bound to a caller, the same batch
-   is filtered per document, on the way out, and both halves finally agree.
+   This is the fix in the commit that added this example. The scope used to
+   be a query-half rule: enforced in the collection query and in the index
+   filter, absent on the way out. By this package's own step 4 that is a
+   silent hole, and it was sitting on the constraint a reader is least likely
+   to check.
 
 No vector index is built here: `reachable()` is the same egress boundary the
 `$vectorSearch` path calls, so the direct call isolates the part being shown
@@ -50,8 +51,7 @@ import uuid
 from pymongo import AsyncMongoClient
 
 from voyd import Engine
-from voyd.engine import (Deadline, Restricted, ScopeInvalid, ScopeRequired,
-                         revoked)
+from voyd.engine import ScopeInvalid, ScopeRequired
 
 # The examples all read the same variable, so one export points every
 # one of them at Atlas instead of the local container.
@@ -101,31 +101,24 @@ async def main() -> None:
         print("       accepts $ne, so presence + a vector index is a leak with a")
         print("       green test suite.")
 
-        print("\n  4. the part nobody expects: the scope is a *query-half* rule")
+        print("\n  4. and the tenant holds on the way OUT, where search hits arrive")
         candidates = [d async for d in engine.db.notes.find({})]
         print(f"       a candidate batch off the index: {len(candidates)} docs, 2 tenants")
-        print(f"       reachable(batch) -> {[d['text'] for d in notes.reachable(candidates)]}")
-        print("       Both tenants. The scope is enforced in the query and in the")
-        print("       index filter -- it is not a per-document check, and step 4")
-        print("       of this project's own argument says that is a silent hole.")
-
-        print("\n     the egress half, in one line:")
-        print("       Restricted(field='tenant_id', claim='tenant_id')")
-        guarded = engine.model("memos", tenant="tenant_id").admitting(
-            Deadline(), revoked(),
-            Restricted(field="tenant_id", claim="tenant_id"))
-        await engine.db.memos.insert_many([dict(d) for d in CORPUS])
-        batch = [d async for d in engine.db.memos.find({})]
+        try:
+            notes.reachable(candidates)
+        except ScopeRequired:
+            print("       reachable(batch) -> ScopeRequired")
+            print("         An unbound read raises rather than returning every")
+            print("         tenant -- the same refusal find({}) makes, because")
+            print("         they are the same mistake by different roads.")
         for who in ("acme", "globex"):
-            # `for_caller` clones the handle; the receipts log is the
-            # collection's, so the refusal count below is cumulative across
-            # both callers rather than per call. Printing the kept documents
-            # is the honest per-caller number.
-            bound = guarded.for_caller({"tenant_id": who})
-            kept = bound.reachable(batch)
-            print(f"       as {who:7} -> {[d['text'] for d in kept]}")
-        print(f"       refused, both callers: "
-              f"{guarded.receipts()['refused_by_reason']}")
+            kept = notes.for_tenant(who).reachable(candidates)
+            print(f"       for_tenant({who!r}).reachable(batch) -> "
+                  f"{[d['text'] for d in kept]}")
+        print(f"       refused: {notes.receipts()['refused_by_reason']}")
+        print("\n       find() and search() bind this themselves, from the tenant")
+        print("       their filters already require. Only a batch you assembled")
+        print("       yourself has to name it, because it has no filters to read.")
 
         print("\n  Now both halves agree, which is the whole rule: a constraint")
         print("  pushed into a query must also exist per document, or one read")

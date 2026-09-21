@@ -24,13 +24,19 @@ import logging
 from datetime import datetime
 from typing import Any, Iterable, Self
 
-from ..errors import CallerRequired, require_tenant
+from ..errors import (CallerRequired, ScopeInvalid, ScopeRequired,
+                      require_tenant)
 from ..authority import AUDIT, AuthorityRequired, NotAuthorised
 from ..time import aware
-from .reasons import UNNAMED
+from .reasons import OFF_SCOPE, UNNAMED
 from .receipts import Receipts
 from .rules import Rule, Tabs
 from .spec import AdmissionSpec, why_refused
+
+# A tenant id a caller could legitimately pass -- ``None``, ``0``, ``""`` --
+# must not be mistaken for "no tenant bound", so the sentinel is an object no
+# caller can construct a reference to.
+_UNSET: Any = object()
 
 log = logging.getLogger("engine.admission")
 
@@ -87,6 +93,11 @@ class AdmissionCore:
         # ordinary case and costs a single comparison.
         self._as_of: datetime | None = None
         self._caller: dict | None = None
+        # The tenant *value* this handle is bound to, as opposed to
+        # ``self.tenant``, which is the field name. ``_UNSET`` rather than
+        # ``None`` because ``None`` is a tenant id somebody could pass, and a
+        # sentinel that can be supplied by a caller is not a sentinel.
+        self._scope: Any = _UNSET
         # Set by ``sealed_by()`` when the model declares encrypted fields.
         # ``None`` is the ordinary case and costs nothing: every read below
         # checks it once and skips the whole path.
@@ -259,6 +270,62 @@ class AdmissionCore:
         clone._bound = True
         return clone
 
+    def for_tenant(self, value: Any) -> Self:
+        """Bind this handle to one tenant. Returns a new handle.
+
+        A clone for the same reason ``for_caller`` is one: handles are
+        deduplicated per collection, so a method that assigned to ``self``
+        would make the last request's tenant the current one, under
+        concurrency, in the check that decides whose documents a caller sees.
+
+        Binding does two things, and the second is the one that was missing.
+        The tenant is supplied to the **query**, so ``find({})`` on a bound
+        handle is complete rather than an error. And it is enforced **per
+        document on the way out**, so a batch that never went through that
+        query -- every ``$vectorSearch`` hit -- is filtered too.
+
+        ``find``/``find_one``/``search`` bind it themselves from the tenant
+        already required in their filters, so this method is for the one path
+        that has no filters to read it from: handing ``reachable()`` a batch
+        you assembled yourself.
+        """
+        clone = self._clone()
+        clone._scope = value
+        return clone
+
+    def _scoped_for(self, filters: dict | None) -> Self:
+        """This handle, bound to the tenant these filters name.
+
+        Returns ``self`` unchanged when the collection has no tenant, which
+        is the ordinary case and costs one attribute read. Never mutates:
+        see ``for_tenant``.
+        """
+        if not self.tenant or self._scope is not _UNSET:
+            return self
+        if not filters or self.tenant not in filters:
+            return self          # ``_query`` raises ScopeRequired for this
+        return self.for_tenant(filters[self.tenant])
+
+    def _off_scope(self, doc: dict) -> bool:
+        """Is this document outside the tenant the read is bound to?
+
+        The egress half of the tenant, and it exists because this module's
+        own complaint applies to it. ``_query`` says: *this handle once
+        accepted a tenant and ignored it, so find({}) returned every tenant's
+        rows while engine.search refused the same query -- one declaration,
+        two primitives, two answers.* That was fixed for the query. The same
+        gap survived on the way out, where a rule that exists only as a query
+        clause is what `AHA.md` step 4 calls a silent hole.
+
+        Unknown scope admits, deliberately: the guard against an unbound read
+        lives at the entry points (``reachable`` raises, the rest bind from
+        their filters), so failing closed twice here would only make a
+        misconfiguration look like an empty collection.
+        """
+        if not self.tenant or self._scope is _UNSET:
+            return False
+        return doc.get(self.tenant) != self._scope
+
     def _clone(self) -> Self:
         clone = type(self)(self.db, self.spec, engine=self.engine)
         # Receipts are shared: a refusal is a refusal whichever derived
@@ -275,6 +342,7 @@ class AdmissionCore:
         clone._break_glass = self._break_glass
         clone._caller = self._caller
         clone._bound = self._bound
+        clone._scope = self._scope
         clone.sealing = self.sealing
         return clone
 
@@ -413,6 +481,16 @@ class AdmissionCore:
         hazards differ, so the rules do.
         """
         self._require_caller()
+        if self.tenant and self._scope is not _UNSET:
+            # A bound handle carries the tenant, so `find({})` on it is
+            # complete rather than an error -- and a filter that names a
+            # *different* tenant is a contradiction rather than a narrowing,
+            # so `require_tenant` is still the thing that decides.
+            filters = dict(filters or {})
+            filters.setdefault(self.tenant, self._scope)
+            if filters[self.tenant] != self._scope:
+                raise ScopeInvalid(self.collection, self.tenant,
+                                   filters[self.tenant])
         q = require_tenant(self.collection, self.tenant, filters)
         # Only the rules that *can* be expressed server-side. A rule with no
         # clause is not skipped -- it is simply enforced on the way out
@@ -499,6 +577,13 @@ class AdmissionCore:
         # everything is forgotten -- and that is the one diagnosis this whole
         # module exists to make impossible to reach by accident.
         self._require_caller()
+        if self._off_scope(doc):
+            if tally is None:
+                self.receipts_log.record(OFF_SCOPE)
+            else:
+                tally[OFF_SCOPE] = tally.get(OFF_SCOPE, 0) + 1
+            log.debug("refused an off-scope document from %s", self.collection)
+            return None
         reason = why_refused(doc, self.spec, when=when or self._as_of,
                              caller=self._caller, tab=tab,
                              only_unbypassable=self._include)
@@ -651,6 +736,22 @@ class AdmissionCore:
         A budget applies: this is a set being assembled for a prompt, so a
         fresh tab spans the whole list and cuts it at the token ceiling.
         """
+        if self.tenant and self._scope is _UNSET:
+            # The hole this guard closes. `find({})` has always raised here;
+            # `reachable(batch)` returned every tenant's documents, because
+            # the tenant was a query-half rule and this path has no query.
+            # A search hit is exactly such a batch, so on a scoped collection
+            # this was the one read path where the boundary did not hold.
+            #
+            # `find`/`find_one`/`search` bind the scope from the tenant their
+            # filters already require. This path has no filters to read, so
+            # the caller names it: `for_tenant(t).reachable(batch)`.
+            raise ScopeRequired(
+                self.collection, self.tenant,
+                hint=(f"reachable() has no filters to read it from: bind the "
+                      f"tenant with for_tenant(<{self.tenant}>).reachable(...) "
+                      f"-- a batch of search hits never went through a query, "
+                      f"so this is the only place the tenant can be checked"))
         self._begin_read()
         tab = self._open_tab()
         kept = [d for d in docs

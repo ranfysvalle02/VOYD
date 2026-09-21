@@ -189,7 +189,7 @@ async def test_the_private_redaction_mark_never_reaches_a_caller(core):
                                 for _ in range(3)])
 
     page = await books.find({"t": "a"})
-    reachable = books.reachable(
+    reachable = books.for_tenant("a").reachable(
         [d async for d in db.books.find({"t": "a"})])
     one = await books.find_one({"t": "a"})
 

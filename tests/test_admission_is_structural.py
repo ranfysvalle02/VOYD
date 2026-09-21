@@ -600,7 +600,7 @@ async def test_a_quarantined_search_hit_is_refused_and_counted(core):
     ])
 
     raw = [d async for d in db.notes.find({"t": "a"})]
-    admitted = {d["text"] for d in notes.reachable(raw)}
+    admitted = {d["text"] for d in notes.for_tenant("a").reachable(raw)}
 
     assert admitted == {"fine"}
     assert notes.receipts()["refused_by_reason"].get(QUARANTINED) == 1
@@ -689,7 +689,7 @@ async def test_the_model_rule_holds_on_both_enforcement_points(core):
 
     # the per-document half, on rows that never saw the query
     raw = [d async for d in db.notes.find({"t": "a"})]
-    assert {d["text"] for d in docs.reachable(raw)} == {"current", "queued"}
+    assert {d["text"] for d in docs.for_tenant("a").reachable(raw)} == {"current", "queued"}
     assert docs.receipts()["refused_by_reason"][WRONG_MODEL] == 1
 
 

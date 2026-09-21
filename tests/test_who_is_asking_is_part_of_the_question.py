@@ -346,7 +346,7 @@ async def test_the_two_halves_agree_against_mongodb(core):
         # and admitted per document. If these disagree, one of the two
         # enforcement points is wrong and $vectorSearch uses that one.
         raw = [d async for d in db.classified.find({"tenant": "t1"})]
-        assert {d["name"] for d in handle.reachable(raw)} == expected, (
+        assert {d["name"] for d in handle.for_tenant("t1").reachable(raw)} == expected, (
             "the query and the per-document check disagree about what this "
             "caller may see")
 
@@ -411,7 +411,7 @@ async def test_restricted_pushes_down_correctly_against_an_array_field(core):
         assert found == want, f"groups={groups} saw {sorted(found)}"
 
         raw = [d async for d in db.shared.find({"tenant": "t1"})]
-        assert {d["name"] for d in handle.reachable(raw)} == want, (
+        assert {d["name"] for d in handle.for_tenant("t1").reachable(raw)} == want, (
             f"the pushed-down clause and the per-document check disagree for "
             f"groups={groups}")
 

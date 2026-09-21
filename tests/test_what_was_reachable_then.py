@@ -62,7 +62,7 @@ async def test_both_halves_agree_under_as_of(core):
 
     through_query = {d["doc_id"] for d in await past.find({"t": "a"})}
     raw = [d async for d in db.notes.find({"t": "a"})]
-    per_document = {d["doc_id"] for d in past.reachable(raw, when=before)}
+    per_document = {d["doc_id"] for d in past.for_tenant("a").reachable(raw, when=before)}
 
     assert through_query == per_document == {"d1", "d2"}
 

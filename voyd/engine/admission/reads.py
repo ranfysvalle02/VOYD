@@ -81,13 +81,21 @@ class ReadPath(_Composed):
                 "model(...).forgettable(), or call saturate() with your own "
                 "fetch")
 
-        async def fetch(n: int) -> list[dict]:
-            return await self.engine.search(self.collection, vector,
-                                            text=text, limit=n,
-                                            filters=filters)
+        # The path that matters most: a `$vectorSearch` hit never passed
+        # through a collection query, so before this the tenant reached it
+        # only as an index filter. Binding the scope here puts the same value
+        # on the per-document check, and an index filter that ever disagrees
+        # with it now costs a counted `off_scope` refusal instead of a row
+        # from another customer.
+        me = self._scoped_for(filters)
 
-        return await self.saturate(fetch, limit=limit, when=when,
-                                   rounds=rounds)
+        async def fetch(n: int) -> list[dict]:
+            return await me.engine.search(me.collection, vector,
+                                          text=text, limit=n,
+                                          filters=filters)
+
+        return await me.saturate(fetch, limit=limit, when=when,
+                                 rounds=rounds)
 
     async def saturate(self, fetch, *, limit: int,
                        when: datetime | None = None,
@@ -227,6 +235,7 @@ class ReadPath(_Composed):
     # ---- reads: refusal is the default ---------------------------------
 
     async def find_one(self, filters: dict | None = None, *args, **kw):
+        self = self._scoped_for(filters)      # see find(), same reason
         self._begin_read()
         doc = await self.db[self.collection].find_one(self._query(filters),
                                                       *args, **kw)
@@ -256,6 +265,11 @@ class ReadPath(_Composed):
 
     async def find(self, filters: dict | None = None, *args,
                    limit: int = 0, sort: Any = None, **kw) -> Page:
+        # One value decides both halves. The tenant is already required in
+        # these filters; binding it here means the per-document check on the
+        # way out tests the same thing the query pushed down, rather than
+        # trusting that the query did its job -- which is the whole of step 4.
+        self = self._scoped_for(filters)
         self._begin_read()
         # Frozen once, threaded into every admission below, and stamped on the
         # page so a use recorded from this find commits to one instant. It is

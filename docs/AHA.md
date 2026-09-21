@@ -75,6 +75,25 @@ says so where it lives:
 > query clause — every hit from `$vectorSearch`, where the deadline is
 > deliberately not an index filter.
 
+### The one this package got wrong itself
+
+Step 4 is easy to agree with and easy to violate, and this codebase violated
+it on the constraint people most assume is structural. `model(tenant=...)`
+pushed the tenant into the collection query and into the index filter, and
+never asked a document about it on the way out — so `reachable()`, which is
+what every `$vectorSearch` hit arrives at, returned every tenant's rows. A
+rule with a query half and no egress half, in the package whose argument that
+is.
+
+It is fixed rather than documented: `find`, `find_one` and `search` bind the
+tenant their filters already require, so the per-document check tests the same
+value the query pushed down instead of trusting it; and `reachable()`, which
+has no filters to read, refuses an unbound read on a scoped collection rather
+than guessing. A document arriving from outside the bound scope is counted as
+`off_scope` — and a climbing `off_scope` means an index filter and a
+per-document check have disagreed, which is worth a page precisely because
+step 4 says one of them is authoritative and it is not the index.
+
 ### What egress does not reach: a value that has left the read path
 
 The check is per document, on the way out, which means it is a property of a

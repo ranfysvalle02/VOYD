@@ -87,7 +87,8 @@ from .errors import (
 from .context import (DIRECT, SOURCE, ContextIndex,
                       ContextIndexSpec, ContextUse)
 from .expiry import Expiry, ExpirySpec
-from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED, UNNAMED,
+from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED,
+                        OFF_SCOPE, UNNAMED,
                         OVER_BUDGET, QUARANTINED, REDUNDANT,
                         REACHABLE, REFUSED, REVOKED, UNCOSTED, UNKNOWN,
                         UNREADABLE, UNRECOVERABLE, WRONG_MODEL,
@@ -562,7 +563,7 @@ __all__ = [
 
     # ---- and the reasons you read back out of receipts() ----
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
-    "NOT_CLEARED", "UNRECOVERABLE", "KEY_UNAVAILABLE", "LIFTED",
+    "NOT_CLEARED", "OFF_SCOPE", "UNRECOVERABLE", "KEY_UNAVAILABLE", "LIFTED",
     "REACHABLE", "REFUSED", "UNKNOWN", "OVER_BUDGET", "UNCOSTED", "UNNAMED",
     "REDUNDANT",
 

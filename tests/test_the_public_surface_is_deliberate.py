@@ -42,7 +42,7 @@ SURFACE = {
               "Distinct",
               "compile_policy"},
     "reasons": {"DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED",
-                "WRONG_MODEL", "NOT_CLEARED", "UNRECOVERABLE",
+                "WRONG_MODEL", "NOT_CLEARED", "OFF_SCOPE", "UNRECOVERABLE",
                 "KEY_UNAVAILABLE", "LIFTED", "REACHABLE", "REFUSED",
                 "UNKNOWN", "OVER_BUDGET", "UNCOSTED", "UNNAMED", "REDUNDANT"},
     "proof": {"Ledger", "LedgerSpec", "GENESIS", "canonical", "digest"},

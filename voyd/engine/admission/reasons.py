@@ -27,6 +27,15 @@ NOT_CLEARED = "not_cleared"
 # serve it, unrecoverable says nobody can.
 UNRECOVERABLE = "unrecoverable"
 
+# This document belongs to a different tenant than the read was scoped to.
+# Counted apart from ``not_cleared`` on purpose: that one is a caller reaching
+# above their clearance, which is somebody probing. This one is a document
+# arriving at a boundary from outside the scope the read declared -- which,
+# on the search path, means an index filter and a per-document check have
+# disagreed, and exactly one of them is authoritative. A climbing
+# ``off_scope`` is worth a page.
+OFF_SCOPE = "off_scope"
+
 # The context-token budget for this read was spent before this hit could be
 # admitted. Not a reason the fact is *forgotten* -- a reason there was no room
 # for it in the prompt being assembled. Counted apart so a climbing

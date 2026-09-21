@@ -170,7 +170,7 @@ async def test_a_third_party_rule_is_enforced_on_both_halves_and_counted(core):
     # separately rather than trusting the count above.
     raw = [d async for d in db.notes.find({"tenant": "t1"})]
     assert len(raw) == 3, "all three rows are on disk"
-    assert {d["name"] for d in notes.reachable(raw)} == {"signed"}
+    assert {d["name"] for d in notes.for_tenant("t1").reachable(raw)} == {"signed"}
 
     # (4) and the operator can see it, under the stranger's own name.
     receipts = notes.receipts()
@@ -217,7 +217,7 @@ async def test_a_caller_aware_third_party_rule_pushes_down_correctly(core):
         handle = notes.for_caller({"regions": regions})
         queried = {d["name"] for d in await handle.find({"tenant": "t1"})}
         raw = [d async for d in db.notes.find({"tenant": "t1"})]
-        per_doc = {d["name"] for d in handle.reachable(raw)}
+        per_doc = {d["name"] for d in handle.for_tenant("t1").reachable(raw)}
 
         assert queried == want, f"regions={regions} queried {sorted(queried)}"
         assert per_doc == want, (

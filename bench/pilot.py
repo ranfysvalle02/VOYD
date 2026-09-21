@@ -128,7 +128,10 @@ async def run(engine: Engine, db) -> dict:
     # exact egress boundary the $vectorSearch path funnels every hit through.
     candidate_batch = naive_find
     handle_find = await docs.find(T)
-    handle_candidates = docs.reachable(candidate_batch)
+    # The tenant is bound explicitly here because this batch never went
+    # through a query to carry it -- which is the whole reason the egress
+    # check exists on this path.
+    handle_candidates = docs.for_tenant("acme").reachable(candidate_batch)
 
     report["after_revoke"] = {
         "revoked_including_descendants": revoked_count,

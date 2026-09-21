@@ -99,7 +99,7 @@ from .attestation import _digest_of  # noqa: F401
 from .core import AdmissionCore  # noqa: F401
 from .handle import Admission
 from .reasons import (DEADLINE, KEY_UNAVAILABLE, LIFTED, LIFT_BATCH,
-                      NOT_CLEARED, OVER_BUDGET, QUARANTINED, REACHABLE,
+                      NOT_CLEARED, OFF_SCOPE, OVER_BUDGET, QUARANTINED, REACHABLE,
                       REDUNDANT,
                       REFUSED, REVOKED, UNCOSTED, UNKNOWN, UNNAMED,
                       UNREADABLE, UNRECOVERABLE, WRONG_MODEL)
@@ -115,7 +115,7 @@ __all__ = [
     "Deadline", "Marked", "Unrecoverable", "EmbeddedWith", "Clearance",
     "Restricted", "Budget", "Distinct", "revoked", "quarantined",
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
-    "NOT_CLEARED", "UNRECOVERABLE", "KEY_UNAVAILABLE", "REACHABLE",
+    "NOT_CLEARED", "OFF_SCOPE", "UNRECOVERABLE", "KEY_UNAVAILABLE", "REACHABLE",
     "REFUSED", "UNKNOWN", "LIFTED", "LIFT_BATCH", "OVER_BUDGET", "UNCOSTED",
     "REDUNDANT",
     "UNNAMED",

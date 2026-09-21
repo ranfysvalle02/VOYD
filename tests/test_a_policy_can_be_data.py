@@ -156,7 +156,7 @@ async def test_the_query_and_the_per_document_check_return_the_same_set(
     through_query = {d["doc_id"] for d in await handle.find({"t": "a"})}
 
     raw = [d async for d in db.docs.find({"t": "a"})]
-    per_document = {d["doc_id"] for d in handle.reachable(raw)}
+    per_document = {d["doc_id"] for d in handle.for_tenant("a").reachable(raw)}
 
     assert through_query == per_document, (
         f"the two halves disagree for {policy}: query returned "

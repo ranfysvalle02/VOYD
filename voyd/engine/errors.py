@@ -69,12 +69,16 @@ class ScopeRequired(ScopeError):
     Returning rows would leak every tenant into the caller. Raise instead.
     """
 
-    def __init__(self, collection: str, field: str):
+    def __init__(self, collection: str, field: str, hint: str | None = None):
         self.collection = collection
         self.field = field
+        # The egress path raises this too, and there the remedy is a different
+        # verb -- there are no filters to put the tenant in. A message that
+        # named only the query half would send that caller looking for an
+        # argument the method does not take.
         super().__init__(
-            f"{collection} is scoped by {field!r}; pass it in filters "
-            f"or every tenant leaks"
+            f"{collection} is scoped by {field!r}; "
+            + (hint or "pass it in filters or every tenant leaks")
         )
 
 
