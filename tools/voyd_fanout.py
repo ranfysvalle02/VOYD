@@ -176,13 +176,61 @@ def read_preference_of(body: Mapping) -> str | None:
     return None
 
 
-def routes_to_secondary(body: Mapping, guards: Mapping[str, Any],
-                        withdrawn: frozenset = frozenset()) -> str | None:
-    """Should this command be ranked on a secondary? The reason, or ``None``.
+# Stages that mean the secondary is about to do a lot of work for a small
+# answer -- the shape fan-out exists for.
+SEARCH_STAGES = frozenset({"$vectorSearch", "$search", "$searchMeta",
+                           "$rankFusion"})
 
-    Returning a reason rather than a bool is not decoration: it is what the
-    metrics count and what ``--verbose`` prints, and a routing decision
-    nobody can see the reasoning for is the kind this file is careful about.
+
+def read_shape(body: Mapping, name: str, collection: str
+               ) -> tuple[str, str, int]:
+    """``(collection, kind, size)`` -- what sort of read this is.
+
+    The unit the payoff measurement is keyed by, and keying it on the
+    collection alone was a real defect rather than a simplification. A RAG
+    deployment runs `$vectorSearch` and ordinary `find`s against the *same*
+    collection: the finds are cheap to rank and expensive to confirm, so
+    they withdraw the collection, and the vector search -- the only reason
+    fan-out was turned on -- never fans out again. Measured on a 301
+    document collection, a selective read went from ranking on a secondary
+    5 times out of 5 to 0 out of 5 after twelve full-collection finds
+    against the same collection.
+
+    Two axes, both readable from the *request*, because the routing
+    decision has to be made before any answer exists:
+
+    - **kind** -- a search stage means a big scan for a small answer.
+    - **size** -- the requested `limit` or `batchSize`, rounded up to a
+      power of two, because the cost of confirming is proportional to how
+      many documents come back. A read asking for 10 and one asking for
+      1,000 are different propositions against the same collection.
+
+    A read that requests neither buckets at 0, which is its own bucket:
+    "as many as there are" is a distinct proposition from any bounded one.
+    """
+    kind = name
+    pipeline = body.get("pipeline")
+    if isinstance(pipeline, list):
+        for stage in pipeline:
+            if isinstance(stage, Mapping) and SEARCH_STAGES & set(stage):
+                kind = "search"
+                break
+    asked = body.get("limit")
+    if not isinstance(asked, int) or asked <= 0:
+        asked = body.get("batchSize")
+    size = (1 << int(asked).bit_length()) if isinstance(asked, int) and asked > 0 else 0
+    return collection, kind, size
+
+
+def routes_to_secondary(body: Mapping, guards: Mapping[str, Any],
+                        withdrawn: frozenset = frozenset()
+                        ) -> tuple[str, str, int] | None:
+    """Should this be ranked on a secondary? Its shape, or ``None``.
+
+    Returning the shape rather than a bool is not decoration: it is the key
+    the payoff measurement is recorded under, so the decision and the
+    accounting cannot drift apart into two different ideas of what this
+    read was.
     """
     for pin in PINS_TO_PRIMARY:
         if pin in body:
@@ -201,13 +249,15 @@ def routes_to_secondary(body: Mapping, guards: Mapping[str, Any],
     if "$out" in str(body.get("pipeline", "")) or "$merge" in str(
             body.get("pipeline", "")):
         return None                      # a write wearing a read's name
-    if collection in withdrawn:
-        # Measured, on this deployment, as not worth the round trip.
-        return None
     if collection in guards and not correlatable(body):
         # Guarded and unverifiable is the one combination that must stay put.
         return None
-    return name
+    shape = read_shape(body, name, collection)
+    if shape in withdrawn:
+        # Measured, on this deployment, as not worth the round trip -- for
+        # reads of *this shape*, which is not the same as this collection.
+        return None
+    return shape
 
 
 def needed_ids(batch: Iterable[Mapping]) -> list[Any] | None:
@@ -304,13 +354,16 @@ class Payoff:
 
     def __init__(self, ratio: float = 1.0, warmup: int = 8,
                  alpha: float = 0.3):
+        # Keyed by *shape* -- see `read_shape`. Keyed by collection, one
+        # cheap query pattern withdrew the expensive one it shared a
+        # collection with, which is the pairing every RAG deployment has.
         self.ratio = ratio
         self.warmup = warmup
         self.alpha = alpha
-        self._seen: dict[str, int] = {}
-        self._ranked: dict[str, float] = {}
-        self._verified: dict[str, float] = {}
-        self._withdrawn: set[str] = set()
+        self._seen: dict[tuple, int] = {}
+        self._ranked: dict[tuple, float] = {}
+        self._verified: dict[tuple, float] = {}
+        self._withdrawn: set[tuple] = set()
 
     def withdrawn(self) -> frozenset:
         return frozenset(self._withdrawn)
@@ -321,7 +374,7 @@ class Payoff:
                       else current * (1 - self.alpha) + value * self.alpha)
         return table[key]
 
-    def record(self, collection: str, ranked: float,
+    def record(self, shape, ranked: float,
                verified: float) -> str | None:
         """Fold in one batch. Returns a reason if this just withdrew.
 
@@ -330,16 +383,16 @@ class Payoff:
         disagrees -- the measurement keeps running and the metrics keep
         reporting, only the acting stops.
         """
-        if self.ratio <= 0 or collection in self._withdrawn:
+        if self.ratio <= 0 or shape in self._withdrawn:
             return None
-        rank_avg = self._blend(self._ranked, collection, ranked)
-        verify_avg = self._blend(self._verified, collection, verified)
-        self._seen[collection] = self._seen.get(collection, 0) + 1
-        if self._seen[collection] < self.warmup:
+        rank_avg = self._blend(self._ranked, shape, ranked)
+        verify_avg = self._blend(self._verified, shape, verified)
+        self._seen[shape] = self._seen.get(shape, 0) + 1
+        if self._seen[shape] < self.warmup:
             return None
         if verify_avg < rank_avg * self.ratio:
             return None
-        self._withdrawn.add(collection)
+        self._withdrawn.add(shape)
         return (f"confirming marks on the primary is costing "
                 f"{verify_avg * 1000:.1f}ms against {rank_avg * 1000:.1f}ms "
                 f"to rank on a secondary, so the split is paying for "

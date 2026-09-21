@@ -233,3 +233,7 @@ __marimo__/
 # configuration -- committing it shares one person's local allowlist with
 # everybody who clones.
 .claude/
+
+# Written by `tools/voyd_bench.py` when no --policy is given, so it appears
+# after any suite run that exercises the benchmark. Generated, never edited.
+.voyd_bench_policy.py

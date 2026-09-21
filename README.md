@@ -315,7 +315,14 @@ What it costs, stated rather than discovered:
   `--fan-out-give-up RATIO` tunes it (default `1.0`; `0` measures without
   acting), and `voyd_fanout_withdrawn_total` counts it. Withdrawal is
   one-way inside a process — re-admitting on a favourable sample is how a
-  boundary oscillates.
+  boundary oscillates — and keyed by the read's *shape*, not its
+  collection, so ordinary `find`s cannot withdraw the `$vectorSearch` they
+  share a collection with.
+- **A secondary's error does not become yours.** The boundary picked that
+  route, so it owns the retry: a read a secondary refuses is re-sent to
+  the primary, fan-out goes off for that connection, and the retried read
+  goes through ordinary enforcement.
+  `voyd_fanout_retried_on_primary_total` counts it.
 
 **It needs a credential of its own, and that is a real change.** Every other
 upstream connection this proxy makes is the client's. A secondary connection

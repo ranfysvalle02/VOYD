@@ -76,6 +76,7 @@ GLOBAL = (
     "fanout_verified_total",
     "fanout_unverified_total",
     "fanout_withdrawn_total",
+    "fanout_retried_on_primary_total",
 )
 
 
@@ -230,6 +231,7 @@ class Meter:
         self.fanout_verified_total = 0
         self.fanout_unverified_total = 0
         self.fanout_withdrawn_total = 0
+        self.fanout_retried_on_primary_total = 0
 
     def flush(self, guards: dict) -> None:
         self.worker_flushes_total += 1
@@ -295,6 +297,11 @@ HELP = {
         "Not an error: it is the boundary declining to pay a round trip "
         "for nothing. Climbing on a collection you expected to benefit "
         "means the read is less selective than you think."),
+    "fanout_retried_on_primary_total": (
+        "counter",
+        "Reads a secondary refused, re-sent to the primary so the client "
+        "sees an answer rather than an error the boundary caused by "
+        "choosing that route. Climbing means a sick secondary."),
     "admitted_total": ("counter", "Documents a prompt was allowed to see."),
     "refused_total": ("counter", "Documents refused on the read path."),
     "revoked_total": ("counter", "Deletes rewritten as revocations."),

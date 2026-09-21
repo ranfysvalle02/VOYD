@@ -20,11 +20,13 @@ somebody who also wrote the claim.
 That is not a coverage problem and no amount of code fixes it. The suite is
 good at holding claims somebody thought to state; it has never once been the
 thing that caught a problem a *user* hit, because there have been no users.
-Eleven defects this month, and the way they were found is the point. Seven
-came from running something new: three from exercising paths nobody had
-exercised, four more from the hostile pass in §4. One came from the
-benchmark contradicting a commit message that had already been pushed.
-Three came from *writing a test*: the scanner's two-mark finding in §4; the
+Thirteen defects this month, and the way they were found is the point.
+Nine came from running something new: three from exercising paths nobody
+had exercised, four from the hostile pass in §4, and two more from the
+hostile pass against fan-out in §3 -- a cheap query pattern withdrawing
+the expensive one it shared a collection with, and a secondary's error
+becoming the client's. One came from the benchmark contradicting a commit
+message that had already been pushed. Three came from *writing a test*: the scanner's two-mark finding in §4; the
 read-preference claim in §3, where the defect was in the prose and three
 files had spent weeks talking a reader out of something the proxy could
 already do; and fan-out's identity check, which looked for a standalone
@@ -242,17 +244,68 @@ this process can measure, so `Payoff` compares how long the secondary took
 to rank against how long the primary took to confirm, per collection, and
 withdraws the collection when confirming stops being the cheaper half.
 
+The measurement is keyed by the read's *shape* -- collection, whether it
+carries a search stage, and the requested size rounded to a power of two --
+and keying it by collection alone was one of the two defects a hostile pass
+found. See below.
+
 **Consider:** withdrawal is one-way inside a process. There is no path back
-to fanning out a collection until a restart, deliberately -- re-admitting on
-a favourable sample is how a boundary oscillates, and the cost of staying on
-the primary is a slower read rather than a wrong one. A workload whose shape
-changes during a long-running process therefore stays withdrawn.
+until a restart, deliberately -- re-admitting on a favourable sample is how
+a boundary oscillates, and the cost of staying on the primary is a slower
+read rather than a wrong one.
+
+**Consider:** two `find`s of very different selectivity that ask for the
+same number of documents still share a bucket. The shape is read off the
+request, and the request does not say how much work the filter implies.
 
 **Consider:** the ratio reads backwards at a glance. A *larger*
 `--fan-out-give-up` is more tolerant, because it is how much the check is
 allowed to cost relative to what it bought. The end-to-end test for this was
 written against the wrong direction first and passed for the wrong reason
 until the assertion was tightened to watch the secondary's own counters.
+
+### What a hostile pass found in fan-out
+
+Same method as §4 and the same justification: the feature was written in a
+day and had a day of exercise, which is the wrong amount for anything
+concurrent. Causing the failures on purpose -- a primary that will not
+answer the mark lookup, secondaries that refuse reads, twenty clients
+paging at once, invented cursor ids, garbage on the port -- found **two
+real defects**, and both are now tests.
+
+**One cheap query pattern withdrew the expensive one it shared a
+collection with.** The payoff measurement was keyed by collection. Every
+RAG deployment runs `$vectorSearch` and ordinary `find`s against the same
+collection; the finds are cheap to rank and expensive to confirm, so they
+withdrew the collection, and the vector search -- the only reason fan-out
+was switched on -- never fanned out again. Measured on a 301-document
+collection: a selective read went from ranking on a secondary 5 times out
+of 5 to 0 out of 5 after twelve full-collection finds. It is keyed by
+shape now.
+
+**A secondary's error became the client's error.** The boundary chose to
+route the read; when the secondary answered with a failure, that failure
+went straight to the caller. So fan-out could turn a read the primary
+would have served perfectly into an error the application could do nothing
+about, because it sees one node and cannot retry elsewhere. An
+optimisation is not allowed to reduce availability. The read is now re-sent
+to the primary, fan-out goes off for that connection, and
+`voyd_fanout_retried_on_primary_total` counts it. The retry goes through
+ordinary enforcement, which is asserted rather than assumed.
+
+What the same pass did *not* break, worth recording too: twenty concurrent
+clients doing five paged reads each returned the right 301 documents every
+time; a primary made to fail every mark lookup produced `refused 101 of
+101` and zero documents served rather than one unverified one; an invented
+cursor id, a half close, garbage on the port and thirty abrupt resets each
+cost one connection and not the listener.
+
+**Two of the probes initially reported a false pass**, and the reason is
+worth more than the probes. The payoff measurement had already withdrawn
+the collection, so the reads under test were quietly running on the
+primary and the secondary failures being injected touched nothing. A
+hostile pass against a boundary that adapts has to pin the adaptation
+first; `--fan-out-give-up 0` exists partly for that.
 
 The other two were wrong, and wrong in the direction that talks a reader out
 of the tool. This page said the boundary does not "honour read preference, or

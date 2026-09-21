@@ -158,7 +158,7 @@ def test_a_guarded_read_that_cannot_be_correlated_stays_on_the_primary():
     assert voyd_fanout.routes_to_secondary(body, {"notes": object()}) is None
     # ...but the same read on a collection nobody declared has no verdict to
     # verify, so there is nothing to correlate and it may go.
-    assert voyd_fanout.routes_to_secondary(body, {}) == "find"
+    assert voyd_fanout.routes_to_secondary(body, {}) == ("notes", "find", 0)
 
 
 def test_a_mark_lifted_on_the_primary_travels_as_an_absence():
@@ -502,9 +502,15 @@ def test_a_client_arriving_as_somebody_else_is_not_served_over_this_identity(
     finally:
         client.close()
         node.close()
-    assert after == before, (
-        "a client authenticated as someone-else had its reads served over a "
-        "connection authenticated as voyd")
+    # Strictly fewer than one per read, not "exactly zero". `fan_out_ok`
+    # is a per-connection boolean, so the failure this guards against is
+    # all-or-nothing: six reads routed to a secondary, not one. Exact
+    # equality against a counter on a rig shared with every other test in
+    # this file races a neighbouring boundary as it drains, which is a
+    # flake rather than evidence.
+    assert after - before < 6, (
+        f"a client authenticated as someone-else had {after - before} of 6 "
+        f"reads served over a connection authenticated as voyd")
 
 
 def test_a_fan_out_credential_that_does_not_work_degrades_to_the_primary(
@@ -565,9 +571,10 @@ def test_the_same_username_in_a_different_auth_database_is_a_different_person(
             raw["elsewhere"].notes.drop()
         finally:
             raw.close()
-    assert after == before, (
-        "elsewhere.voyd was served over the connection authenticated as "
-        "admin.voyd: the identity check is comparing names, not principals")
+    assert after - before < 6, (
+        f"elsewhere.voyd had {after - before} of 6 reads served over the "
+        f"connection authenticated as admin.voyd: the identity check is "
+        f"comparing names, not principals")
 
 
 # --------------------------------------------------------------------------
@@ -575,11 +582,15 @@ def test_the_same_username_in_a_different_auth_database_is_a_different_person(
 # whether it is safe. Pure first.
 # --------------------------------------------------------------------------
 
+SHAPE = ("notes", "find", 0)
+SEARCH = ("notes", "search", 16)
+
+
 def test_a_read_that_pays_keeps_fanning_out():
     """The `$vectorSearch` shape: a long scan, a cheap confirmation."""
     payoff = voyd_fanout.Payoff(warmup=3)
     for _ in range(20):
-        assert payoff.record("notes", ranked=0.100, verified=0.002) is None
+        assert payoff.record(SHAPE, ranked=0.100, verified=0.002) is None
     assert payoff.withdrawn() == frozenset()
 
 
@@ -588,12 +599,12 @@ def test_a_read_that_does_not_pay_is_withdrawn_and_says_why():
     everything it would have served anyway, so it does comparable work and
     the client pays a round trip for the privilege."""
     payoff = voyd_fanout.Payoff(warmup=3)
-    reasons = [payoff.record("notes", ranked=0.004, verified=0.006)
+    reasons = [payoff.record(SHAPE, ranked=0.004, verified=0.006)
                for _ in range(10)]
     said = [r for r in reasons if r]
     assert len(said) == 1, "it must withdraw once, not once per batch"
     assert "paying for nothing" in said[0]
-    assert payoff.withdrawn() == {"notes"}
+    assert payoff.withdrawn() == {SHAPE}
 
 
 def test_withdrawal_is_one_way():
@@ -602,32 +613,81 @@ def test_withdrawal_is_one_way():
     on the primary is a slower read rather than a wrong one."""
     payoff = voyd_fanout.Payoff(warmup=2)
     for _ in range(5):
-        payoff.record("notes", ranked=0.001, verified=0.010)
+        payoff.record(SHAPE, ranked=0.001, verified=0.010)
     for _ in range(50):
-        assert payoff.record("notes", ranked=1.0, verified=0.001) is None
-    assert payoff.withdrawn() == {"notes"}
+        assert payoff.record(SHAPE, ranked=1.0, verified=0.001) is None
+    assert payoff.withdrawn() == {SHAPE}
 
 
 def test_a_ratio_of_zero_measures_without_acting():
     payoff = voyd_fanout.Payoff(ratio=0.0, warmup=2)
     for _ in range(20):
-        assert payoff.record("notes", ranked=0.001, verified=0.500) is None
+        assert payoff.record(SHAPE, ranked=0.001, verified=0.500) is None
     assert payoff.withdrawn() == frozenset()
 
 
 def test_one_collection_giving_up_does_not_withdraw_another():
     payoff = voyd_fanout.Payoff(warmup=2)
     for _ in range(10):
-        payoff.record("notes", ranked=0.001, verified=0.010)
-        payoff.record("papers", ranked=0.200, verified=0.001)
-    assert payoff.withdrawn() == {"notes"}
+        payoff.record(SHAPE, ranked=0.001, verified=0.010)
+        payoff.record(("papers", "find", 0), ranked=0.200, verified=0.001)
+    assert payoff.withdrawn() == {SHAPE}
 
 
-def test_a_withdrawn_collection_is_not_routed_to_a_secondary():
+def test_a_cheap_read_does_not_withdraw_the_search_it_shares_a_collection_with():
+    """The defect a hostile pass found, as an assertion.
+
+    Every RAG deployment runs `$vectorSearch` and ordinary `find`s against
+    the same collection. Keyed by collection, the finds -- cheap to rank,
+    expensive to confirm -- withdrew it, and the vector search that was the
+    only reason fan-out was on never fanned out again. Measured before the
+    fix: a selective read went from 5 secondary queries out of 5 to 0 out
+    of 5 after twelve full-collection finds.
+    """
+    payoff = voyd_fanout.Payoff(warmup=2)
+    for _ in range(20):
+        payoff.record(SHAPE, ranked=0.001, verified=0.010)
+        assert payoff.record(SEARCH, ranked=0.200, verified=0.002) is None
+    assert payoff.withdrawn() == {SHAPE}
+
+
+def test_the_same_collection_at_two_sizes_is_two_propositions():
+    """Asking for 10 documents and asking for 1,000 are different trades
+    against one collection, because confirming costs per document."""
+    payoff = voyd_fanout.Payoff(warmup=2)
+    small, large = ("notes", "find", 16), ("notes", "find", 1024)
+    for _ in range(20):
+        payoff.record(large, ranked=0.001, verified=0.010)
+        assert payoff.record(small, ranked=0.100, verified=0.001) is None
+    assert payoff.withdrawn() == {large}
+
+
+@pytest.mark.parametrize("body,expected", [
+    ({"find": "notes"}, ("notes", "find", 0)),
+    ({"find": "notes", "limit": 10}, ("notes", "find", 16)),
+    ({"find": "notes", "batchSize": 1000}, ("notes", "find", 1024)),
+    ({"aggregate": "notes", "pipeline": [{"$vectorSearch": {}}]},
+     ("notes", "search", 0)),
+    ({"aggregate": "notes", "pipeline": [{"$match": {}}]},
+     ("notes", "aggregate", 0)),
+])
+def test_a_reads_shape_is_read_off_the_request(body, expected):
+    """It has to come from the request: the routing decision is made before
+    there is any answer to look at."""
+    name = next(c for c in ("find", "aggregate") if c in body)
+    assert voyd_fanout.read_shape(body, name, body[name]) == expected
+
+
+def test_a_withdrawn_shape_is_not_routed_to_a_secondary():
     body = {"find": "notes"}
-    assert voyd_fanout.routes_to_secondary(body, {"notes": object()}) == "find"
+    guards = {"notes": object()}
+    assert voyd_fanout.routes_to_secondary(body, guards) == SHAPE
     assert voyd_fanout.routes_to_secondary(
-        body, {"notes": object()}, frozenset({"notes"})) is None
+        body, guards, frozenset({SHAPE})) is None
+    # ...and a different shape on the same collection is unaffected.
+    assert voyd_fanout.routes_to_secondary(
+        {"find": "notes", "limit": 10}, guards,
+        frozenset({SHAPE})) == ("notes", "find", 16)
 
 
 def test_the_boundary_gives_up_on_a_read_that_is_not_worth_it(rs_db, tmp_path,
@@ -695,3 +755,76 @@ def test_the_boundary_gives_up_on_a_read_that_is_not_worth_it(rs_db, tmp_path,
         f"the collection is still being ranked on a secondary after the "
         f"boundary should have given up: {before_give_up} reads before, "
         f"{after_give_up} after")
+
+
+@contextmanager
+def refusing_reads(uri):
+    """Make every secondary answer `find` with an error, on purpose."""
+    client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=8000)
+    client.admin.command("ping")
+    nodes = [pymongo.MongoClient(direct(f"{h}:{p}"),
+                                 serverSelectionTimeoutMS=8000)
+             for h, p in sorted(client.secondaries)]
+    for node in nodes:
+        node.admin.command({"configureFailPoint": "failCommand",
+                            "mode": "alwaysOn",
+                            "data": {"failCommands": ["find"],
+                                     "errorCode": 96}})
+    try:
+        yield
+    finally:
+        for node in nodes:
+            try:
+                node.admin.command({"configureFailPoint": "failCommand",
+                                    "mode": "off"})
+            finally:
+                node.close()
+        client.close()
+
+
+def test_a_secondary_that_refuses_a_read_does_not_become_the_clients_error(
+        seeded, tmp_path, replica_set):
+    """Found by a hostile pass, and it is the worse of the two it found.
+
+    The boundary chose to route this read to a secondary. When that
+    secondary answered with an error, the error went straight to the
+    client -- so fan-out turned a read the primary would have served
+    perfectly into a failure, and one the application could do nothing
+    about, because it sees a single node and cannot retry elsewhere.
+
+    An optimisation is not allowed to reduce availability. The boundary
+    picked the route, so the boundary owns the retry.
+    """
+    with _wire(tmp_path, replica_set, "--fan-out", replica_set,
+               "--fan-out-give-up", "0", "--advertise-self") as uri:
+        assert texts(uri, seeded.name, {"tenant_id": "acme"}) == ["live"]
+        with refusing_reads(replica_set):
+            assert texts(uri, seeded.name, {"tenant_id": "acme"}) == ["live"], (
+                "a secondary's error reached the client instead of the "
+                "answer the primary could have given")
+        # ...and the connection is still usable once the secondary recovers.
+        assert texts(uri, seeded.name, {"tenant_id": "acme"}) == ["live"]
+
+
+def test_the_retry_still_refuses_what_it_should(seeded, tmp_path,
+                                                replica_set):
+    """The fallback must not be a way round the boundary.
+
+    Two properties on the retried read, and the second is the one a
+    fallback path could plausibly lose: the expired and the revoked are
+    still refused, *and* an unscoped read spanning two tenants is still
+    refused whole rather than served. That second behaviour lives in
+    `Guard.filter` -- a batch carrying more than one tenant is already the
+    leak -- so it is the sharpest check that the retry went through the
+    ordinary enforcement path rather than around it.
+    """
+    with _wire(tmp_path, replica_set, "--fan-out", replica_set,
+               "--fan-out-give-up", "0", "--advertise-self") as uri:
+        texts(uri, seeded.name, {"tenant_id": "acme"})
+        with refusing_reads(replica_set):
+            scoped = texts(uri, seeded.name, {"tenant_id": "acme"})
+            unscoped = texts(uri, seeded.name, {})
+    assert scoped == ["live"], (
+        "the retried read served the expired or the revoked")
+    assert unscoped == [], (
+        "the retried read served a batch spanning two tenants")

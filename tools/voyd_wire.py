@@ -1553,7 +1553,16 @@ class Conversation:
         self.client_lock = asyncio.Lock()
         self.primary_lock = asyncio.Lock()
         self.payoff = None
-        self.sent_at: dict[int, float] = {}
+        # request id -> (sent at, shape). The shape travels with the
+        # timing so the routing decision and the accounting cannot end up
+        # holding two different ideas of what the read was.
+        self.sent_at: dict[int, tuple[float, tuple]] = {}
+        # The original bytes of each fanned-out read, kept until its reply
+        # arrives. A secondary that answers with an error must not turn a
+        # read the primary would have served into a failure the client
+        # sees -- the boundary chose that route, so the boundary owns the
+        # retry. Reads only, so re-running one is free of consequence.
+        self.retry: dict[int, bytes] = {}
         # Starts *off* wherever the secondaries need a credential, and is
         # turned on only by a client proving the same identity. The other
         # way round -- on until somebody is caught -- is fail-open, and it
@@ -1658,6 +1667,7 @@ class Conversation:
         if not isinstance(batch, list) or not batch:
             return raw
 
+        self.retry.pop(resp_to, None)
         ids = voyd_fanout.needed_ids(batch)
         fields = voyd_fanout.verdict_fields(guard)
         began = time.monotonic()
@@ -1668,16 +1678,18 @@ class Conversation:
         # against a few milliseconds, no collection ever looked unprofitable,
         # and the whole mechanism silently never fired.
         sent = self.sent_at.pop(resp_to, None)
-        ranked_in = None if sent is None else began - sent
+        ranked_in = None if sent is None else began - sent[0]
         fresh = (await self.authoritative(db, collection, ids, fields)
                  if ids is not None else None)
         verified_in = time.monotonic() - began
         if (self.payoff is not None and ranked_in is not None
                 and fresh is not None):
-            why = self.payoff.record(collection, ranked_in, verified_in)
+            why = self.payoff.record(sent[1], ranked_in, verified_in)
             if why is not None:
-                print(f"voyd-wire: no longer ranking {collection} on a "
-                      f"secondary -- {why}", flush=True)
+                where, kind, size = sent[1]
+                asked = f" asking for up to {size}" if size else ""
+                print(f"voyd-wire: no longer ranking {kind} on {where}"
+                      f"{asked} on a secondary -- {why}", flush=True)
                 if self.meter is not None:
                     self.meter.fanout_withdrawn_total += 1
         if fresh is None:
@@ -1816,6 +1828,7 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
             raw = strip_compression(raw, req_id, resp_to)
             head = decode_sections(raw)
             body = head[1] if head else {}
+            original = raw
 
             refusal = refuse_unrewritable(raw, req_id, req_id, guards)
             if refusal is not None:
@@ -1863,8 +1876,8 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 more = body.get("getMore")
                 if isinstance(more, int):
                     dest = conv.home.get(more, "primary")
-                elif voyd_fanout.routes_to_secondary(
-                        body, guards, secondaries.payoff.withdrawn()):
+                elif (shape := voyd_fanout.routes_to_secondary(
+                        body, guards, secondaries.payoff.withdrawn())):
                     if conv.secondary_w is None:
                         opened = await secondaries.open()
                         if opened is not None:
@@ -1885,7 +1898,8 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                                 "mode": "secondaryPreferred"}
                             raw = encode_sections(req_id, resp_to, head[0],
                                                   patched, head[2], head[3])
-                        conv.sent_at[req_id] = time.monotonic()
+                        conv.sent_at[req_id] = (time.monotonic(), shape)
+                        conv.retry[req_id] = original
                         if meter is not None:
                             meter.fanout_reads_total += 1
 
@@ -1965,6 +1979,27 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
                     conv.home[open_cursor] = source
 
             if source == "secondary":
+                again = conv.retry.pop(resp_to, None)
+                if again is not None and peek is not None and not (
+                        peek[1].get("ok")):
+                    # The secondary refused to answer. Send the same read to
+                    # the primary and say nothing to the client, which is
+                    # still waiting for its one reply and is entitled to the
+                    # answer the deployment can give. Fan-out goes off for
+                    # this connection: a secondary that just failed is not
+                    # one to keep choosing.
+                    conv.fan_out_ok = False
+                    conv.sent_at.pop(resp_to, None)
+                    if meter is not None:
+                        meter.fanout_retried_on_primary_total += 1
+                    if verbose:
+                        print(f"  voyd: a secondary refused a read "
+                              f"({peek[1].get('errmsg', 'no reason given')}"
+                              f"); retrying it on the primary", flush=True)
+                    async with conv.primary_lock:
+                        conv.primary_w.write(again)
+                        await conv.primary_w.drain()
+                    continue
                 raw = await conv.permit(raw, req_id, resp_to)
                 conv.sent_at.pop(resp_to, None)
             else:
