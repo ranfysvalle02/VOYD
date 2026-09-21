@@ -11,52 +11,44 @@ path prunes correctly and another does not, which is the exact shape
 well-scored, well-formed row from somebody else's company is ranked into a
 prompt, and the answer is returned to a customer who was never entitled to it.
 
-This shows the four things that matter, in order, and the fourth is the one
-nobody expects.
+**The client below imports `MongoClient` and nothing else.** The tenant is
+not a filter anybody remembers, and it is also not an API anybody calls: it
+is a line in a policy file, enforced by the connection string.
+
+Four things, in order, and the fourth is the one nobody expects.
 
 1. **The raw read leaks**, and that is the baseline to beat.
-2. **The tenant becomes required.** `model("notes", tenant="tenant_id")` and
-   an unscoped `find({})` *raises* rather than returning everything. You no
-   longer have to remember the filter; you have to remember nothing.
-3. **A tenant id that is a query operator is refused.** This is the real
-   breach, already fixed here and worth seeing:
-   `{"tenant_id": {"$ne": "globex"}}` passes a presence check and then matches
-   every tenant. `$vectorSearch`'s filter accepts `$ne`, so a presence check
-   plus a vector index is a leak with a green test suite.
-4. **And the tenant holds on the way out too.** Hand the egress boundary a
-   batch you assembled yourself -- which is what a search hit *is* -- and it
-   is filtered per document against the tenant the read is bound to. An
-   unbound read *raises* rather than quietly returning every tenant, the same
-   way `find({})` does, because those are the same mistake reached by
-   different roads.
+2. **An unscoped read returns nothing, rather than everything.** The
+   boundary judges each document against the scope the batch itself
+   declares, and a batch spanning two tenants declares none -- so every row
+   in it is refused. You no longer have to remember the filter. Forgetting
+   it now costs you an empty page instead of somebody else's data.
+3. **A tenant id that is a query operator buys nothing.**
+   `{"tenant_id": {"$ne": "nobody"}}` passes a presence check and then
+   matches every tenant. `$vectorSearch`'s filter accepts `$ne`, so a
+   presence check plus a vector index is a leak with a green test suite --
+   and here the operator simply produces the mixed batch from (2), which is
+   refused whole.
+4. **A projection cannot blind the boundary.** This is the one nobody
+   expects, and it is the proof that the check is per document rather than
+   per query. The verdict is read off fields *on the document*; a
+   projection that removes them and does not pin the tenant leaves the
+   boundary nothing to judge with, so the read is **refused outright**
+   rather than served unjudged. Pin the tenant and the same projection is
+   fine -- the server already pruned, and the boundary says so rather than
+   being uniformly strict about a shape.
 
-   This is the fix in the commit that added this example. The scope used to
-   be a query-half rule: enforced in the collection query and in the index
-   filter, absent on the way out. By this package's own step 4 that is a
-   silent hole, and it was sitting on the constraint a reader is least likely
-   to check.
-
-No vector index is built here: `reachable()` is the same egress boundary the
-`$vectorSearch` path calls, so the direct call isolates the part being shown
-without a 100-second index build. That is the same choice `bench/pilot.py`
-makes, for the same reason.
+No vector index is built here. The per-document check is the same code on
+every path, so these isolate the part being shown without a 100-second
+index build -- the same choice `bench/pilot.py` makes, for the same reason.
 """
 
 from __future__ import annotations
 
-import asyncio
-import os
-import uuid
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
 
-from pymongo import AsyncMongoClient
-
-from voyd import Engine
-from voyd.engine import ScopeInvalid, ScopeRequired
-
-# The examples all read the same variable, so one export points every
-# one of them at Atlas instead of the local container.
-URI = os.getenv("VOYD_MONGO_URI",
-                "mongodb://localhost:27018/?directConnection=true")
+from _boundary import boundary, deployment
 
 CORPUS = [
     {"tenant_id": "acme",   "text": "acme salary bands, 2026"},
@@ -64,70 +56,110 @@ CORPUS = [
     {"tenant_id": "globex", "text": "globex merger memo -- confidential"},
 ]
 
+POLICY = '''
+from voyd import guard, deadline, revocable, tenant
 
-async def main() -> None:
-    client = AsyncMongoClient(URI)
-    name = f"voyd_example_tenancy_{uuid.uuid4().hex[:8]}"
-    engine = Engine(client, client[name])
-    await engine.connect()
+@guard("notes")
+class Notes:
+    expire_at = deadline()
+    forgotten = revocable()
+    tenant_id = tenant()
+'''
+
+
+def _refused(call) -> str:
+    """Run something that must not be served, and report the refusal."""
     try:
-        notes = engine.model("notes", tenant="tenant_id").forgettable()
-        await engine.ensure(search_wait_s=0)
-        await engine.db.notes.insert_many([dict(d) for d in CORPUS])
+        call()
+    except PyMongoError as exc:
+        return str(exc).split(".")[0]
+    raise AssertionError("this was served, and it must not have been")
 
-        print("\n  Two tenants in one collection. Acme is asking.\n")
 
-        raw = [d async for d in engine.db.notes.find({})]
-        print("  1. the raw read a teammate writes next month")
-        print(f"       db.notes.find({{}}) -> {len(raw)} documents, "
-              f"{len({d['tenant_id'] for d in raw})} tenants")
-        print(f"       including: {[d['text'] for d in raw if d['tenant_id'] != 'acme']}")
+def main() -> None:
+    with deployment("tenancy") as (direct, name):
+        direct[name].notes.insert_many([dict(d) for d in CORPUS])
 
-        print("\n  2. the tenant is not a filter you remember, it is required")
-        try:
-            await notes.find({})
-        except ScopeRequired as exc:
-            print(f"       find({{}}) -> ScopeRequired: {str(exc).split(';')[0]}")
-        acme = await notes.find({"tenant_id": "acme"})
-        print(f"       find({{'tenant_id': 'acme'}}) -> {[d['text'] for d in acme]}")
-
-        print("\n  3. ...and it has to be an id, not an operator")
-        for bad in ({"$ne": "globex"}, {"$exists": True}):
+        with boundary(POLICY) as uri:
+            client = MongoClient(uri, serverSelectionTimeoutMS=8000)
+            notes = client[name].notes
             try:
-                await notes.find({"tenant_id": bad})
-            except ScopeInvalid:
-                print(f"       find({{'tenant_id': {bad}}}) -> ScopeInvalid")
-        print("       A presence check would pass both. `$vectorSearch`'s filter")
-        print("       accepts $ne, so presence + a vector index is a leak with a")
-        print("       green test suite.")
+                print("\n  Two tenants in one collection. Acme is asking.\n")
 
-        print("\n  4. and the tenant holds on the way OUT, where search hits arrive")
-        candidates = [d async for d in engine.db.notes.find({})]
-        print(f"       a candidate batch off the index: {len(candidates)} docs, 2 tenants")
-        try:
-            notes.reachable(candidates)
-        except ScopeRequired:
-            print("       reachable(batch) -> ScopeRequired")
-            print("         An unbound read raises rather than returning every")
-            print("         tenant -- the same refusal find({}) makes, because")
-            print("         they are the same mistake by different roads.")
-        for who in ("acme", "globex"):
-            kept = notes.for_tenant(who).reachable(candidates)
-            print(f"       for_tenant({who!r}).reachable(batch) -> "
-                  f"{[d['text'] for d in kept]}")
-        print(f"       refused: {notes.receipts()['refused_by_reason']}")
-        print("\n       find() and search() bind this themselves, from the tenant")
-        print("       their filters already require. Only a batch you assembled")
-        print("       yourself has to name it, because it has no filters to read.")
+                raw = list(direct[name].notes.find({}))
+                others = [d["text"] for d in raw if d["tenant_id"] != "acme"]
+                print("  1. the raw read a teammate writes next month")
+                print(f"       db.notes.find({{}}) -> {len(raw)} documents, "
+                      f"{len({d['tenant_id'] for d in raw})} tenants")
+                print(f"       including: {others}")
+                assert others
 
-        print("\n  Now both halves agree, which is the whole rule: a constraint")
-        print("  pushed into a query must also exist per document, or one read")
-        print("  path prunes and another serves the same row to the wrong"
-              " customer.\n")
-    finally:
-        await client.drop_database(name)
-        await client.close()
+                print("\n  2. through the boundary, an unscoped read "
+                      "returns nothing")
+                print("     rather than everything")
+                served = list(notes.find({}))
+                print(f"       find({{}}) -> {served}")
+                print("       Three rows on disk, two tenants in the batch, "
+                      "so the")
+                print("       batch declares no scope and every document in "
+                      "it is")
+                print("       refused. Forgetting the filter costs an empty "
+                      "page.")
+                assert served == []
+
+                acme = sorted(d["text"] for d in
+                              notes.find({"tenant_id": "acme"}))
+                print(f"       find({{'tenant_id': 'acme'}}) -> {acme}")
+                assert acme == ["acme q3 roadmap", "acme salary bands, 2026"]
+
+                print("\n  3. ...and an operator in the tenant buys nothing")
+                sneaky = list(notes.find({"tenant_id": {"$ne": "nobody"}}))
+                print(f"       find({{'tenant_id': {{'$ne': 'nobody'}}}}) -> "
+                      f"{sneaky}")
+                print("       A presence check would pass that and hand back "
+                      "every")
+                print("       tenant. Here it is the mixed batch from (2), "
+                      "refused")
+                print("       whole -- because the scope is checked against "
+                      "the")
+                print("       document, not against the shape of the query.")
+                assert sneaky == []
+
+                print("\n  4. and a projection cannot blind it")
+                why = _refused(lambda: list(notes.find({}, {"text": 1,
+                                                           "_id": 0})))
+                print(f"       find({{}}, {{'text': 1}}) -> refused: {why}")
+                print("         The verdict is read off fields on the "
+                      "document.")
+                print("         Remove them without pinning the tenant and "
+                      "there is")
+                print("         nothing left to judge with -- which is a "
+                      "read this")
+                print("         boundary will not stand behind, rather than "
+                      "one it")
+                print("         serves unjudged. That is what a $vectorSearch "
+                      "hit is:")
+                print("         a document no query pruned.")
+
+                kept = sorted(d["text"] for d in notes.find(
+                    {"tenant_id": "acme"}, {"text": 1, "_id": 0}))
+                print(f"       ...but pin the tenant and it is fine -> {kept}")
+                print("         The server already pruned, so the boundary "
+                      "says so")
+                print("         rather than being uniformly strict about a "
+                      "shape.")
+                assert kept == ["acme q3 roadmap", "acme salary bands, 2026"]
+
+                print("\n  Now both halves agree, which is the whole rule: a "
+                      "constraint")
+                print("  pushed into a query must also exist per document, or "
+                      "one read")
+                print("  path prunes and another serves the same row to the "
+                      "wrong customer.")
+                print("\n  Application lines changed: 0\n")
+            finally:
+                client.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

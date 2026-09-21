@@ -58,8 +58,8 @@ from datetime import timedelta
 
 from pymongo import AsyncMongoClient
 
-from voyd import Engine
 from voyd.engine import Deadline, revoked
+from voyd.engine.admission import Admission, AdmissionSpec
 from voyd.engine.time import now
 
 # The examples all read the same variable, so one export points every
@@ -70,19 +70,27 @@ URI = os.getenv("VOYD_MONGO_URI",
 LEAK = "aws key AKIA-EXAMPLE-LEAKEDKEY-9c1f"
 
 
-async def run(engine, db) -> dict:
+async def run(db) -> dict:
     """The shadow probe, as a pilot would wire it. Returns what it measured.
 
-    Split out from ``main`` so the claims it prints are asserted by
-    ``tests/test_shadow_mode_measures_without_changing_behaviour.py`` rather
-    than trusted. An instrument nobody checked is not evidence.
+    Split out from ``main`` and returning what it measured rather than
+    printing it, so every claim below is asserted in this file rather than
+    narrated. An instrument nobody checked is not evidence.
+
+    **This is the one thing here that is not the proxy, and that is the
+    point of it.** A shadow trial must not change what a read returns, and
+    a boundary in front of the database changes exactly that. So the probe
+    is the admission handle, used as a *counter* beside your own read path
+    -- two objects, one spec, and nothing in the request path at all. When
+    the number convinces somebody, the same spec becomes a policy file and
+    the connection string does the rest.
     """
-    # `forgettable()` is the same handle with the defaults; `admitting` is
-    # spelled out here only to switch on lineage, so the mark reaches the
-    # summary an agent wrote. No third reason is installed -- see the header.
-    notes = engine.model("notes").admitting(
-        Deadline(), revoked(), lineage_field="lineage")
-    await engine.ensure(search_wait_s=0)
+    # Two reasons and no more -- see the header on why a `Budget` here
+    # would make the number mean two things. `lineage_field` is not a third
+    # reason, it is what makes the existing one travel.
+    notes = Admission(db, AdmissionSpec(
+        "notes", rules=(Deadline(), revoked()),
+        lineage_field="lineage").with_defaults())
 
     stale = (await db.notes.insert_one(
         {"text": "last year's pricing", "expire_at": now() - timedelta(days=1)}
@@ -135,10 +143,8 @@ async def run(engine, db) -> dict:
 async def main() -> None:
     client = AsyncMongoClient(URI)
     name = f"voyd_shadow_{uuid.uuid4().hex[:8]}"
-    engine = Engine(client, client[name])
-    await engine.connect()
     try:
-        r = await run(engine, client[name])
+        r = await run(client[name])
 
         print("\nShadow mode: nothing about this program's behaviour changed.\n")
         print(f"  your read path served          {r['served_by_your_read_path']} documents")

@@ -42,7 +42,8 @@ from datetime import timedelta
 
 from pymongo import AsyncMongoClient
 
-from voyd.engine import Budget, Deadline, Engine, Restricted, now
+from voyd.engine import Budget, Deadline, Restricted, now
+from voyd.engine.admission import Admission, AdmissionSpec
 
 # The examples all read the same variable, so one export points every
 # one of them at Atlas instead of the local container.
@@ -101,14 +102,12 @@ def _names(docs) -> set[str]:
     return {d["name"] for d in docs}
 
 
-async def part_a(engine) -> None:
+async def part_a(db) -> None:
     """The four query-expressible reasons, on one handle, agreeing on both
     halves."""
-    db = engine.db
     # One handle, four reasons -- two shipped, two a stranger wrote.
-    docs = engine.model("catalog").admitting(
-        SoftDeleted(), Deadline(), BehindFlag(), Restricted())
-    await engine.ensure(search_wait_s=0)
+    docs = Admission(db, AdmissionSpec("catalog", rules=(
+        SoftDeleted(), Deadline(), BehindFlag(), Restricted())))
 
     caller = {"flags": ["beta"], "groups": ["support"]}
     reader = docs.for_caller(caller)
@@ -150,11 +149,10 @@ async def part_a(engine) -> None:
     print("       on one of the halves, that somebody has to remember.")
 
 
-async def part_b(engine) -> None:
+async def part_b(db) -> None:
     """The reason `deleted=true` can never become: a running total."""
-    db = engine.db
-    budgeted = engine.model("prompts").admitting(Deadline(), Budget(limit=100))
-    await engine.ensure(search_wait_s=0)
+    budgeted = Admission(db, AdmissionSpec(
+        "prompts", rules=(Deadline(), Budget(limit=100))))
 
     await db.prompts.insert_many(
         [{"name": f"chunk-{i}", "tokens": 40} for i in range(4)])
@@ -185,11 +183,9 @@ async def main() -> None:
     print(__doc__.split("\n\n")[0])
     client = AsyncMongoClient(URI)
     name = f"voyd_example_rosetta_{uuid.uuid4().hex[:8]}"
-    engine = Engine(client, client[name])
-    await engine.connect()
     try:
-        await part_a(engine)
-        await part_b(engine)
+        await part_a(client[name])
+        await part_b(client[name])
         print("\n  Five reasons, one protocol, enforced once. `deleted=true` is")
         print("  rule zero: the smallest, on one half, by convention.\n")
     finally:

@@ -2,7 +2,7 @@
 
     docker compose up -d
     export CRYPT_SHARED_LIB_PATH=/path/to/mongo_crypt_v1.{so,dylib}
-    uv run --extra crypto python examples/shred.py      # ~90 seconds
+    uv run --extra crypto python examples/shred.py      # ~15 seconds
 
 ``refuse.py`` makes a fact unreachable on the next read while its row is
 still on disk, and that row is the proof. It is also the finding a security
@@ -15,14 +15,23 @@ rest, and destroying the key makes every copy unreadable at once -- the row,
 the replica, the snapshot, the export somebody took in March -- without any
 of them being visited.
 
-And then it measures the part everybody overstates. Destroying a key is not
-instant either: a client that decrypted the document before the shred keeps
-decrypting it until its key cache turns over. This program waits for that to
-happen and prints the number, which is about sixty seconds -- the same shape,
-and very nearly the same figure, as the TTL monitor window this whole package
-exists to talk about.
+**And none of it is an API.** `text = sealed()` is a line in a policy file,
+and the erasure needs no new verb at all: the key vault is an ordinary
+collection, so `delete_one({"keyAltNames": "alice"})` is how any driver in
+any language asks. The program below imports `MongoClient` and nothing else.
 
-That is the argument for having both rather than choosing:
+The part everybody overstates is the ordering, and it is the part the
+boundary has to get right. Destroying a key is not instant at the reader:
+libmongocrypt caches data keys, so a client that decrypted the document a
+moment ago keeps decrypting it until that cache turns over -- measured at
+about sixty seconds, which is the same shape, and very nearly the same
+figure, as the TTL monitor window this whole package exists to complain
+about. A shred on its own therefore opens a second delete-is-a-wish window
+inside the feature whose entire purpose is to close the first one.
+
+So the boundary revokes the documents *first* and lets the key die second.
+Unreachable now, unreadable everywhere shortly. That is the argument for
+having both rather than choosing:
 
     the key cache is a window where the ciphertext is still readable
         -> refusal already refused the document, with no window at all
@@ -32,26 +41,28 @@ That is the argument for having both rather than choosing:
 
 from __future__ import annotations
 
-import asyncio
-import os
-import uuid
+from pymongo import MongoClient
 
-from pymongo import AsyncMongoClient
+from _boundary import boundary, deployment
 
-from voyd.engine import Engine
-from voyd.engine.custody import from_env
-from voyd.engine.keyring import available
-
-# The examples all read the same variable, so one export points every
-# one of them at Atlas instead of the local container.
-URI = os.getenv("VOYD_MONGO_URI",
-                "mongodb://localhost:27018/?directConnection=true")
 SECRET = "alice was treated for a stress fracture in March"
 KEPT = "the fault code is P0301"
-PATIENCE = 120
+
+POLICY = '''
+from voyd import guard, deadline, revocable, tenant, sealed
+
+@guard("notes", on_delete="revoke")
+class Notes:
+    expire_at = deadline()
+    forgotten = revocable()
+    tenant_id = tenant()
+    text      = sealed()
+'''
 
 
-async def main() -> None:
+def main() -> None:
+    from voyd.engine.keyring import available
+
     ok, why = available()
     if not ok:
         print(f"\n  automatic encryption is unavailable: {why}")
@@ -59,76 +70,85 @@ async def main() -> None:
         print("  that survives a backup, and it needs the crypt library.\n")
         return
 
-    client = AsyncMongoClient(URI)
-    name = f"voyd_example_shred_{uuid.uuid4().hex[:8]}"
-    engine = Engine(client, client[name])
-    await engine.connect()
+    with deployment("shred") as (direct, name):
+        with boundary(POLICY, "--key-vault", name, wait_s=60) as uri:
+            client = MongoClient(uri, serverSelectionTimeoutMS=8000)
+            notes = client[name].notes
+            try:
+                print("\n  The entire declaration, in the policy file:")
+                print("       tenant_id = tenant()")
+                print("       text      = sealed()")
+                print("     The scope IS the tenant, so there is no second "
+                      "field to")
+                print("     maintain and per-patient erasure is already the "
+                      "shape.")
 
-    # The ladder, from the environment. Unset is Ephemeral -- demo-grade,
-    # and it says so rather than letting the run imply otherwise:
-    #   VOYD_KMS_PROVIDER=local VOYD_KMS_KEY_PATH=./master.key
-    #   VOYD_KMS_PROVIDER=aws   VOYD_KMS_KEY=arn:aws:kms:...
-    custody = from_env("VOYD_KMS")
-    held = custody.describe()
-    print(f"\n  custody: {held['detail']}")
-    print(f"           durable={held['durable']}  audited={held['audited']}")
-    if not held["audited"]:
-        print("           (shredding below is real; who may destroy the")
-        print("            master key is this process's own word for it)")
+                # Written as plaintext by a client that does no encryption.
+                # The boundary seals it on the way past.
+                notes.insert_many([
+                    {"tenant_id": "alice", "text": SECRET},
+                    {"tenant_id": "bob", "text": KEPT},
+                ])
 
-    try:
-        # --- the entire declaration ---------------------------------
-        notes = engine.model("notes", tenant="patient").sealed(
-            "text", custody=custody)
-        await engine.ensure(search_wait_s=0)
+                raw = direct[name].notes.find_one({"tenant_id": "alice"})
+                print("\n  1. What is on disk, read without the boundary -- "
+                      "which is")
+                print("     what a DBA, a replica and a backup all are:")
+                print(f"       text -> Binary(subtype={raw['text'].subtype}), "
+                      f"{len(raw['text'])} bytes")
+                print(f"       contains the plaintext? "
+                      f"{SECRET.encode() in bytes(raw['text'])}")
+                assert SECRET.encode() not in bytes(raw["text"])
+                print("     ...and through the connection string it is just "
+                      "a string:")
+                got = [d["text"] for d in notes.find({"tenant_id": "alice"})]
+                print(f"       {got}")
+                assert got == [SECRET]
 
-        print("\n  One line declared it:")
-        print('       engine.model("notes", tenant="patient").sealed("text")')
-        print("     The scope IS the tenant, so there is no second field to")
-        print("     maintain and per-patient erasure is already the shape.")
+                print("\n  2. Alice asks to be forgotten. No new verb -- the "
+                      "key")
+                print("     vault is an ordinary collection:")
+                print("       db.__keys.delete_one({'keyAltNames': 'alice'})")
+                client[name]["__keys"].delete_one({"keyAltNames": "alice"})
 
-        await notes.seal([{"patient": "alice", "text": SECRET},
-                          {"patient": "bob", "text": KEPT}])
+                alice = list(notes.find({"tenant_id": "alice"}))
+                bob = [d["text"] for d in notes.find({"tenant_id": "bob"})]
+                print(f"       alice -> {alice}")
+                print(f"       bob   -> {bob}")
+                assert alice == [], (
+                    "alice's key was destroyed and her document was still "
+                    "served: the revocation did not precede the shred, so "
+                    "the key cache is a window")
+                assert bob == [KEPT], (
+                    "one key per collection would have taken bob with her")
+                print("     Read *immediately*. A boundary that only "
+                      "destroyed the")
+                print("     key would still be serving this plaintext out of "
+                      "the")
+                print("     cache for about a minute, and would look exactly "
+                      "like")
+                print("     this one until you timed it.")
 
-        raw = await engine.db.notes.find_one({"patient": "alice"})
-        print("\n  1. What is on disk, read without the engine -- which is")
-        print("     what a DBA, a replica and a backup all are:")
-        print(f"       text -> Binary(subtype={raw['text'].subtype}), "
-              f"{len(raw['text'])} bytes")
-        print(f"       contains the plaintext? "
-              f"{SECRET.encode() in bytes(raw['text'])}")
-        print("     ...and through the handle it is just a string:")
-        print(f"       {[d['text'] for d in await notes.find({'patient': 'alice'})]}")
+                print("\n  3. And the evidence stays. Nothing was destroyed "
+                      "except")
+                print("     the key:")
+                on_disk = direct[name].notes.count_documents({})
+                row = direct[name].notes.find_one({"tenant_id": "alice"})
+                print(f"       rows on disk -> {on_disk}")
+                print(f"       the mark     -> "
+                      f"{row['forgotten']['reason']!r}")
+                print(f"       the bytes    -> {len(row['text'])} bytes of "
+                      f"noise to every")
+                print("                        reader that does not hold a "
+                      "key nobody holds")
+                assert on_disk == 2
+                assert row["forgotten"]["reason"] == "key destroyed"
 
-        print("\n  2. The mistake that used to be silent and permanent:")
-        print("     a writer that skips the encrypting client entirely.")
-        try:
-            await engine.db.notes.insert_one(
-                {"patient": "alice", "text": "written by a migration script"})
-            print("       ACCEPTED as plaintext  <- this is the hole")
-        except Exception as e:
-            print(f"       {type(e).__name__} from the server. A binData")
-            print("       validator on the collection means forgetting to")
-            print("       encrypt is not discouraged, it is impossible.")
+                vault = direct[name]["__keys"]
+                assert vault.count_documents({"keyAltNames": "alice"}) == 0
+                assert vault.count_documents({"keyAltNames": "bob"}) == 1
 
-        print("\n  3. Alice asks to be forgotten. One call, one tenant:")
-        await notes.shred("alice")
-        print(f"       alice -> {await notes.find({'patient': 'alice'})}")
-        print(f"       bob   -> "
-              f"{[d['text'] for d in await notes.find({'patient': 'bob'})]}")
-        print(f"       refused: {notes.receipts()['refused_by_reason']}")
-        print("     Not an exception -- a refusal with a name, beside the")
-        print("     deadline and the revocation. One crypto-erased document")
-        print("     must not turn a page of fifty into a 500.")
-
-        print("\n  4. And it reaches further than refusal can. Refusal binds")
-        print("     this read path; the key is gone from every copy --")
-        print("     replicas, snapshots, the backup nobody has restored.")
-        row = await engine.db.notes.find_one({"patient": "alice"})
-        print(f"       alice's row: still there, "
-              f"{len(row['text'])} bytes of noise")
-
-        print("""
+                print("""
   Three mechanisms, each honest about what it costs:
 
     refusal          immediate     this read path only     unreachable now
@@ -144,12 +164,12 @@ async def main() -> None:
   gone from all of them.
 
   Neither is the answer. Both is.
+
+  Application lines changed: 0
 """)
-    finally:
-        await engine.aclose()
-        await client.drop_database(name)
-        await client.close()
+            finally:
+                client.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

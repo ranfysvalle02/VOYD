@@ -45,8 +45,8 @@ from typing import Any, ClassVar
 
 from pymongo import AsyncMongoClient
 
-from voyd import Engine
 from voyd.engine import Deadline, revoked
+from voyd.engine.admission import Admission, AdmissionSpec
 
 # The examples all read the same variable, so one export points every
 # one of them at Atlas instead of the local container.
@@ -183,67 +183,73 @@ CORPUS = [
 ]
 
 
+def _handle(db, collection: str, *rules) -> Admission:
+    """One collection, one rule set, built from the parts.
+
+    A handle per rule set rather than a collection per rule set. The old
+    version of this file seeded `notes0`, `notes1`, `notes2` because the
+    engine deduplicated handles by collection and refused to redeclare one
+    with different rules -- correct, since two rule sets for one collection
+    is how they drift, and an artefact of a registry that is no longer in
+    the way. Constructing the handle directly, two rule sets over one
+    corpus is just two objects.
+    """
+    return Admission(db, AdmissionSpec(
+        collection, rules=rules).with_defaults())
+
+
 async def main() -> None:
     client = AsyncMongoClient(URI)
     name = f"voyd_example_portfolio_{uuid.uuid4().hex[:8]}"
-    engine = Engine(client, client[name])
-    await engine.connect()
+    db = client[name]
     try:
-        async def seed(collection: str) -> None:
-            """A handle is deduplicated per collection, and the engine refuses
-            to redeclare one with different rules -- correctly, since two rule
-            sets for one collection is how they drift. So each constraint gets
-            its own copy of the same corpus rather than its own handle on one.
-            """
-            await engine.db[collection].insert_many(
-                [{"text": t, "verified": v, "publisher": p, "tier": ti, "n": i}
-                 for i, (t, v, p, ti) in enumerate(CORPUS)])
+        await db.notes.insert_many(
+            [{"text": t, "verified": v, "publisher": p, "tier": ti, "n": i}
+             for i, (t, v, p, ti) in enumerate(CORPUS)])
+
+        async def corpus() -> list:
+            return [d async for d in db.notes.find({}).sort("n", 1)]
 
         print("\n  Seven documents, every one of them relevant and live.")
         print("  A ranker returns all seven. Three rules disagree, and none of")
         print("  them is about any single document.\n")
 
-        for i, (rule, note) in enumerate((
+        for rule, note in (
             (ProvenanceQuota(share=0.3),
              "at most 30% of the page may be unverified"),
             (AtMostPerSource(cap=2),
              "at most 2 documents from one publisher"),
             (TieredCost(limit=100),
              "premium costs 40, standard costs 10, budget 100"),
-        )):
-            name_i = f"notes{i}"
-            await seed(name_i)
-            docs = engine.model(name_i).admitting(Deadline(), revoked(), rule)
-            page = docs.reachable(
-                [d async for d in engine.db[name_i].find({}).sort("n", 1)])
-            kept = [d["text"] for d in page]
+        ):
+            docs = _handle(db, "notes", Deadline(), revoked(), rule)
+            kept = [d["text"] for d in docs.reachable(await corpus())]
             print(f"  {type(rule).__name__:17} {note}")
             print(f"    admitted {len(kept)} of 7: {kept}")
             print(f"    refused  {docs.receipts()['refused_by_reason']}\n")
+            assert len(kept) < 7, "a rule that refuses nothing proves nothing"
 
         print("  And all three at once, on one handle, with the deadline and")
         print("  the revocation mark still enforced beside them:\n")
-        await seed("notes")
-        docs = engine.model("notes").admitting(
-            Deadline(), revoked(),
-            ProvenanceQuota(share=0.3), AtMostPerSource(cap=2),
-            TieredCost(limit=100))
-        page = docs.reachable(
-            [d async for d in engine.db.notes.find({}).sort("n", 1)])
+        docs = _handle(db, "notes", Deadline(), revoked(),
+                       ProvenanceQuota(share=0.3), AtMostPerSource(cap=2),
+                       TieredCost(limit=100))
+        page = docs.reachable(await corpus())
         print(f"    admitted {len(page)} of 7: {[d['text'] for d in page]}")
         print(f"    refused  {docs.receipts()['refused_by_reason']}")
 
         print("\n  The same document, admitted alone and refused in company:")
-        await seed("solo")
-        alone = engine.model("solo").admitting(AtMostPerSource(cap=2))
-        third = [d async for d in engine.db.solo.find({"text": "acme third opinion"})]
+        third = [d for d in await corpus() if d["text"] == "acme third opinion"]
+        alone = _handle(db, "notes", AtMostPerSource(cap=2))
         print(f"    alone       -> {len(alone.reachable(third))} admitted")
+        assert len(alone.reachable(third)) == 1
 
-        await seed("company")
-        crowd = engine.model("company").admitting(AtMostPerSource(cap=2))
-        everything = [d async for d in engine.db.company.find({}).sort("n", 1)]
-        kept_texts = {d["text"] for d in crowd.reachable(everything)}
-        print(f"    in company  -> {int('acme third opinion' in kept_texts)} admitted")
+        crowd = _handle(db, "notes", AtMostPerSource(cap=2))
+        kept_texts = {d["text"] for d in crowd.reachable(await corpus())}
+        in_company = int("acme third opinion" in kept_texts)
+        print(f"    in company  -> {in_company} admitted")
+        assert in_company == 0, (
+            "the whole argument is that these two numbers differ")
         print("\n  That is the whole argument. No index filter can produce two")
         print("  answers for one document, and enforce(subject, object, action)")
         print("  has nowhere to put the rest of the page.\n")

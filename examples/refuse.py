@@ -19,6 +19,12 @@ The distinction this example draws:
     delete   a storage operation. Eventually. Best effort. Unprovable.
     revoke   a retrieval guarantee. Next read. Immediate. Counted.
 
+**And the program below imports nothing from this package.** It writes a
+policy file, starts the boundary, and then speaks to an ordinary
+`pymongo.MongoClient`. The verb it uses to forget is `delete_one`, which was
+already in its code. That is the point: the operation nobody has is reached
+through the verb everybody already wrote.
+
 The row is deliberately still on disk at the end of this program. That is not
 a failure to clean up -- it is the proof. Unreachable first, erased second, in
 that order, because the reverse order is the bug.
@@ -26,90 +32,94 @@ that order, because the reverse order is the bug.
 
 from __future__ import annotations
 
-import asyncio
-import os
-import random
-import uuid
+from pymongo import MongoClient
 
-from pymongo import AsyncMongoClient
-
-from voyd.engine import Engine
-
-# The examples all read the same variable, so one export points every
-# one of them at Atlas instead of the local container.
-URI = os.getenv("VOYD_MONGO_URI",
-                "mongodb://localhost:27018/?directConnection=true")
-DIMS = 8
+from _boundary import boundary, deployment
 
 SECRET = "the admin password is hunter2"
 KEPT = "the fault code is P0301"
 
+POLICY = '''
+from voyd import guard, deadline, revocable
 
-def vec(seed: int) -> list[float]:
-    rng = random.Random(seed)
-    return [rng.random() for _ in range(DIMS)]
+@guard("notes", on_delete="revoke")
+class Notes:
+    expire_at = deadline()
+    forgotten = revocable()
+'''
 
 
-async def main() -> None:
-    client = AsyncMongoClient(URI)
-    name = f"voyd_example_refuse_{uuid.uuid4().hex[:8]}"
-    engine = Engine(client, client[name])
-    await engine.connect()
-
-    try:
-        notes = engine.model("notes").forgettable()
-        await engine.ensure(search_wait_s=0)
-
-        await engine.db.notes.insert_many([
-            {"text": SECRET, "vector": vec(1)},
-            {"text": KEPT, "vector": vec(2)},
+def main() -> None:
+    with deployment("refuse") as (direct, name):
+        direct[name].notes.insert_many([
+            {"text": SECRET},
+            {"text": KEPT},
         ])
 
-        print("\n  Two facts, no deadlines. Both pinned, both reachable.")
-        print(f"    recall -> {[d['text'] for d in await notes.find({})]}")
+        with boundary(POLICY) as uri:
+            client = MongoClient(uri, serverSelectionTimeoutMS=8000)
+            notes = client[name].notes
+            try:
+                print("\n  Two facts, no deadlines. Both pinned, both "
+                      "reachable.")
+                reachable = sorted(d["text"] for d in notes.find({}))
+                print(f"    recall -> {reachable}")
+                assert reachable == sorted([SECRET, KEPT])
 
-        print("\n  Now somebody says: forget that first one. Right now.")
-        n = await notes.revoke({"text": SECRET}, reason="credential leaked")
-        print(f"    revoke() marked {n} fact(s) unreachable")
+                print("\n  Now somebody says: forget that first one. Right "
+                      "now.")
+                print("  The verb is the one already in their code:")
+                print("    db.notes.delete_one({'text': ...})")
+                res = notes.delete_one({"text": SECRET})
+                print(f"    -> deleted_count={res.deleted_count}   "
+                      f"(the driver is satisfied)")
+                assert res.deleted_count == 1
 
-        reachable = [d["text"] for d in await notes.find({})]
-        on_disk = await engine.db.notes.count_documents({})
-        print(f"\n    recall  -> {reachable}")
-        print(f"    on disk -> {on_disk} rows        <- the secret is STILL HERE")
-        print("       and it is already unreachable. No sweeper ran. Nothing")
-        print("       was deleted. The next read simply refused it.")
+                reachable = [d["text"] for d in notes.find({})]
+                on_disk = direct[name].notes.count_documents({})
+                print(f"\n    recall  -> {reachable}")
+                print(f"    on disk -> {on_disk} rows        "
+                      f"<- the secret is STILL HERE")
+                print("       and it is already unreachable. No sweeper ran. "
+                      "Nothing")
+                print("       was deleted. The next read simply refused it.")
+                assert reachable == [KEPT]
+                assert on_disk == 2, (
+                    "a delete that really deleted is not a refusal")
 
-        print("\n  The same query, straight at the collection, for contrast --")
-        print("  this is what every other system's read path looks like:")
-        leaked = [d["text"] async for d in engine.db.notes.find({})]
-        print(f"    find() -> {leaked}")
-        print("       ^ the revoked fact, returned as a normal result.")
+                print("\n  The same query, straight at the collection, for "
+                      "contrast --")
+                print("  this is what every other system's read path looks "
+                      "like:")
+                leaked = sorted(d["text"] for d in direct[name].notes.find({}))
+                print(f"    find() -> {leaked}")
+                print("       ^ the revoked fact, returned as a normal "
+                      "result.")
+                assert SECRET in leaked
 
-        print("\n  Audit can still see it, but has to say so out loud:")
-        audit = await notes.including_refused().find_one({"text": SECRET})
-        mark = audit["forgotten"]
-        print(f"    including_refused() -> reason={mark['reason']!r}")
-        print(f"                             unreachable since {mark['at'].isoformat()}")
+                print("\n  Audit can still see it, and has to go around the "
+                      "boundary to do so:")
+                row = direct[name].notes.find_one({"text": SECRET})
+                mark = row["forgotten"]
+                print(f"    forgotten -> reason={mark['reason']!r}")
+                print(f"                 unreachable since "
+                      f"{mark['at'].isoformat()}")
+                assert mark["reason"] == "deleted via voyd-wire"
 
-        print("\n  And it is counted, so it is provable rather than merely true:")
-        r = notes.receipts()
-        print(f"    revoked_total       {r['revoked_total']}   (exact)")
-        print(f"    refused_at_boundary {r['refused_at_boundary']}   (a lower bound --")
-        print("       the same rule runs inside the query, so MongoDB dropped this")
-        print("       one server-side and the handle never had to reject it.")
-        print("       Search hits are the case that does reach the boundary:")
-        raw = [d async for d in engine.db.notes.find({})]
-        kept_hits = notes.reachable(raw)
-        r = notes.receipts()
-        print(f"       after admitting {len(raw)} raw hits -> {len(kept_hits)} kept, "
-              f"refused_at_boundary {r['refused_at_boundary']})")
+                print("\n  And the deadline was pulled in, so the bytes go "
+                      "on the")
+                print("  schedule they already had -- unreachable first, "
+                      "erased second:")
+                print(f"    expire_at -> {row['expire_at'].isoformat()}")
+                assert row["expire_at"] is not None
 
-        print("\n  delete calls issued by this program: 0")
-        print("  facts that reached a prompt after being forgotten: 0\n")
-    finally:
-        await client.drop_database(name)
-        await client.close()
+                print("\n  Application lines changed: 0")
+                print("  delete calls issued by the boundary: 0")
+                print("  facts that reached a prompt after being forgotten: "
+                      "0\n")
+            finally:
+                client.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
