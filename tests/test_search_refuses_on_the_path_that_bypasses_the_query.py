@@ -267,6 +267,16 @@ def test_a_client_vector_on_a_server_embedded_index_is_refused(tmp_path, db):
     assert "voyd" in str(caught.value).lower() or "embed" in str(caught.value).lower()
 
 
+def _creds(uri: str) -> str:
+    """The `user:pass@` prefix from a connection string, or empty."""
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(uri)
+    if not parsed.username:
+        return ""
+    return f"{parsed.username}:{parsed.password}@"
+
+
 def test_the_server_embeds_and_refusal_still_holds(atlas, tmp_path):
     """Server-side embedding, against a live Atlas cluster, through the proxy.
 
@@ -282,19 +292,48 @@ def test_the_server_embeds_and_refusal_still_holds(atlas, tmp_path):
     nothing the application holds could have filtered it, reached by a
     driver that imported nothing.
     """
+    from voyd.engine.search import SearchSpec
+
+    # The index name comes from the spec `voyd-wire --ensure` builds, not
+    # from a literal. `tools/voyd_ensure.py` does not override
+    # `vector_index`, so it is the `SearchSpec` default -- and a literal
+    # here was wrong on the first run, which reads as "mongot indexed
+    # nothing" rather than as "you asked for an index that does not exist".
+    index = SearchSpec("notes").vector_index
+
     uri, name = atlas
     direct = pymongo.MongoClient(uri)
     try:
+        # The refusable row is **revoked, not expired**, and that is not a
+        # style choice. `--ensure` builds the TTL index behind `deadline()`,
+        # this test waits minutes for a server-side index build, and
+        # MongoDB's TTL monitor runs about once a minute -- so a row
+        # inserted already a day past its deadline is reaped long before
+        # mongot is asked about it. The first run of this version polled
+        # for five minutes and found one hit, which reads as "the index is
+        # slow" and was the reaper doing exactly what this project says it
+        # does. A revocation with no deadline is pinned, refused by the
+        # boundary, and cannot race a sweeper.
         direct[name].notes.insert_many([
             {"text": "the fault code is P0301 on cylinder one"},
             {"text": "last year's pricing for the enterprise tier",
-             "expire_at": PAST},
+             "forgotten": {"at": PAST, "reason": "retracted"}},
         ])
         with _wire(tmp_path, AUTO_POLICY, uri,
                    "--ensure", name, "--ensure-wait", "180") as port:
+            # The credentials go to the *proxy*, which forwards the SCRAM
+            # exchange upstream. Atlas requires authentication and the
+            # boundary has none of its own to lend -- it deliberately does
+            # not authenticate on a caller's behalf, because an identity
+            # the caller did not prove is one the boundary invented. So a
+            # client with no credentials gets `Unauthorized` from Atlas,
+            # through the proxy, which is the correct answer and was the
+            # second thing this rewrite found.
             client = pymongo.MongoClient(
-                f"mongodb://localhost:{port}/?directConnection=true",
-                serverSelectionTimeoutMS=20000)
+                f"mongodb://{_creds(uri)}localhost:{port}/"
+                f"?directConnection=true&authSource=admin",
+                serverSelectionTimeoutMS=60000, connectTimeoutMS=60000,
+                socketTimeoutMS=120000)
             try:
                 notes = client[name].notes
                 # Poll for the state this test asserts: both rows ranked by
@@ -305,7 +344,7 @@ def test_the_server_embeds_and_refusal_still_holds(atlas, tmp_path):
                 while time.monotonic() < deadline:
                     ranked = list(direct[name].notes.aggregate([
                         {"$vectorSearch": {
-                            "index": "notes_vector", "path": "text",
+                            "index": index, "path": "text",
                             "query": "engine fault code",
                             "numCandidates": 50, "limit": 10}}]))
                     if len(ranked) >= 2:
@@ -313,7 +352,7 @@ def test_the_server_embeds_and_refusal_still_holds(atlas, tmp_path):
                     time.sleep(5)
 
                 assert len(ranked) >= 2, (
-                    "the live row was indexed and the expired one was not, "
+                    "the live row was indexed and the revoked one was not, "
                     "so nothing was ever offered to be refused. An "
                     "environment result -- but reported as a failure, "
                     "because a pass here would be this file asserting "
@@ -321,7 +360,7 @@ def test_the_server_embeds_and_refusal_still_holds(atlas, tmp_path):
 
                 hits = list(notes.aggregate([
                     {"$vectorSearch": {
-                        "index": "notes_vector", "path": "text",
+                        "index": index, "path": "text",
                         "query": "engine fault code",
                         "numCandidates": 50, "limit": 10}}]))
                 assert [d["text"] for d in hits] == [
@@ -335,7 +374,7 @@ def test_the_server_embeds_and_refusal_still_holds(atlas, tmp_path):
 
                 with pytest.raises(pymongo.errors.PyMongoError):
                     list(notes.aggregate([{"$vectorSearch": {
-                        "index": "notes_vector", "path": "text",
+                        "index": index, "path": "text",
                         "queryVector": [0.0] * 1024,
                         "numCandidates": 50, "limit": 5}}]))
             finally:
