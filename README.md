@@ -151,24 +151,38 @@ the hash-chain ledger and the context index are gone, along with ~817 tests
 and ~35,000 words of documentation that described them. What is left is the
 boundary, the policy file, and the wire.
 
-The suite is now **27 tests in under two seconds**, and it is the foundation
-rather than a census — the smallest set of claims that, if any one broke,
-would make everything above it a lie:
+The suite is **55 tests**, and it is the foundation rather than a census —
+the smallest set of claims that, if any one broke, would make everything
+above it a lie:
 
 | | |
 |---|---|
-| the wire codec round-trips | including the document sequence that carries a write, which is where the one silent bug lived |
+| the wire codec round-trips | including the document sequence that carries a write, where the one silent bug lived |
 | the boundary refuses | expired, revoked, unreadable-deadline, off-tenant — **with no database anywhere near it** |
 | a policy file compiles, or fails at *load* | five ways to be wrong, each refused by name |
-| a plain driver gets all of it | against a real `mongod`, through a real proxy |
+| a plain driver gets all of it | real `mongod`, real proxy, real driver |
+| the write path forgets without deleting | the deadline moves *earlier only*; a quarantine stays pinned; a revocation cannot be lifted |
+| encryption is the answer refusal cannot give | plaintext is not on disk, shredding one tenant leaves the others readable |
+| a refusal travels | revoke a source, the summary and the answer and the embedding go with it |
+| **the server embeds and refusal still holds** | against a **live Atlas cluster**, because this one cannot run anywhere else |
 
-Three of the four files need no MongoDB, and that is not a convenience. A
+That last row is worth its ninety seconds. Atlas Local registers no embedding
+models, so it *declines* an `auto_embed` declaration and falls back to a
+client-supplied vector — a test that accepted the fallback would assert the
+opposite of what it claims. Against a real cluster the application never
+computes a vector at all, the index owns the encoding, and the expired hit is
+still refused on the way out. Point it at your own cluster with
+`VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
+
+Three of the eight files need no MongoDB, and that is not a convenience. A
 per-document check that cannot run without a database is one that cannot move
 to a wire — so if that ever stops being true, the architecture has quietly
-changed.
+changed, and CI runs those three in a step with no database to make it
+obvious.
 
 The suite is checked against sabotage rather than trusted: disabling the
-delete rewrite, the tenant egress check, or refusal itself each turn it red.
+delete rewrite, the tenant egress check, the tenant *shape* check, cascade, or
+refusal itself each turns it red.
 
 Known gaps, stated rather than discovered:
 

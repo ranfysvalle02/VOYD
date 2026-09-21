@@ -146,6 +146,8 @@ module = ["voyageai.*", "numpy.*"]
 follow_imports = "skip"
 
 [tool.pytest.ini_options]
+# The engine is async; `auto` means a test does not have to say so twice.
+asyncio_mode = "auto"
 testpaths = ["tests"]
 # `scanner` is a second distribution with no dependencies and no import of
 # `voyd`; putting it on the path is what lets a test reach it without the

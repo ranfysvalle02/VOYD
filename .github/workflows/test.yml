@@ -81,9 +81,26 @@ jobs:
           print('wheel: the policy vocabulary imports, the cut stayed cut')"
 
       - name: End to end, real driver through a real boundary
+        # Atlas Local is a real mongod and a real mongot, not a mock. The
+        # server-side embedding test skips here and runs in the step below,
+        # because Atlas Local registers no models -- it *declines* an
+        # `auto_embed` declaration, and a test that accepted the fallback
+        # would assert the opposite of what it claims.
         env:
           VOYD_TEST_MONGO_URI: mongodb://localhost:27018/?directConnection=true
         run: uv run --no-sync pytest -q tests/
+
+      - name: Server-side embedding, against a real Atlas cluster
+        # The one claim that cannot be checked anywhere else. Gated on the
+        # secret being present so a fork's CI is green rather than red for a
+        # reason it cannot fix -- and skipped loudly rather than silently,
+        # because `auto_embed` is a headline feature.
+        if: ${{ env.VOYD_ATLAS_URI != '' }}
+        env:
+          VOYD_ATLAS_URI: ${{ secrets.VOYD_ATLAS_URI }}
+        run: |
+          uv run --no-sync pytest -q -rs \
+            tests/test_search_refuses_on_the_path_that_bypasses_the_query.py
 
       - name: The examples are the documentation, so they have to run
         env:
