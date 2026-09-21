@@ -23,6 +23,13 @@ handed documents and returns the ones a prompt may see. So this process needs
 no credentials beyond forwarding yours, and adds no round trip. That is the
 same property that makes shadow mode three lines.
 
+**Three exceptions, named here rather than discovered.** `--fan-out` opens
+its own secondary connections; `--key-vault` holds the vault; and `--ensure`
+connects with your credentials to *create* what the policy declares -- the
+one mode in this file that writes schema -- then closes before the listener
+binds. A property with an exception nobody wrote down is not a property,
+which is this package's whole complaint, so they are written down.
+
 **What this is and is not.** It is a demonstration that the boundary is
 portable, and it is deliberately outside `voyd/` -- nothing here is importable
 package surface. It terminates TLS, follows a failover, drains on `SIGTERM`,
@@ -77,6 +84,7 @@ try:
 except ImportError:  # pragma: no cover - the one dependency, and it is pymongo's
     sys.exit("pip install pymongo   (for the bson library)")
 
+import voyd_ensure
 import voyd_fanout
 import voyd_preflight
 import voyd_seal
@@ -3349,6 +3357,31 @@ def _vault_from(args) -> dict | int:
             "collection": collection or "__keys"}
 
 
+def _ensure(args, guards: dict[str, Guard]) -> int:
+    """Build what the policy declares, before serving. 0 to continue.
+
+    Deliberately in front of `_preflight` in `main`, so the ordinary first
+    run is `--ensure app --verify app`: create it, then have a separately
+    written checker refuse to agree it is there. One of those alone is a
+    boot step; the pair is evidence.
+    """
+    try:
+        lines = asyncio.run(voyd_ensure.provision(
+            _vault_uri(args.target), args.ensure, guards, OPTIONS,
+            wait_s=args.ensure_wait))
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"voyd-wire: --ensure could not build the policy's schema "
+              f"({type(exc).__name__}: {exc}). Nothing was served, because "
+              f"a boundary enforcing a policy whose indexes do not exist "
+              f"refuses correctly and ranks badly, one query at a time",
+              file=sys.stderr)
+        return 4
+    for line in lines:
+        print(line, flush=True)
+    print(flush=True)
+    return 0
+
+
 def _preflight(args, guards: dict[str, Guard]) -> int:
     """Ask before serving. Returns an exit code, 0 to continue.
 
@@ -3500,6 +3533,28 @@ def main(argv: list[str] | None = None) -> int:
                          "rung that gets you aws/azure/gcp/kmip, where "
                          "destroying the master key is somebody else's "
                          "audited operation")
+    ap.add_argument("--ensure", metavar="DB", default=None,
+                    help="before serving, create what the policy file "
+                         "declares in this database: the collection, a TTL "
+                         "index behind every deadline(), an index leading "
+                         "with every tenant(), and a vector index the "
+                         "server embeds for every auto_embed(). The one "
+                         "mode that writes -- it uses your credentials and "
+                         "closes its connection before the listener binds. "
+                         "Idempotent, so it is safe on every boot. Pair it "
+                         "with --verify, which is the same declaration read "
+                         "by different code that creates nothing")
+    ap.add_argument("--ensure-wait", metavar="SECONDS", type=float,
+                    default=90.0,
+                    help="how long --ensure waits for a search index to "
+                         "become queryable. mongot builds asynchronously "
+                         "and a query against a half-built index returns "
+                         "no rows rather than an error, so the wait is the "
+                         "difference between a clean first run and a "
+                         "confusing one (default: 90)")
+    ap.add_argument("--ensure-only", action="store_true",
+                    help="run --ensure and exit without serving, for a "
+                         "deploy step that is not the process that serves")
     ap.add_argument("--verify", metavar="DB", default=None,
                     help="before serving, ask the cluster whether it "
                          "matches the policy file: a TTL index behind every "
@@ -3557,13 +3612,23 @@ def main(argv: list[str] | None = None) -> int:
         vault_spec = _vault_from(args)
         if isinstance(vault_spec, int):
             return vault_spec
+        if args.ensure_only and not args.ensure:
+            print("voyd-wire: --ensure-only needs --ensure DB naming the "
+                  "database to build", file=sys.stderr)
+            return 2
+        if args.ensure:
+            code = _ensure(args, guards)
+            if code:
+                return code
+            if args.ensure_only and not args.verify:
+                return 0
         if args.verify_only and not args.verify:
             print("voyd-wire: --verify-only needs --verify DB naming the "
                   "database to check", file=sys.stderr)
             return 2
         if args.verify:
             code = _preflight(args, guards)
-            if code or args.verify_only:
+            if code or args.verify_only or args.ensure_only:
                 return code
         if args.workers < 1:
             print("voyd-wire: --workers must be at least 1", file=sys.stderr)

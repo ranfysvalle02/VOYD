@@ -3,7 +3,7 @@
 
 A policy file is a set of claims about a cluster this process does not own:
 *there is a TTL index on `expire_at`*, *the vector index embeds `body` with
-voyage-3*, *the sealed fields are refused as plaintext by the server*. Every
+voyage-4*, *the sealed fields are refused as plaintext by the server*. Every
 one of those can be false, and when one is false nothing says so -- the
 boundary keeps enforcing a policy that the storage underneath it is not
 holding up.
@@ -19,7 +19,7 @@ docstring is the argument for this file:
     A version floor is a claim about software this package does not ship,
     with no expiry and nobody responsible for it.
 
-`auto_embed("voyage-3")` in a voydfile is a claim about software this package
+`auto_embed("voyage-4")` in a voydfile is a claim about software this package
 does not ship, with no expiry and nobody responsible for it. So it is asked
 rather than assumed.
 
@@ -55,7 +55,7 @@ it prevents.
 **Fatal** is reserved for a declaration that *contradicts* what is there,
 because the boundary will then enforce a policy the cluster cannot satisfy
 and it will do it one query at a time. A collection declared
-`auto_embed("voyage-3")` whose index is an ordinary vector index is the clear
+`auto_embed("voyage-4")` whose index is an ordinary vector index is the clear
 case: every client-supplied `queryVector` is refused -- correctly, by the
 declaration -- against an index that has no other way to be queried. That is
 a total outage for that collection, discovered by users, and it is better to

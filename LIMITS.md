@@ -652,7 +652,7 @@ the guarded side only.
 
 ## 4. Coverage
 
-415 tests, ~7,168 lines, against 8,220 lines of `voyd/` and 6,354 of
+433 tests, ~7,686 lines, against 8,220 lines of `voyd/` and 6,601 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -1081,9 +1081,14 @@ declaration and silently falls back to expecting a client-supplied vector.
 Anything testing server-side embedding locally is testing the opposite of
 what it claims.
 
-**The embedding model list moves.** `voyage-3` was dropped; the server
-reports the supported set in its own error, which is the most useful error
-message in this stack.
+**The embedding model list moves.** `voyage-3` is the example: this
+repository named it everywhere until Atlas stopped registering it, and a
+policy file is a *claim about software this package does not ship*. The
+server reports the supported set in its own error, which is the most
+useful error message in this stack -- and the reason `--verify` asks the
+cluster instead of trusting the declaration. Everything here now says
+`voyage-4`, which will also be wrong one day; the check is what does not
+go stale.
 
 **A collection must exist before you can index it.** Atlas answers "Error
 retrieving collection UUID," which reads like a permissions problem.
@@ -1091,6 +1096,36 @@ retrieving collection UUID," which reads like a permissions problem.
 **`.primary` is `None` on an undiscovered topology.** The driver connects
 lazily. Ping first, or you silently select whichever node DNS returned —
 which on a replica set reads perfectly and rejects every write.
+
+---
+
+## 6b. What the proxy still cannot do for itself
+
+**Caller-scoped rules do not run on the wire.** `restricted_to()` and the
+clearance rule declare `needs_caller`, and this process holds no caller, so
+`expressible_clauses` returns `None` for them and a reduction on such a
+collection is refused rather than answered. The per-document path has the
+same gap: `Guard.filter` passes no claims.
+
+This is the last thing standing between the proxy and being the only front
+door, and the hard half is already built for a different reason. The
+boundary reads the client's authenticated identity off the SCRAM handshake
+for the fan-out check (`authenticating`), and `Conversation.ask_primary`
+runs a command *on the client's own connection* -- "the socket, the
+authentication and the identity are all the client's". `connectionStatus`
+answered on that connection returns `authenticatedUserRoles`, which is the
+server's account of who this is rather than a claim the client asserted.
+That distinction is the whole design constraint: `for_caller` in
+`admission/core.py` already says a handle that believed
+`{"clearance": "secret"}` because it was passed one "would be an
+authorisation system whose only input is the attacker's".
+
+What is missing is not the idea, it is the plumbing: `ask_primary` exists
+only on the fan-out `Conversation`, and the plain path -- the default, the
+one most connections take -- has no way to ask anything. Doing this
+properly means giving the plain path the same primitive, deciding where a
+role becomes a claim, and caching the answer per connection rather than
+per read.
 
 ---
 

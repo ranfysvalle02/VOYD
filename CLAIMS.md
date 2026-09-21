@@ -44,6 +44,8 @@ of fifty and asserted a page of one, and it passed under sabotage. See
 | It survives hostile conditions — backpressure, resets mid-reply, garbage on the port, an upstream restart | `tests/test_the_boundary_survives_hostile_conditions.py` |
 | It scales across cores without the counting getting looser | `tests/test_the_boundary_scales_without_lying.py` |
 | It says what it did, while it is still running | `tests/test_the_boundary_says_what_it_is_doing.py` |
+| The vector dies with the fact: an erasure through the wire nulls every declared derived encoding, because an embedding is a lossy copy of the text and not a pointer to it | `tests/test_the_vector_dies_with_the_fact.py` |
+| The proxy builds what it enforces — `--ensure` creates the collection, the TTL index, the tenant index and the server-embedded vector index the policy declares, and `--verify`, written separately, then has nothing to report | `tests/test_the_proxy_provisions_what_it_enforces.py` |
 | The secondary ranks and the primary permits, so replication lag never becomes a second delete-is-a-wish window | `tests/test_the_boundary_ranks_on_a_replica_and_asks_the_primary.py` |
 
 ## Erasure

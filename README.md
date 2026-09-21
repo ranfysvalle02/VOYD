@@ -58,7 +58,7 @@ So this repository applies it to itself, and not as a slogan:
 - **[CLAIMS.md](CLAIMS.md)** maps every guarantee to the file that would go
   red if it stopped holding. The mapping is checked in both directions by
   `tests/test_every_claim_names_its_evidence.py` — a claim with no test, or
-  a test no claim points at, fails the suite. Currently 25 claims, 25 files,
+  a test no claim points at, fails the suite. Currently 27 claims, 27 files,
   and a bijection.
 - **[LIMITS.md](LIMITS.md)** counts this project's own defects, names its
   own bad numbers, and opens with the one that matters: nobody has used this
@@ -314,7 +314,7 @@ class Notes:
     expire_at = deadline()
     forgotten = revocable()
     tenant_id = tenant()
-    body      = auto_embed("voyage-3")     # mongot embeds this, both ways
+    body      = auto_embed("voyage-4")     # mongot embeds this, both ways
 ```
 
 A client that still sends its own `queryVector` has put the embedder back,
@@ -325,7 +325,7 @@ this boundary exists for. So it is refused by name rather than ranked:
   db.notes.aggregate([{"$vectorSearch": {"queryVector": [...]}}])
 
   -> voyd-wire refuses a client-supplied queryVector on 'notes': this
-     collection declares auto_embed='voyage-3', so the index holds text
+     collection declares auto_embed='voyage-4', so the index holds text
      the server embedded and a vector computed anywhere else is a hit in
      a different space. Comparing them does not fail, it returns a
      confident score for the wrong documents. Send $vectorSearch.query
@@ -345,8 +345,8 @@ beside the codec and the boundary itself. Run it:
 
 ### Two declarations of one thing have to agree
 
-`embedded_with("voyage-3")` beside `auto_embed("voyage-3.5")` is refused when
-the file is **loaded**. One says *refuse any vector not from voyage-3*; the
+`embedded_with("voyage-4")` beside `auto_embed("voyage-3.5")` is refused when
+the file is **loaded**. One says *refuse any vector not from voyage-4*; the
 other says *the server will produce them with voyage-3.5*. Every document the
 index embedded would be refused by the rule sitting next to it, and the
 collection would read as empty — which is the kind of wrong that looks like a
@@ -507,7 +507,7 @@ still open, is [LIMITS.md](LIMITS.md) §5.
 
 A voydfile is a set of claims about a cluster this process does not own:
 *there is a TTL index on `expire_at`*, *the vector index embeds `body` with
-voyage-3*, *the server refuses plaintext in this sealed field*. Every one can
+voyage-4*, *the server refuses plaintext in this sealed field*. Every one can
 be false, and when one is false nothing says so — the boundary goes on
 enforcing a policy the storage underneath it is not holding up.
 
@@ -515,7 +515,7 @@ enforcing a policy the storage underneath it is not holding up.
 deployment could do, and both times it inferred it was wrong for months
 without a log line. Its own conclusion is the argument: **a version floor is
 a claim about software this package does not ship, with no expiry and nobody
-responsible for it.** `auto_embed("voyage-3")` is exactly that. So it is
+responsible for it.** `auto_embed("voyage-4")` is exactly that. So it is
 asked:
 
 ```bash
@@ -524,7 +524,7 @@ python tools/voyd_wire.py --config voydfile.py --target "$ATLAS" \
 ```
 
 ```
-voyd-wire: preflight FATAL [notes.auto_embed]: auto_embed('voyage-3') on
+voyd-wire: preflight FATAL [notes.auto_embed]: auto_embed('voyage-4') on
     'body' but no search index declares an 'autoEmbed' field on that path.
     The index present needs a client-supplied vector and the boundary
     refuses exactly those, so every vector read here is an error

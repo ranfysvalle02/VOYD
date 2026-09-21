@@ -61,11 +61,11 @@ class E:
     held       = holdable()
     tenant_id  = tenant()
     audience   = restricted_to("groups")
-    model      = embedded_with("voyage-3")
+    model      = embedded_with("voyage-4")
     tokens     = budget(8000)
     chunk      = distinct()
     secret     = sealed()
-    body       = auto_embed("voyage-3")
+    body       = auto_embed("voyage-4")
 """))["everything"]
     assert spec.tenant == "tenant_id"
     assert [type(r).__name__ for r in spec.rules] == [
@@ -77,7 +77,7 @@ class E:
         "reaches a read path which never decrypted it is refused by name "
         "rather than serialised into a prompt as a Binary pretending to "
         "be text")
-    assert OPTIONS["everything"]["auto_embed"] == {"body": "voyage-3"}
+    assert OPTIONS["everything"]["auto_embed"] == {"body": "voyage-4"}
 
 
 @pytest.mark.parametrize("body,why", [

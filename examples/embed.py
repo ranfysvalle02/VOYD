@@ -59,7 +59,7 @@ class Notes:
     expire_at = deadline()
     forgotten = revocable()
     tenant_id = tenant()
-    body      = auto_embed("voyage-3")
+    body      = auto_embed("voyage-4")
 
 # An ordinary guarded collection beside it, with no declaration about who
 # embeds. A client vector is correct here, and must keep working -- without
@@ -113,7 +113,7 @@ def main() -> None:
         client[DB].archive.insert_one(
             {"tenant_id": "acme", "body": "last quarter's notes"})
 
-        print("\n  One word in the policy file:  body = auto_embed('voyage-3')")
+        print("\n  One word in the policy file:  body = auto_embed('voyage-4')")
         print("  The application is not edited. No driver is told.\n")
 
         print("  A client computes its own vector and asks for a ranking:")
@@ -130,7 +130,7 @@ def main() -> None:
             # the whole reply to the exception text, so printing that would
             # show this message twice and bury the point of the example.
             said = (refused.details or {}).get("errmsg", str(refused))
-            assert "voyd-wire" in said and "voyage-3" in said
+            assert "voyd-wire" in said and "voyage-4" in said
             print("    -> refused, and told which form works:\n")
             for sentence in said.split(". "):
                 if sentence.strip():

@@ -7,7 +7,7 @@ Its docstring is the argument this file is built on:
     A version floor is a claim about software this package does not ship,
     with no expiry and nobody responsible for it.
 
-`auto_embed("voyage-3")` in a voydfile is a claim about software this package
+`auto_embed("voyage-4")` in a voydfile is a claim about software this package
 does not ship, with no expiry and nobody responsible for it. So is *there is
 a TTL index on `expire_at`*, and *the server refuses plaintext in this sealed
 field*. Every one can be false while the boundary goes on enforcing a policy
@@ -17,8 +17,8 @@ the storage underneath it is not holding up.
 part that decides is `audit()` -- index listings in, findings out -- so every
 branch is tested against the exact documents a cluster would have returned,
 *including the ones no cluster here can produce*. Atlas Local registers no
-embedding models: it rejects `auto_embed("voyage-3")` at index creation with
-`CanonicalModel: voyage-3 not registered yet, supported models are: []`. The
+embedding models: it rejects `auto_embed("voyage-4")` at index creation with
+`CanonicalModel: voyage-4 not registered yet, supported models are: []`. The
 happy path for server-side embedding is therefore untestable against anything
 in this repository's docker-compose, and a pure analysis function is what
 makes it testable at all.
@@ -57,7 +57,7 @@ def search_index(*fields, name="engine_vector_index"):
             "latestDefinition": {"fields": list(fields)}}
 
 
-AUTO = {"type": "autoEmbed", "path": "body", "model": "voyage-3"}
+AUTO = {"type": "autoEmbed", "path": "body", "model": "voyage-4"}
 VECTOR = {"type": "vector", "path": "embedding", "numDimensions": 4}
 
 
@@ -147,7 +147,7 @@ def test_auto_embed_with_no_search_index_at_all_is_fatal():
     instead. That is a total outage for the collection, so it is better to
     not start than to discover it one query at a time.
     """
-    found = audit(pf.Declared("notes", auto_embed={"body": "voyage-3"}))
+    found = audit(pf.Declared("notes", auto_embed={"body": "voyage-4"}))
     assert by_check(found, "auto_embed").severity == pf.FATAL
     assert "no search index at all" in by_check(found, "auto_embed").detail
 
@@ -158,7 +158,7 @@ def test_an_index_that_wants_a_client_vector_is_fatal():
     The index needs exactly the thing the boundary refuses. This is the
     self-inflicted outage the whole preflight was written for.
     """
-    found = audit(pf.Declared("notes", auto_embed={"body": "voyage-3"}),
+    found = audit(pf.Declared("notes", auto_embed={"body": "voyage-4"}),
                   search=(search_index(VECTOR),))
     one = by_check(found, "auto_embed")
     assert one.severity == pf.FATAL
@@ -168,8 +168,8 @@ def test_an_index_that_wants_a_client_vector_is_fatal():
 def test_an_autoembed_field_on_a_different_path_does_not_count():
     """Embedding the title does not make the policy's claim about the body
     true, and a check matching on type alone would say it did."""
-    elsewhere = {"type": "autoEmbed", "path": "title", "model": "voyage-3"}
-    found = audit(pf.Declared("notes", auto_embed={"body": "voyage-3"}),
+    elsewhere = {"type": "autoEmbed", "path": "title", "model": "voyage-4"}
+    found = audit(pf.Declared("notes", auto_embed={"body": "voyage-4"}),
                   search=(search_index(elsewhere),))
     assert by_check(found, "auto_embed").severity == pf.FATAL
 
@@ -178,14 +178,14 @@ def test_the_model_in_the_index_must_be_the_model_in_the_policy():
     """The finding the whole thing exists for, and it cannot be produced
     locally: Atlas Local registers no models at all.
 
-    An embedding is a (vector, model) pair. A policy naming voyage-3 over
+    An embedding is a (vector, model) pair. A policy naming voyage-4 over
     an index built with voyage-3.5 does not fail at query time -- it
     returns a confident score for the wrong documents, which `rules.py`
     measured at cosine +0.301 for unrelated text against -0.053 for the
     right answer.
     """
     other = {"type": "autoEmbed", "path": "body", "model": "voyage-3.5"}
-    found = audit(pf.Declared("notes", auto_embed={"body": "voyage-3"}),
+    found = audit(pf.Declared("notes", auto_embed={"body": "voyage-4"}),
                   search=(search_index(other),))
     one = by_check(found, "auto_embed")
     assert one.severity == pf.FATAL
@@ -199,12 +199,12 @@ def test_the_model_in_the_index_must_be_the_model_in_the_policy():
 def test_a_matching_autoembed_declaration_is_clean():
     """The happy path, asserted against the document a real Atlas cluster
     returns, on a machine where no such cluster exists."""
-    assert audit(pf.Declared("notes", auto_embed={"body": "voyage-3"}),
+    assert audit(pf.Declared("notes", auto_embed={"body": "voyage-4"}),
                  search=(search_index(AUTO),)) == []
 
 
 def test_the_field_is_found_among_several_and_across_indexes():
-    assert audit(pf.Declared("notes", auto_embed={"body": "voyage-3"}),
+    assert audit(pf.Declared("notes", auto_embed={"body": "voyage-4"}),
                  search=(search_index(VECTOR, name="other"),
                          search_index(VECTOR, AUTO))) == []
 
@@ -275,7 +275,7 @@ def test_only_a_contradiction_is_fatal():
                              tenant="tenant_id", sealed=("text",)))
     assert soft and not pf.fatal(soft)
 
-    hard = audit(pf.Declared("notes", auto_embed={"body": "voyage-3"}))
+    hard = audit(pf.Declared("notes", auto_embed={"body": "voyage-4"}))
     assert pf.fatal(hard)
 
 
@@ -284,7 +284,7 @@ def test_every_finding_carries_a_remedy():
     disables."""
     everything = (
         audit(pf.Declared("n", deadline="expire_at", tenant="tenant_id",
-                          sealed=("text",), auto_embed={"body": "voyage-3"}))
+                          sealed=("text",), auto_embed={"body": "voyage-4"}))
         + audit(pf.Declared("n"), exists=False))
     assert len(everything) == 5
     for finding in everything:
@@ -339,7 +339,7 @@ class Notes:
     forgotten = revocable()
     tenant_id = tenant()
     secret    = sealed()
-    body      = auto_embed("voyage-3")
+    body      = auto_embed("voyage-4")
 
 @guard("plain")
 class Plain:
@@ -359,7 +359,7 @@ class Plain:
     assert notes.deadline == "expire_at"
     assert notes.tenant == "tenant_id"
     assert notes.sealed == ("secret",)
-    assert notes.auto_embed == {"body": "voyage-3"}
+    assert notes.auto_embed == {"body": "voyage-4"}
 
     plain = declared[1]
     assert plain.deadline == "expire_at"
@@ -387,7 +387,7 @@ class Notes:
     expire_at = deadline()
     forgotten = revocable()
     tenant_id = tenant()
-    body      = auto_embed("voyage-3")
+    body      = auto_embed("voyage-4")
 """
 
 
@@ -489,7 +489,7 @@ def test_unreadable_search_indexes_are_not_a_contradiction():
     that its auto_embed declaration was fatally broken -- false, and the
     loudest available way to be false.
     """
-    assert audit(pf.Declared("notes", auto_embed={"body": "voyage-3"}),
+    assert audit(pf.Declared("notes", auto_embed={"body": "voyage-4"}),
                  check_embedding=False) == []
 
 
@@ -503,7 +503,7 @@ def test_the_other_checks_still_run_when_embedding_cannot_be_read():
     """
     found = audit(pf.Declared("notes", deadline="expire_at",
                               tenant="tenant_id",
-                              auto_embed={"body": "voyage-3"}),
+                              auto_embed={"body": "voyage-4"}),
                   check_embedding=False)
     assert checks(found) == {"deadline", "tenant"}
     assert not pf.fatal(found)

@@ -51,7 +51,7 @@ class Notes:
     expire_at = deadline()
     forgotten = revocable()
     tenant_id = tenant()
-    body      = auto_embed("voyage-3")
+    body      = auto_embed("voyage-4")
 """
 
 
@@ -68,14 +68,14 @@ def write(tmp_path, body: str) -> str:
 def test_the_policy_file_declares_who_embeds(tmp_path):
     """One word in a class body, and the boundary knows the index owns it."""
     load(write(tmp_path, POLICY))
-    assert OPTIONS["notes"]["auto_embed"] == {"body": "voyage-3"}
-    assert w._embeds_from(OPTIONS) == {"notes": "voyage-3"}
+    assert OPTIONS["notes"]["auto_embed"] == {"body": "voyage-4"}
+    assert w._embeds_from(OPTIONS) == {"notes": "voyage-4"}
 
 
 def test_two_declarations_of_the_model_must_agree(tmp_path):
     """`embedded_with` and `auto_embed` naming different models is fatal.
 
-    Not a warning. One says *refuse any vector not from voyage-3*, the other
+    Not a warning. One says *refuse any vector not from voyage-4*, the other
     says *the server will produce them with voyage-3.5*, so every document
     the index embeds would be refused by the rule sitting beside it and the
     collection would read as empty. A policy file that produces an empty
@@ -88,7 +88,7 @@ from voyd import guard, deadline, embedded_with, auto_embed
 @guard("notes")
 class Notes:
     expire_at = deadline()
-    model     = embedded_with("voyage-3")
+    model     = embedded_with("voyage-4")
     body      = auto_embed("voyage-3.5")
 """))
 
@@ -117,10 +117,10 @@ class Notes:
     expire_at = deadline()
     tenant_id = tenant()
     text      = sealed()
-    text      = auto_embed("voyage-3")
+    text      = auto_embed("voyage-4")
 """))
     assert OPTIONS["notes"]["sealed"] == ()
-    assert OPTIONS["notes"]["auto_embed"] == {"text": "voyage-3"}
+    assert OPTIONS["notes"]["auto_embed"] == {"text": "voyage-4"}
 
 
 def test_sealing_one_field_and_embedding_another_is_allowed(tmp_path):
@@ -136,17 +136,17 @@ class Notes:
     expire_at = deadline()
     tenant_id = tenant()
     text      = sealed()
-    title     = auto_embed("voyage-3")
+    title     = auto_embed("voyage-4")
 """))
     assert OPTIONS["notes"]["sealed"] == ("text",)
-    assert OPTIONS["notes"]["auto_embed"] == {"title": "voyage-3"}
+    assert OPTIONS["notes"]["auto_embed"] == {"title": "voyage-4"}
 
 
 # --------------------------------------------------------------------------
 # The refusal, with no database anywhere near it
 # --------------------------------------------------------------------------
 
-EMBEDS = {"notes": "voyage-3"}
+EMBEDS = {"notes": "voyage-4"}
 
 
 def vector_search(collection: str, **stage) -> dict:
@@ -214,7 +214,7 @@ def test_the_refusal_names_the_model_and_the_remedy():
     assert answer is not None
     reply = w.decode_op_msg(answer)[1]
     assert reply["ok"] == 0.0
-    assert "voyage-3" in reply["errmsg"]
+    assert "voyage-4" in reply["errmsg"]
     assert "$vectorSearch.query" in reply["errmsg"], (
         "the refusal has to name the form that works, or a caller reads it "
         "as 'vector search is unavailable' and gives up")
@@ -294,7 +294,7 @@ def test_a_plain_driver_cannot_send_its_own_vector(wired):
             "index": "engine_vector_index", "path": "embedding",
             "queryVector": [0.1] * 1024, "numCandidates": 100, "limit": 10}}]))
     said = str(caught.value)
-    assert "voyd-wire" in said and "voyage-3" in said
+    assert "voyd-wire" in said and "voyage-4" in said
 
 
 @pytest.mark.needs_mongo
@@ -320,7 +320,7 @@ def test_the_boundary_says_who_embeds_at_startup(tmp_path):
                 break
         said = "".join(lines)
         assert "embedded by the server" in said
-        assert "auto_embed='voyage-3'" in said
+        assert "auto_embed='voyage-4'" in said
         assert "queryVector" in said
     finally:
         proc.terminate()
