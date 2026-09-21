@@ -12,12 +12,10 @@ That symmetry is a checkable claim rather than a design note:
 sequence against a real `mongod`. If the two ever drift, one of them is
 wrong and the pair says so.
 
-Why it lives here rather than in the package. Provisioning was reachable
-only through `Engine.ensure()`, which meant the proxy -- the thing that
-*is* the boundary -- could read a policy file, enforce every word of it,
-and not create a single index it depended on. One artifact declaring the
-policy and a second, different artifact required to build it is the seam
-this repository keeps finding defects in.
+Why it lives beside the proxy. One artifact declares the policy and the
+same artifact builds what the policy depends on. Splitting those -- a
+boundary that can enforce every word of a file and not create a single
+index it needs -- is the seam this repository keeps finding defects in.
 
 **It is the one mode that writes.** Everything else this proxy does is
 either pure or a rewrite of somebody else's bytes; `--ensure` issues
@@ -32,11 +30,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-# Nothing here re-implements a schema. Each of these already knew how to
-# build its own, behind an orchestrator the proxy could not reach -- so
-# what this module contributes is the twenty lines of orchestration and
-# the translation from a policy file's vocabulary into theirs. Two
-# spellings of `createSearchIndex` is exactly the drift being avoided.
+# Nothing here re-implements a schema. Each of these knows how to build
+# its own, so what this module contributes is the orchestration and the
+# translation from a policy file's vocabulary into theirs. Two spellings
+# of `createSearchIndex` is exactly the drift being avoided.
 from voyd.engine.capabilities import detect
 from voyd.engine.expiry import Expiry, ExpirySpec
 from voyd.engine.search import SearchEngine, SearchSpec
@@ -70,7 +67,7 @@ def search_specs(guards: Mapping, options: Mapping) -> dict[str, SearchSpec]:
             # than an ObjectId, and the lexical leg rejects the query when
             # the declared type does not match what is stored. `token` is
             # the one that is right for the ids people actually put in a
-            # voydfile; an ObjectId tenant wants the library's own spec.
+            # voydfile; an ObjectId tenant wants `tenant_type='objectId'`.
             tenant_type="token" if tenant else "objectId",
         )
     return out

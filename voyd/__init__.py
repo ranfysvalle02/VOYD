@@ -27,19 +27,17 @@ No code. Any driver in any language pointed at that port cannot read a
 forgotten fact, because the boundary is not something a caller can forget
 to use -- there is nothing to reach past.
 
-This package used to ship a second front door, an ``Engine`` handle you
-constructed and called ``find()`` on. It is gone. Two doors onto one
-guarantee is the gap this project exists to make visible, and several
-claims were held up only by the door the README did not recommend. What
-stays importable is the policy vocabulary above -- ``guard``, ``deadline``,
-``revocable`` and the rest -- because the proxy loads it, plus the parts an
-operator's tools provision with. Nothing in ``voyd/`` is application-facing.
+What this package exports is the vocabulary above -- ``guard``,
+``deadline``, ``revocable`` and the rest -- because the proxy loads your
+policy file, and the parts ``--ensure`` and ``--verify`` provision with.
+There is nothing here for an application to import and no handle for it to
+hold: a boundary you can forget to route a read through is not one.
 
-``reachable()`` is pure -- no database, no connection, no I/O -- and that is
-the property that made the check movable to a wire at all. The proxy opens
-one connection of its own, and only when a policy declares ``lineage_field``:
-making a refusal reach what was derived from a fact is a write the caller
-did not issue, so it is not put on the caller's session. See ``LIMITS.md``
+The check itself is pure -- no database, no connection, no I/O -- which is
+what lets it run inside a proxy at all. The proxy opens one connection of
+its own, and only when a policy declares ``lineage_field``: making a
+refusal reach what was derived from a fact is a write the caller did not
+issue, so it does not go on the caller's session. See ``LIMITS.md``
 section 6b.
 
 The pieces, and everything else is mechanics:

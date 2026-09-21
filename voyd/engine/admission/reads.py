@@ -1,27 +1,24 @@
-"""Reads, where refusal is the default and there is no unfiltered door.
+"""Reads that decrypt, for a collection whose fields are sealed.
 
-Every method here ends at ``_admit``. ``find``/``find_one``/``count`` also get
-the cheap half -- the rule pushed into the collection query -- but a
-``$vectorSearch`` hit never passes through that, which is why ``search`` and
-``saturate`` are on the handle at all rather than left to each caller.
+``find`` and ``find_one`` get both halves of the guarantee: the rule
+pushed into the collection query, *and* the per-document check on the way
+out. A read that only pushed down would be narrower than the guarantee,
+because a pushed-down clause cannot ask every question a rule can.
+``match`` hands the filter to an aggregation, which is the one read shape
+this handle cannot wrap.
 
-This module is the *only* one in the package permitted to call the engine's
-search primitive, and ``tests/test_no_module_reaches_past_the_handle.py``
-enforces that by name. Before the split that exemption covered a
-2,393-line file; now it names only the capability whose job is the read path.
+These exist for the path the proxy cannot serve: a sealed collection is
+read through a client that decrypts, and decryption happens in a process
+holding the keys. Everything else reads through the boundary.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
-from ..errors import require_tenant
-from .reasons import REACHABLE, REFUSED, UNKNOWN
 from .receipts import Page
-from .spec import why_refused
-from ..time import aware, now
+from ..time import now
 
 log = logging.getLogger("engine.admission")
 
@@ -48,209 +45,6 @@ class ReadPath(_Composed):
     on the core is the named escape hatch, and it is a different object so
     that a review can grep for it.
     """
-
-    async def search(self, vector, *, text: str | None = None,
-                     limit: int = 5, filters: dict | None = None,
-                     when: datetime | None = None,
-                     rounds: int = 3) -> Page:
-        """Search this collection and admit the hits. The whole read, one call.
-
-        This exists because the engine's own ``search()`` is a **primitive,
-        not a read path**: it returns what the index ranked. Deadlines are
-        deliberately not pushed into the vector index -- the measurements are
-        in ``search.py`` -- so a hit arriving from ``$vectorSearch`` has never
-        been filtered by anything, and admitting it is the caller's job.
-
-        Which is precisely the shape this module was written to abolish. The
-        original sin was six read paths that each had to remember a deadline
-        filter; replacing it with two read paths that each had to remember to
-        wrap a search is the same bug with a smaller number. Both of them did
-        remember, and both wrote out their own fetch-budget guess, and the
-        two guesses were the same wrong constant -- which is what a
-        convention looks like just before it fails a third time.
-
-        So the handle owns the query as well as the rule. There is now one
-        named way to search a collection that refuses things, and reaching
-        past it means naming the primitive on the engine, which a review can
-        grep for and CI asserts no module in this package does.
-        """
-        if self.engine is None:
-            raise RuntimeError(
-                f"this {self.collection} handle was built without an engine, "
-                "so it cannot search. Build it with engine.admission(...) / "
-                "model(...).forgettable(), or call saturate() with your own "
-                "fetch")
-
-        # The path that matters most: a `$vectorSearch` hit never passed
-        # through a collection query, so before this the tenant reached it
-        # only as an index filter. Binding the scope here puts the same value
-        # on the per-document check, and an index filter that ever disagrees
-        # with it now costs a counted `off_scope` refusal instead of a row
-        # from another customer.
-        me = self._scoped_for(filters)
-
-        async def fetch(n: int) -> list[dict]:
-            # Size the candidate pool from what this collection has actually
-            # been throwing away, rather than from a constant somebody
-            # guessed. `$vectorSearch` draws `numCandidates` and returns
-            # `limit`; if half of what it ranks here is already forgotten,
-            # a pool sized for `limit` comes back half empty and `saturate`
-            # pays for another round trip to discover that.
-            #
-            # This is the one number no other component can compute. The
-            # index does not know the deadline. The driver does not. Only
-            # the thing doing the refusing knows the refusal rate, which
-            # makes pool size a boundary concern rather than a tuning knob.
-            #
-            # It only ever raises the ask, and refill is still what makes
-            # the page correct -- this just stops it needing three trips.
-            over = me.receipts_log.over_fetch()
-            pool = max(50, int(n * 10 * over))
-            return await me.engine.search(me.collection, vector,
-                                          text=text, limit=n,
-                                          filters=filters, candidates=pool)
-
-        return await me.saturate(fetch, limit=limit, when=when,
-                                 rounds=rounds)
-
-    async def saturate(self, fetch, *, limit: int,
-                       when: datetime | None = None,
-                       rounds: int = 3) -> Page:
-        """Fill a page of ``limit`` reachable documents, refusal notwithstanding.
-
-        Enforcing the deadline on read -- rather than in the vector index,
-        for the reasons measured in ``search.py`` -- means forgotten
-        documents are fetched and then dropped. They spend the fetch budget.
-        Both read paths in this package knew that and both bought the same
-        fixed insurance: ask for ``limit * 2``, admit, slice. Which is a
-        guess, and a guess that fails in the direction this repository
-        otherwise refuses to fail in:
-
-            40 expired rows outranking 6 live ones, limit=5  ->  0 hits
-
-        Zero. Not "fewer". The live documents were indexed, queryable and
-        present, and the caller was handed an empty list that is
-        indistinguishable from "nothing matched" -- the same
-        fewer-rows-instead-of-an-error shape that this codebase blocks
-        startup over and refuses to let a rebuilding index produce. Refusal
-        is supposed to cost the *forgotten* document its place, not the page.
-
-        So the budget is not a constant. ``fetch(n)`` is asked for candidates
-        in ranking order; each round re-asks for more and re-admits the
-        superset, until the page is full or the candidates run out. The next
-        size is derived from the refusal rate just observed rather than
-        doubled blindly -- at a 90% refusal rate, doubling takes four rounds
-        to find what one round of arithmetic gets in one.
-
-        Four things end the loop, and all four are honest:
-
-        1. the page is full;
-        2. ``fetch`` returned fewer rows than asked for -- there is nothing
-           further down the ranking. This also covers the search tier's own
-           ceiling (``MAX_LIMIT``): a request past it comes back short, which
-           is the truth from where this sits, since no more are reachable;
-        3. a cumulative budget is spent. The page is short but complete:
-           lower-ranked candidates have no room, so another fetch cannot help;
-        4. ``rounds`` is spent. A scope where *everything* is forgotten must
-           not turn one query into an unbounded sequence of them.
-
-        Only case 4 sets ``page.starved``, and the distinction is the
-        interesting part. Case 2 can also leave the page short, and that
-        short page is *complete*: the candidates are exhausted, so nothing is
-        being withheld and there is nothing to go back for, however many
-        refusals it took to establish. Case 3 is the opposite -- candidates
-        remained and this page could not reach them -- and it is the only
-        state a caller needs to treat as partial.
-
-        Case 2 does swallow one thing worth naming: a request past the search
-        tier's ``MAX_LIMIT`` comes back clamped, which is indistinguishable
-        here from "that is all there is". It is reported as complete because
-        from this layer it is -- no further document is reachable by any
-        query this engine will issue. A deployment that needs to see past
-        that ceiling needs a bigger ceiling, not a different flag.
-        """
-        self._begin_read()
-        # One instant for the whole page, frozen before the first fetch: every
-        # hit is admitted against the same "now", so a receipt or a recorded
-        # use can commit to a single evaluation time rather than a smear.
-        evaluated_at = aware(when) if when is not None else (self._as_of or now())
-        want = max(1, int(limit))
-        rounds = max(1, int(rounds))
-        asked = want * 2          # the cheap first guess, unchanged
-        kept: list[dict] = []
-        tally: dict[str, int] = {}
-        examined = 0
-        exhausted = False
-
-        tab = None
-        for attempt in range(rounds):
-            candidates = list(await fetch(asked))
-            examined = len(candidates)
-            kept, tally, tab, redacted = self._classify(
-                candidates, when=evaluated_at, max_kept=want)
-            # Fewer rows than asked for: there is nothing further down the
-            # ranking, so whatever the page holds is the whole answer.
-            exhausted = examined < asked
-            # A spent budget is a fourth honest way to be done: the page is
-            # short because the token ceiling cut the ranking, not because a
-            # round ran out. Refilling would fetch lower-ranked candidates the
-            # budget has no room for anyway, so stop -- and this is complete,
-            # not starved.
-            budget_done = tab is not None and tab.exhausted
-            if len(kept) >= want or exhausted or budget_done:
-                break
-            if attempt + 1 < rounds:
-                asked = self._next_ask(asked, want, kept=len(kept),
-                                       examined=examined)
-
-        budget_done = tab is not None and tab.exhausted
-        hits = kept[:want]
-        if self.seals:
-            # Decrypted after the page is chosen, so a document whose key is
-            # gone costs one refusal rather than a wasted round of refill --
-            # and it is counted in the same tally, under `unrecoverable`,
-            # beside the deadline and the revocation.
-            hits, sealed_tally = await self._unsealed(hits)
-            for reason, n in sealed_tally.items():
-                tally[reason] = tally.get(reason, 0) + n
-        self.receipts_log.record_many(tally)
-        # Exact here, unlike `find`: a `$vectorSearch` hit passed through no
-        # query, so every candidate was either admitted or counted. This is
-        # what `over_fetch()` reads back on the next search.
-        self.receipts_log.observe(examined, len(hits))
-        page = Page(hits, refused=tally, examined=examined, redacted=redacted,
-                    spent=tab.spent if tab is not None else 0,
-                    starved=len(kept) < want and not exhausted and not budget_done,
-                    evaluated_at=evaluated_at,
-                    policy_revision=self.spec.policy_revision,
-                    snapshot_complete=True)
-        if page.starved:
-            # Worth a line at WARNING: it means a caller was told less than
-            # the truth, which no amount of correct filtering makes fine. And
-            # only here -- a short-but-complete page used to log this too,
-            # which is how a useful warning becomes one people filter out.
-            log.warning(
-                "page starved on %s: wanted %d, admitted %d of %d examined, "
-                "refused %s", self.collection, want, len(kept), examined, tally)
-        return page
-
-    @staticmethod
-    def _next_ask(asked: int, want: int, *, kept: int, examined: int) -> int:
-        """How many candidates to ask for next, from the rate just measured.
-
-        The observed hit rate is the best available estimate of the one
-        further down the ranking, so aim at the size that *would* have filled
-        the page, with headroom. A round that admitted nothing has no rate to
-        extrapolate from, so it falls back to growing hard -- that case is
-        either a wholly forgotten scope (ends on ``rounds``) or a deep run of
-        expired rows (ends when it clears them).
-        """
-        if kept == 0:
-            return asked * 4
-        needed = want / (kept / max(examined, 1))
-        # Never shrink, and always ask for strictly more than last time, or
-        # the loop re-issues an identical query and calls it progress.
-        return max(asked + want, int(needed * 1.5) + 1)
 
     # ---- reads: refusal is the default ---------------------------------
 
@@ -364,66 +158,3 @@ class ReadPath(_Composed):
                 "every break-glass read is re-authorised and counted")
         self._begin_read()
         return self._query(filters)
-
-    async def count(self, filters: dict | None = None) -> int:
-        """How many facts satisfy the document rules, before a page budget.
-
-        Counted with the same pushed-down clauses the reads use, so deadlines,
-        revocations, clearance and compiled policy agree with ``find``. A
-        cumulative ``Budget`` deliberately does not: count has no ranking, no
-        page and no running tab, so "how many fit" is undefined until a read
-        orders the documents. This reports how many *could be considered*;
-        ``Page.spent`` reports what the ordered read reserved for its selected
-        prefix.
-        """
-        self._begin_read()
-        return await self.db[self.collection].count_documents(
-            self._query(filters))
-
-    async def exists(self, filters: dict | None = None) -> bool:
-        """Whether any document satisfies the policy rules.
-
-        Like ``count``, this is a cardinality question with no ordered prompt
-        page, so a cumulative budget does not apply. ``find_one`` is a content
-        read and does apply it; keeping the two paths separate makes that
-        distinction explicit rather than accidental.
-        """
-        return await self.count(filters) > 0
-
-    # ---- what was reachable then ---------------------------------------
-
-    async def reachability_at(self, filters: dict,
-                              when: datetime) -> tuple[str, str]:
-        """Was this document reachable at ``when``? ``(verdict, why)``.
-
-        Three answers, and the third is the one the API exists to make
-        unmissable:
-
-        ``reachable``    the row is here and no rule refused it then.
-        ``refused``      the row is here and something did. ``why`` names it.
-        ``unknown``      **the row is gone.** Erased on the deadline, by
-                         the reaper, weeks ago. Nothing survives from
-                         which to answer.
-
-        Returning ``refused`` for a row that has been erased is the
-        confident wrong answer this whole codebase exists to eliminate --
-        it would let a deployment clear itself of having served a fact by
-        pointing at the absence of the evidence. So the verdict is a
-        string rather than a bool, because a bool has nowhere to put
-        ``unknown`` and every caller would default it to the flattering
-        one.
-        """
-        self._begin_read()
-        when = aware(when)
-        # Fetch by boundary only, not through an admission query. The point of
-        # this method is to classify a surviving row at an instant; letting a
-        # caller-aware clause hide it first turns "present but not cleared"
-        # into UNKNOWN ("no evidence survives"), which is both false and the
-        # flattering answer. The tenant boundary remains non-negotiable.
-        doc = await self.db[self.collection].find_one(
-            require_tenant(self.collection, self.tenant, filters))
-        if doc is None:
-            return UNKNOWN, ("no row survives, so nothing here can say. It "
-                             "may have been reachable and later erased")
-        reason = why_refused(doc, self.spec, when=when, caller=self._caller)
-        return (REFUSED, reason) if reason else (REACHABLE, "")

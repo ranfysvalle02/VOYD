@@ -55,11 +55,10 @@ async def sealed():
     name = f"voyd_test_seal_{uuid.uuid4().hex[:8]}"
     db = client[name]
     try:
-        # Assembled from the parts rather than through `Engine`. Sealing is
-        # a keyring plus a spec plus a trait installed on the admission
-        # handle, and `model(...).sealed(...)` was three lines of sugar over
-        # exactly this. The sugar is the front door being removed; the
-        # guarantee underneath it is what these tests are about.
+        # Sealing is a keyring, a spec, and a trait on the admission
+        # handle. Assembled here rather than behind a helper so the three
+        # pieces the guarantee rests on are visible in the test that
+        # asserts it.
         keyring = Keyring(db, KeyringSpec(
             pointer_field="patient",
             protect={"notes": Sealed(("text",))}),

@@ -61,10 +61,10 @@ def test_both_erasure_paths_null_every_declared_derived_field():
     """`marks.py` and `voyd_wire.py` each build this update separately.
 
     The wire one's docstring claims "one definition, used by every verb",
-    and that is true *within* the wire. Across the two front doors there are
-    two definitions, and a derived field destroyed by one and left by the
-    other is a vector that survives its document depending on which door the
-    erasure came through.
+    and that is true *within* the wire. Across the two there are two
+    definitions, and a derived field destroyed by one and left by the other
+    is a vector that survives its document depending on which path the
+    erasure took.
     """
     import voyd_wire as w
 
@@ -129,10 +129,10 @@ def _notes(adb):
         "notes", rules=(Deadline(), revoked())).with_defaults())
 
 
-async def test_revoke_through_the_library_destroys_the_vector(adb):
-    """The other door, and the one whose comment points at a function that
-    does not exist (`marks.py` says "see `_destroy_derived`"; there is no
-    such name in the package). The behaviour is real even though the
+async def test_revoke_destroys_the_vector(adb):
+    """`marks.py` doing it directly, and the one whose comment points at a
+    function that does not exist (it says "see `_destroy_derived`"; there
+    is no such name in the package). The behaviour is real even though the
     signpost is not, and this is what pins it."""
     notes = _notes(adb)
     await adb.notes.insert_many([
@@ -144,9 +144,8 @@ async def test_revoke_through_the_library_destroys_the_vector(adb):
 
     rows = {d["text"]: d async for d in adb.notes.find({})}
     assert rows["forget"]["embedding"] is None, (
-        "revoked through the library and the vector survived -- the same "
-        "erasure through the wire destroys it, which is drift between two "
-        "front doors onto one guarantee")
+        "revoked and the vector survived -- the same erasure through the "
+        "wire destroys it, which is two definitions of forgetting")
     assert rows["keep"]["embedding"] == VEC
 
 

@@ -428,9 +428,9 @@ class AdmissionCore:
         - every terminal read asks the authority for the ``AUDIT`` grant,
           which is the same
           asymmetry ``release`` sits behind: disclosing a forgotten fact is
-          the granting direction, not the withholding one. With no authority
-          attached -- the library default, where the caller *is* the
-          application -- this is a no-op, so an ordinary script is unchanged.
+          the granting direction, not the withholding one. With no
+          authority attached this is a no-op, so an ordinary script is
+          unchanged.
         - every terminal read increments ``including_refused_total`` on
           ``receipts()`` and records the actor/time, so a cached handle cannot
           turn one authorization into unlimited invisible reads. Constructing

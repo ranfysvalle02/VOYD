@@ -7,13 +7,11 @@ this project exists, so it is the one that most needs a test against a real
 `mongot` rather than a mock -- a fake index would only prove the fake was
 filtered.
 
-**And it is driven through the proxy.** The claim is not "a library handle
-filters a ranked hit", it is "a ranked hit is refused before it reaches an
-application that never heard of this package". Those are different
-statements and only the second one is what the README recommends. The
-index is still built with `SearchEngine.ensure_indexes`, which is the same
-code `voyd-wire --ensure` calls -- provisioning is an operator step, not an
-application one.
+**And it is driven through the proxy**, because the claim is that a
+ranked hit is refused before it reaches an application that never heard of
+this package. The index is still built with `SearchEngine.ensure_indexes`,
+the same call `voyd-wire --ensure` makes: provisioning is an operator step,
+not an application one.
 
 Also here because it is the other feature kept through the trim:
 **server-side embedding**. When the index owns the vector, a client-side

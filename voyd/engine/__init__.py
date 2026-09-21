@@ -1,36 +1,24 @@
-"""The engine: the parts a boundary is assembled from.
-
-**There is no controller here any more, and that is the point.** This
-package used to open with `Engine(client, db)` -- a handle you constructed,
-threaded through your application, and called `find()` on. It was one of two
-front doors onto one guarantee, and it was the one the README did not
-recommend: a rule you have to remember to route a read through is enforced
-exactly as reliably as it is remembered.
-
-What is left is what the boundary is made of, and what an operator's tools
-build with:
+"""The parts a boundary is assembled from.
 
     AdmissionSpec   where a collection keeps the facts that make a document
                     forgettable -- the deadline, the mark, the tenant, the
                     rules. A declaration, compared by value.
-    Admission       the verdict. `reachable(docs)` is pure: no database, no
-                    connection, no I/O. That is the property that made it
-                    movable to a wire in the first place, and it is why
-                    `tools/voyd_wire.py` can hold the same guarantee for a
+    Admission       the verdict. ``reachable(docs)`` is pure: no database,
+                    no connection, no I/O. That is the property that lets
+                    the same check run inside a wire proxy and hold for a
                     driver in any language.
     Keyring         a key per scope, so an erasure request is a key
                     deletion rather than a search-and-replace across every
                     copy of a document.
-    SearchEngine    index lifecycle. `ensure_indexes` is what
-                    `voyd-wire --ensure` calls; provisioning is an operator
-                    step, not an application one.
-    Expiry          the TTL index behind a `deadline()`.
-    detect          what this deployment can actually do, asked rather than
-                    assumed.
+    SearchEngine    index lifecycle. ``ensure_indexes`` is what
+                    ``voyd-wire --ensure`` calls; provisioning is an
+                    operator step, not an application one.
+    Expiry          the TTL index behind a ``deadline()``.
+    detect          what this deployment can actually do, asked rather
+                    than assumed.
 
-The application-facing artifact is `voydfile.py` and a connection string.
-See the package docstring in `voyd/__init__.py`, `README.md`, and
-`LIMITS.md` section 6b for what the wire holds and what it does not.
+Nothing here is application-facing. What an application gets is a
+``voydfile.py`` and a connection string; see ``voyd/__init__.py``.
 
 This package is deliberately free of application vocabulary. It knows about
 collections, fields and filters, never about namespaces or voids.
@@ -97,13 +85,7 @@ __all__ = [
     "Admission", "AdmissionSpec", "Page", "why_refused",
     "SearchSpec", "ExpirySpec",
 
-    # ---- what an operator's tools provision with ----
-    #
-    # Promoted here when `Engine` was deleted. They were always part of
-    # the surface; they were reachable *through* the controller, so the
-    # list did not have to say so. With no controller, `--ensure` and
-    # `--verify` are the callers, and a name a shipped tool depends on
-    # is a promise whether or not it is written down.
+    # ---- what `--ensure` and `--verify` provision with ----
     "SearchEngine", "Expiry", "detect", "Trait",
 
     # ---- reasons a fact may not reach a prompt: the rules you construct ----

@@ -1,10 +1,8 @@
 """Caller-scoped rules, on the wire, with the claims taken from the server.
 
-`restricted_to()` and the clearance rule decide by *who is asking*. Until
-now the proxy could not run them: it held no caller, so
-`expressible_clauses` returned `None` and `Guard.filter` passed no claims.
-That was the last thing the library front door could do and the wire could
-not.
+`restricted_to()` decides by *who is asking*, which for a long time the
+proxy could not answer: it held no caller, so `expressible_clauses`
+returned `None` and `Guard.filter` passed no claims at all.
 
 **Where the claims come from is the whole design, not an implementation
 detail.** `for_caller` in `admission/core.py` says it plainly -- a handle

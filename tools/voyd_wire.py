@@ -167,12 +167,10 @@ class Guard:
     def filter(self, docs: list[dict], caller: dict | None = None) -> list[dict]:
         handle = self.handle
         if self.needs_caller:
-            # `for_caller` clones rather than assigns, which matters more
-            # here than in the library: one `Guard` is shared by every
-            # connection this proxy serves, so binding an identity onto
-            # `self.handle` would show one client's rows to whoever asked
-            # second. That is the concurrency bug `for_caller`'s docstring
-            # is about, and the wire is where it would actually happen.
+            # `for_caller` clones rather than assigns, and here that is
+            # load-bearing: one `Guard` is shared by every connection this
+            # proxy serves, so binding an identity onto `self.handle` would
+            # show one client's rows to whoever asked second.
             #
             # `caller=None` -- the question could not be answered -- binds
             # empty claims rather than skipping the rules, so an unknown
@@ -473,10 +471,10 @@ def revoke_instead_of_delete(raw: bytes, req_id: int, resp_to: int,
 
     The update emitted here is the same pipeline ``Admission.revoke()``
     writes -- the literal mark, the deadline moved *earlier only*, and the
-    derived encodings nulled -- so a fact forgotten through the wire and one
-    forgotten through the library are the same document afterwards. Two
-    spellings that produced different rows would be the drift this whole
-    package is about.
+    derived encodings nulled. The two have to leave the same row, and
+    `test_both_doors_leave_the_same_row` is what holds them to it: two
+    spellings of "forgotten" that produced different documents would be the
+    drift this whole package is about.
 
     ``pins`` arrives from ``cascade_first`` on a collection that declares
     lineage: the ids that clause actually matched, already resolved, with
@@ -1158,8 +1156,9 @@ def _was_reduced(raw: bytes, resp_to: int, reduced: set[int] | None,
 
 
 # What `claims_from` puts in front of a rule. A rule asking for anything
-# else is not wrong -- it is enforceable through the library handle, where
-# an application supplies its own claims -- but it cannot be answered here.
+# else cannot be answered: there is nowhere else for a claim to come from,
+# because the boundary will not believe one the caller asserts. See
+# `unsuppliable_claims`, which says so at boot rather than at query time.
 SUPPLIABLE_CLAIMS = frozenset({"user", "db", "groups", "roles"})
 
 
@@ -1559,10 +1558,10 @@ async def derive_on_insert(raw: bytes, req_id: int, resp_to: int,
     a grandchild the cascade cannot see, and the erasure that looked
     complete stops one generation short. Silently.
 
-    The library got that closure from ``derive()``, which the application
-    had to import and call. The boundary gets it from the field the
-    application already writes, which is the difference this whole cut is
-    about: the guarantee stops being something you remember to use.
+    So the boundary closes it, from the field the application already
+    writes. Nothing has to be called for the ancestry to be right, which is
+    the only version of this that holds: a closure somebody has to remember
+    to perform is one that is correct until the first write that forgets.
 
     Two things happen here, and refusing is the first:
 
@@ -1657,8 +1656,8 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
 
     **The sealed path decrypts before it refuses, and the order is not a
     preference.** It is the order `Admission._unsealed` uses, and the two
-    have to agree or the same document would be admitted through the
-    library and refused through the wire. It also costs something real: a
+    have to agree or one document would get two verdicts. It also costs
+    something real: a
     rule that reads a sealed field is reading plaintext, which it could not
     do if refusal ran first, and a document refused by a deadline has still
     been decrypted by the time the deadline sees it. Decrypting something
@@ -3596,8 +3595,9 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                   f"claim {claim!r}, and the wire can only supply 'user', "
                   f"'db', 'groups' and 'roles' -- the server's answer to "
                   f"connectionStatus. Every read of {name} will be refused. "
-                  f"Use restricted_to('groups') against your MongoDB roles, "
-                  f"or enforce this one through the library handle",
+                  f"Use restricted_to('groups') against your MongoDB "
+                  f"roles, which is the same question asked of an answer "
+                  f"the deployment will vouch for",
                   flush=True)
     print(f"voyd-wire: up to {max_connections} concurrent connections"
           + (f" per worker, {workers} workers "

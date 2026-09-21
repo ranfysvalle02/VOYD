@@ -1,10 +1,9 @@
 """One artifact declares the policy, and the same artifact builds it.
 
-Provisioning used to be reachable only through `Engine.ensure()`. The
-consequence was a seam rather than an inconvenience: the proxy -- the thing
-that *is* the boundary -- could read a policy file, enforce every word of
-it, and not create a single index it depended on. Two artifacts, one
-declaration, and nothing checking they agreed.
+Split those and you get a seam rather than an inconvenience: a boundary
+that reads a policy file, enforces every word of it, and cannot create a
+single index it depends on. Two artifacts, one declaration, and nothing
+checking they agree.
 
 What makes this testable rather than merely nice is the pair. `--ensure`
 builds what the policy declares; `--verify` is separately written code that

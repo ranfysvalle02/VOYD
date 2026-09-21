@@ -23,12 +23,12 @@ startup rather than discovered:
     the boundary holds KMS credentials              it is a custody holder
     a sealed read decrypts before it refuses        it is no longer 2.3us
 
-What is bought is the sentence the library version cannot say. Today
-`schema_map` encrypts below the *application*, so no writer in this Python
-process can forget to encrypt. On the wire it encrypts below the *driver*, so
-no writer in any language can -- not the Node service, not the migration
-script, not the shell, not the notebook. That is the same upgrade the wire
-gave `delete`, applied to the stronger guarantee.
+What is bought is where the encryption sits. A driver's `schema_map`
+encrypts below the *application*, so no writer in that one process can
+forget to encrypt. Here it encrypts below the *driver*, so no writer in any
+language can -- not the Node service, not the migration script, not the
+shell, not the notebook. That is the same upgrade this boundary gives
+`delete`, applied to the stronger guarantee.
 
 **Explicit encryption, not automatic, and that is a simplification rather
 than a compromise.** Automatic encryption needs `crypt_shared` or
@@ -41,10 +41,11 @@ byte-identical to what `schema_map` produces: same `Random` algorithm, same
 per-scope key, same vault.
 
 That last point is the one worth testing rather than asserting, and
-`tests/test_the_boundary_seals_and_shreds.py` does: a document sealed through
-the wire and one sealed through the library are the same document afterwards,
-and either can be read by the other's reader. Two spellings that produced
-different rows would be exactly the drift this package is about.
+`tests/test_the_boundary_seals_and_shreds.py` does: a document sealed here
+and one sealed by a driver's own `schema_map` are the same document
+afterwards, and either can be read by the other's reader. Two spellings
+that produced different rows would be exactly the drift this package is
+about.
 
 **Decryption refuses, it does not raise.** A crypto-erased document is a
 normal, expected state -- it is the feature working -- so a page of fifty
@@ -66,9 +67,9 @@ import logging
 from typing import Any, Mapping
 
 # `RANDOM` is the algorithm `schema_map` uses for a `Sealed` field, and it
-# is imported rather than spelled again here because the whole "a document
-# sealed through the wire and one sealed through the library are the same
-# document afterwards" claim rests on the two matching.
+# is imported rather than spelled again here because the claim that this
+# boundary's ciphertext is interchangeable with a driver's rests on the two
+# matching.
 from voyd.engine.admission.reasons import KEY_UNAVAILABLE, UNRECOVERABLE
 from voyd.engine.admission.rules import _is_ciphertext
 from voyd.engine.keyring import (RANDOM, Keyring, KeyringSpec,
@@ -140,7 +141,8 @@ class Vault:
     async def open(self) -> None:
         """Dial the vault, ensure its indexes, and say what custody is.
 
-        `Keyring.ensure()` is the library's, not a second implementation:
+        `Keyring.ensure()` is `voyd.engine.keyring`'s, not a second
+        implementation:
         the `keyAltNames` unique index and -- the one that belongs to this
         project -- the TTL index that lets a key carry the same `expire_at`
         its documents carry, so the scope's deadline destroys the scope's

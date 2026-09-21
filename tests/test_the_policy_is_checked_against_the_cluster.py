@@ -220,7 +220,7 @@ def validator(*fields):
 
 def test_a_sealed_field_with_no_validator_is_reported():
     """`--key-vault` encrypts writes *through* the boundary. It does not
-    install the `binData` validator the library's `Keyring.enforce()` does,
+    install the `binData` validator `Keyring.enforce()` does,
     so a writer connecting straight to the cluster can still store
     plaintext -- silently, permanently, and into the next backup.
 

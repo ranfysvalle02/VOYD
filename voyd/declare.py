@@ -152,11 +152,12 @@ def auto_embed(model: str) -> _Field:
     fail, it returns a number between -1 and 1, which is the whole problem.
     The boundary refuses it by name. See ``tools/voyd_wire.py``.
 
-    Declared, not probed. A deployment that cannot do server-side embedding
-    says so at index creation and the library falls back to a client-supplied
-    vector, loudly -- so adopting this is safe before every deployment
-    supports it. What is *not* safe is adopting it and then quietly sending
-    client vectors anyway, which is what the wire-side refusal is for.
+    Declared, not probed. A deployment that cannot do server-side
+    embedding says so at index creation and ``--ensure`` falls back to an
+    ordinary vector index, loudly -- so adopting this is safe before every
+    deployment supports it. What is *not* safe is adopting it and then
+    quietly sending client vectors anyway, which is what the boundary's
+    refusal is for.
     """
     return _Field("auto_embed", args=(model,))
 
@@ -177,16 +178,14 @@ def sealed() -> _Field:
     refused at *load*, in the same breath as every other way a policy file
     can be wrong.
 
-    Declared here and enforced two ways, which are not the same guarantee:
+    Enforced with ``--key-vault``, which encrypts on the boundary: no
+    writer in any *language* can forget -- not the shell, not the migration
+    script, not the service written next year by somebody who has not read
+    this file. A driver's own ``schema_map`` gets you the same ciphertext
+    one process at a time; this gets it once.
 
-    - through the library, ``schema_map`` encrypts below the application, so
-      no writer in this process can forget;
-    - through the wire, ``--key-vault`` encrypts on the boundary, so no
-      writer in any *language* can forget -- including the shell, the
-      migration script, and the service written next year by somebody who
-      has not read this file.
-
-    The second is the one that took the proxy's purity. See
+    It is also what costs the boundary its purity: holding keys makes it a
+    custody holder, and a sealed read decrypts before it refuses. See
     ``LIMITS.md`` §5.
 
     An ``Unrecoverable`` rule is attached alongside, so a sealed field that
@@ -252,23 +251,16 @@ def guard(collection: str, *, lineage_field: str | None = None,
             rules.append(value.build(name))
 
         # A field cannot be both hidden from the server and embedded by
-        # it -- and in this form that contradiction cannot be *written*,
-        # which is worth a note because the library needs a runtime check
-        # for exactly the same thing.
+        # it, and there is deliberately no check for that here, because in
+        # this shape the contradiction cannot be *written*. The path is the
+        # attribute name, so `text = sealed()` followed by
+        # `text = auto_embed(...)` is not two conflicting declarations --
+        # Python binds the name once and the second wins.
         #
-        # `Engine._refuse_sealed_autoembed` compares a keyring's sealed
-        # fields against a search spec's `text_paths`. Those are two
-        # objects naming one path, so they can disagree, and it raises at
-        # connect time when they do. Here both come from one class body and
-        # the path *is* the attribute name, so `text = sealed()` followed
-        # by `text = auto_embed(...)` is not a conflict a reader can
-        # express -- Python binds the name once and the second wins.
-        #
-        # A guard here would therefore be code that can never run, which
-        # this file has no business shipping. It is instead one more answer
-        # to "why a class body rather than a dict", up in the module
-        # docstring: a shape in which a whole class of contradiction has
-        # nowhere to live beats a shape that detects it.
+        # A guard here would be code that can never run. It is instead one
+        # more answer to "why a class body rather than a dict", up in the
+        # module docstring: a shape in which a whole class of contradiction
+        # has nowhere to live beats a shape that detects it.
         #
         # What is *not* closed: sealing `text` here while an Atlas index
         # declared somewhere else auto-embeds `text`. No policy file can

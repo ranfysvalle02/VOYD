@@ -2,8 +2,9 @@
 
 The five builtins are not a closed set. They are objects with a ``kind``,
 a ``collection``, and ``async ensure()`` -- schema the replica set should
-maintain. ``Engine.use()`` installs one. ``ensure()`` builds every installed
-trait, then TTL, then search (search waits). ``health()`` lists them.
+maintain. ``voyd-wire --ensure`` builds every trait a policy file
+declares: the collection, TTL behind each deadline, an index leading with
+each tenant, and a vector index the server embeds.
 
 Duck typing. Inherit nothing. This module is the contract, not a framework:
 
@@ -33,7 +34,7 @@ from typing import Any, Protocol, runtime_checkable
 
 @runtime_checkable
 class Trait(Protocol):
-    """Anything ``Engine.use()`` can install.
+    """Anything provisioning can install.
 
     ``ensure()`` should be idempotent and safe on every boot. Return a
     truthy value when the schema was applied (or already in place).

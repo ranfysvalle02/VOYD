@@ -94,13 +94,12 @@ class Notes:
 
 
 def test_sealed_and_embedded_cannot_be_written_on_one_field(tmp_path):
-    """The contradiction the library needs a runtime check for is, here,
-    not expressible -- and that is the argument for the class body.
+    """A field cannot be both hidden from the server and embedded by it,
+    and in a class body that contradiction is not expressible.
 
-    `Engine._refuse_sealed_autoembed` compares a keyring's sealed fields
-    against a search spec's text paths. Those are two objects naming one
-    path, so they can disagree, and it raises at connect time when they do.
-    In a class body the path *is* the attribute name, so the conflict
+    Anywhere the sealed fields and the embedded paths are two separate
+    objects naming one path, they can disagree and something has to check
+    at runtime. Here the path *is* the attribute name, so the conflict
     cannot be written: Python binds the name once and the second
     declaration wins.
 
@@ -126,7 +125,7 @@ class Notes:
 def test_sealing_one_field_and_embedding_another_is_allowed(tmp_path):
     """Sealing the notes and embedding the title is lossy, not wrong.
 
-    The boundary has no business forbidding it, and `Engine` says so too.
+    The boundary has no business forbidding it.
     """
     load(write(tmp_path, """
 from voyd import guard, deadline, tenant, sealed, auto_embed
@@ -282,11 +281,11 @@ def wired(tmp_path):
 def test_a_plain_driver_cannot_send_its_own_vector(wired):
     """No VOYD import, no policy file read, no way to know. Refused anyway.
 
-    This is the claim the library version cannot make. In-process,
-    `SearchEngine._vector_stage` raises for a caller who passed a vector to
-    an `auto_embed` collection -- which protects the callers that went
-    through the library. A notebook, a Node service and Compass all send
-    these bytes and never see that code.
+    `SearchEngine._vector_stage` raises for a caller who passes a vector
+    to an `auto_embed` collection, which protects anything provisioning
+    indexes in this process. A notebook, a Node service and Compass send
+    these bytes and never reach that code, so the refusal has to be here
+    or it is not a guarantee.
     """
     client, name = wired
     with pytest.raises(pymongo.errors.OperationFailure) as caught:

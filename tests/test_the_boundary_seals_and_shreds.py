@@ -162,9 +162,10 @@ def test_the_plaintext_never_reaches_the_disk(sealed_wire):
 
     No encryption is configured on that client. It has no `schema_map`, no
     `AutoEncryptionOpts`, no `crypt_shared`, and no VOYD import. It changed
-    a connection string. That is the entire difference between this document
-    and a plaintext one, and it is the claim the library version cannot
-    make -- there, forgetting is a code review away.
+    a connection string. That is the entire difference between this
+    document and a plaintext one. Configure encryption in the driver
+    instead and forgetting it is a code review away, once per service, in
+    each language.
     """
     _through, direct, name = sealed_wire
     on_disk = direct[name].notes.find_one({"tenant_id": "alice"})["text"]

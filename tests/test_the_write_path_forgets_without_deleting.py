@@ -7,10 +7,6 @@ one forgotten here must be the same document afterwards. Two spellings that
 produced different rows would be the drift this package is about, so this
 file is what pins the shape both of them have to agree on.
 
-Driven without `Engine`. The write path never needed the handle -- it needs
-a database and a spec -- and a test that could only reach it through an
-import would be a test of the import.
-
 Four properties, and each one is a way the write could be subtly wrong while
 looking right:
 
@@ -39,13 +35,7 @@ pymongo = pytest.importorskip("pymongo")
 
 @pytest.fixture
 async def db():
-    """A throwaway database, and nothing else.
-
-    Built without the `Engine` handle on purpose. `marks.py` never needed
-    one -- it needs a database and a spec -- and the handle was the front
-    door this project is in the middle of removing. A test that could only
-    reach the write path through an import is a test of the import.
-    """
+    """A throwaway database. The write path needs one and a spec."""
     from pymongo import AsyncMongoClient
 
     client = AsyncMongoClient(MONGO_URI)

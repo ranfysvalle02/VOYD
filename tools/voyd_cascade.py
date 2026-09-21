@@ -8,14 +8,14 @@ against the document somebody named and defeated by the paragraph nobody
 did, which is the failure this package exists to prevent arriving through
 the one door it left open.
 
-``voyd/engine/admission/lineage.py`` solved this for the library handle by
-closing the ancestry transitively at write time, so propagation is one
-``$in`` at any depth rather than a recursive walk. That property is a fact
-about the *documents*, not about the handle, so the boundary inherits it for
-free: given the ids a delete matched, everything downstream of them is
-``{lineage: {"$in": ids}}``.
+The mechanism is transitive closure at *write* time: a child's lineage is
+its parent's lineage plus the parent, so a grandchild already names the
+grandparent and one ``$in`` reaches the whole subtree at any depth,
+instead of a recursive walk. Given the ids a delete matched, everything
+downstream of them is ``{lineage: {"$in": ids}}``. Derivation is a DAG
+that only grows forwards, so the closure cannot go stale.
 
-What the boundary does not inherit is a transaction. A cascade is a
+What the boundary cannot have is a transaction. A cascade is a
 multi-document write derived from a read, which this proxy does nowhere
 else, and the client's own session is not ours to open one on -- doing so
 would change what that client's subsequent reads see, which is a far larger
@@ -129,11 +129,11 @@ class Cascade:
         one of these ids would be marked by a caller who cannot read it,
         which is a cross-tenant write dressed up as an erasure.
 
-        The library rebuilds the unbypassable rules here too. The wire
-        cannot: those rules decide by *who is asking*, per document, and
-        there is no query that expresses them. See LIMITS.md -- the
-        consequence is that the cascade reaches a descendant the caller
-        could not have read, in the direction of refusing more.
+        The caller-aware rules are *not* rebuilt here, and cannot be:
+        they decide by who is asking, per document, and no query expresses
+        them. So a cascade can reach a descendant the caller could not
+        have read -- in the direction of refusing more. See LIMITS.md
+        section 6b.
         """
         field = guard.spec.lineage_field
         if self._client is None or not (field and ids and pipeline):
@@ -186,17 +186,15 @@ class Cascade:
         cannot extend anything.
 
         ``broken`` names the parents that may not be reached at all --
-        missing, out of scope, or already refused. ``derive()`` refuses
-        rather than writes in that case and the reasoning survives the
-        move to the wire unchanged: the only ways to get here are a race
-        and a bug, something read a document it should not have been given
-        or is writing from a cache that never checked. Writing the child
-        and marking it in the same breath would paper over both.
+        missing, out of scope, or already refused. That refuses the write
+        rather than marking it, because the only ways to get here are a
+        race and a bug: something read a document it should not have been
+        given, or is writing from a cache that never checked. Writing the
+        child and marking it in the same breath would paper over both.
 
         The refusal test is the guard's own per-document rules, not a
         query, so an insert is judged by exactly the predicate a read is.
-        Two spellings of "is this refused" that could disagree is the
-        drift this package is about, arriving through its own front door.
+        Two spellings of "is this refused" would be free to disagree.
         """
         if self._client is None or not parents:
             return [], [], []
