@@ -61,7 +61,12 @@ doing.
 
 **What you do not get yet.** Every *other* read against `db.notes` is exactly
 as leaky as it was this morning. The handle guarantees its own path, not the
-collection. Which brings us to the honest way to measure the gap:
+collection — and not your Node service, which has its own connection and has
+never heard of any of this. `tools/voyd_wire.py` is the answer to that when
+you need it: the same check, applied on the wire, so the guarantee binds the
+connection instead of the import. It is a demonstration rather than a
+production proxy, and the honest reading is that it shows where this boundary
+wants to live rather than that it is ready to live there. Which brings us to the honest way to measure the gap:
 
 ```bash
 python scanner/voyd_scan path/to/your/repo

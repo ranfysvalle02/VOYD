@@ -128,6 +128,29 @@ keeps serving exactly what it served yesterday, and three lines beside it
 count how many of those documents were already gone — an exact number,
 available once, before you adopt anything.
 
+### "What about our Node service?"
+
+The handle binds Python. The *connection* does not:
+
+```bash
+python tools/voyd_wire.py --listen 27099 --target localhost:27017 --guard notes
+```
+
+A MongoDB wire-protocol front door that applies the same per-document check to
+every document on the way back. Point `mongosh`, Compass, the Node driver or a
+notebook at it and a forgotten fact is not reachable from any of them — no
+import, no library, nothing to remember. It holds no database connection of
+its own, because `reachable()` is pure.
+
+That is the same property that makes shadow mode three lines, and it is the
+argument for where this boundary really belongs: a handle you can reach past
+needs a raw-read guard and a scanner; a connection you cannot reach past needs
+neither. It is a demonstration rather than a production proxy — the limits are
+in its docstring — and it is pinned by
+[`tests/test_the_boundary_holds_on_the_wire.py`](tests/test_the_boundary_holds_on_the_wire.py),
+which asserts it with a plain `pymongo` client and no VOYD import in the read
+path.
+
 That count is the pilot. [`PILOT.md`](PILOT.md) runs it as four gates that
 each can end the trial, and asks you to write down what result would make you
 say no *before* the first command. Full argument for the scanner:
@@ -380,6 +403,7 @@ front door, the on-ramp and the pilot; everything else is reference material in
 | [`PORTABILITY.md`](docs/PORTABILITY.md) | the guarantee is portable; its *enforcement* is not. Three engines measured, and the rung most vector databases cannot reach |
 | [`drift/`](drift/README.md) | the counter-argument, executable — including the whole thesis ported to pgvector with no MongoDB in the file |
 | [`examples/`](examples/) | sixteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction and [`tenancy.py`](examples/tenancy.py) for the incident most teams already have |
+| [`tools/voyd_wire.py`](tools/voyd_wire.py) | the boundary on the wire: any driver, any language, a connection that cannot serve a forgotten fact |
 | [`scanner/`](scanner/README.md) | `voyd-scan`: one stdlib file, zero dependencies, pointed at *your* repository — the count this whole argument is about |
 
 **What is wrong with it, and what happens next** — read this before trusting any of the above.

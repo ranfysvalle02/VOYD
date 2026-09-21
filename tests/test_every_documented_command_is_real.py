@@ -114,9 +114,18 @@ def test_a_documented_command_is_real(doc: str, cmd: str):
     # (`src/`, `app/`), so these runs are *expected* to fail on a missing
     # path -- 255 -- and the thing under test is that argparse did not reject
     # a flag first, which is exit 2.
-    proc = subprocess.run([sys.executable] + argv, cwd=ROOT,
-                          capture_output=True, text=True,
-                          env={"PYTHONPATH": "scanner", "PATH": "/usr/bin:/bin"})
+    try:
+        proc = subprocess.run([sys.executable] + argv, cwd=ROOT,
+                              capture_output=True, text=True, timeout=20,
+                              env={"PYTHONPATH": "scanner",
+                                   "PATH": "/usr/bin:/bin"})
+    except subprocess.TimeoutExpired:
+        # Some documented commands are *servers* -- `voyd_wire.py` listens
+        # until interrupted. Reaching the point of blocking means argparse
+        # accepted every flag, which is the only thing under test here. A
+        # guard that hung the suite on a documented daemon would be a worse
+        # bug than the stale flag it was looking for.
+        return
     assert proc.returncode != 2 and "unrecognized arguments" not in proc.stderr, (
         f"{doc} says `{cmd}` and the CLI rejected it:\n"
         f"{proc.stderr.strip().splitlines()[-1] if proc.stderr else ''}")
