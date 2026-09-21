@@ -1183,28 +1183,94 @@ is about. Both now share one `Backchannel` and one `CallerIdentity`, and
 `test_the_fan_out_path_learns_the_same_identity` is what keeps them
 sharing it.
 
-**Still open, and bigger than it looks: lineage.** `derive()` and the
-cascade behind it -- revoking a source and having the refusal reach the
-summary, the answer and the embedding built out of it -- exist only in
-`admission/lineage.py`, reachable only through the handle. The wire does
-not cascade at all: its one mention of `lineage_field` is in
-`deciding_fields`, which reads the name so a projection cannot hide it,
-and nothing anywhere follows a parent to its children.
+**Closed, and it was the blocker: lineage on the wire.** `derive()` and
+the cascade behind it -- revoking a source and having the refusal reach
+the summary, the answer and the embedding built out of it -- used to exist
+only in `admission/lineage.py`, reachable only through the handle. The
+wire's one mention of `lineage_field` was in `deciding_fields`, which
+reads the name so a projection cannot hide it, and nothing anywhere
+followed a parent to its children.
 
-That matters more than a missing feature, because `CLAIMS.md` carries it
-as a headline -- "revoking a source reaches the summary, the answer and
-the embedding built on it" -- held up by a test that drives the library.
-**A reader of the README has no way to know that claim does not hold
-through the connection string the README tells them to use.** The claim
-is true; the artifact it is true of is not the one being recommended.
+That mattered more than a missing feature, because `CLAIMS.md` carries it
+as a headline and **a reader of the README had no way to know the claim
+did not hold through the connection string the README tells them to use.**
+The claim was true; the artifact it was true of was not the one being
+recommended. It is now true of both, and `tools/voyd_cascade.py` is where
+the wire's half lives.
 
-So the front door is *not* cuttable yet, and saying otherwise in a
-summary was wrong. Two things would have to move first: this, and the
-clearance mapping below. Lineage is the harder of the two -- a cascade is
-a multi-document write derived from a read, which is a different shape
-from anything the proxy does today, and doing it on the wire means
-deciding what happens when the second write fails after the first
-succeeded.
+**The decision, and why.** A cascade is a multi-document write derived
+from a read, which the proxy does nowhere else, so the question is what
+happens when the second write fails after the first has landed. Three
+answers were available:
+
+- **A transaction.** Atomic, and rejected. The proxy would have to open
+  one on the *client's own connection*, which changes what that client's
+  subsequent reads see -- a far larger surprise than the one being fixed,
+  and it makes the guarantee depend on the caller's session staying up
+  for the length of a write they did not issue.
+- **Refuse `delete` on a collection declaring `lineage_field`.** Honest,
+  one evening, and it deletes a headline claim rather than holding it.
+- **Children first, then the parent.** Chosen.
+
+The order is the whole mechanism. `cascade_first` resolves the ids the
+delete matched, marks everything downstream of them, and only then lets
+the rewritten revocation of the source go. A crash in between leaves the
+source still reachable and its derivations already gone: a visible
+half-erasure the caller fixes by re-running an idempotent delete. The
+reverse order leaves the source refused and the summary of it still
+answering prompts, with nothing anywhere saying so. One of those two
+failures is recoverable by retrying and the other is the bug this whole
+package is about, so the boundary fails toward refusing more.
+
+**Resolving the ids is not an optimisation.** `deleteOne` asks the server
+to pick one of the documents a filter matches and does not say which, so
+a boundary that cascaded from its own second look at the filter would
+mark the children of a document the server then did not revoke -- a
+cascade and a revocation landing on different rows, under the same
+command. The ids are resolved once and *both* halves are pinned to them.
+`findOneAndDelete` gets the same treatment, carrying the caller's `sort`
+into the resolution, because a boundary that covered one delete verb and
+silently not the other is the specific failure §2 calls worse than none.
+
+**The write side had to move too, and this is the part that is easy to
+miss.** The cascade is one `$in` at any depth *only because* the ancestry
+stored on each document is transitively closed -- a child's lineage is its
+parent's lineage plus the parent, so a grandchild already names the
+grandparent. The library got that closure from `derive()`, which the
+application had to import and call. On the wire, `derive_on_insert` gets
+it from the field the application already writes: an insert naming a
+parent has its ancestry closed, inherits the earliest deadline among its
+parents, and is **refused** if any named parent is missing, out of scope,
+or already refused. Without that, the cascade would be correct for
+children and silently wrong for grandchildren, which is worse than not
+having it.
+
+**What it costs, stated plainly:**
+
+- **A second connection, per worker.** Opened only when some collection
+  declares `lineage_field`, for the same reason the vault's is: the
+  cascade is the boundary's write, not the caller's. It is dialled from
+  `--target`, by construction rather than by a flag somebody could point
+  elsewhere.
+- **A round trip on the write path.** A delete on a lineage collection is
+  now a find plus an update before the forwarded command, and an insert
+  naming a parent is a find before it. Collections that declare no
+  lineage pay nothing -- the gate is a field being `None`.
+- **The cascade can reach a descendant the caller could not have read.**
+  The library rebuilds the unbypassable rules when it walks the edge. The
+  wire cannot: those rules decide by *who is asking*, per document, and
+  there is no query that expresses them. The tenant **is** carried
+  across, so the cascade cannot leave the caller's namespace -- that one
+  would be a cross-tenant write dressed up as an erasure. What remains is
+  that a clearance-gated descendant is marked by a caller who could not
+  see it, which is in the direction of refusing more.
+- **A tenanted delete that does not pin its tenant does not cascade.** It
+  is already refused upstream by the push-down rules; if that ever
+  changes, this logs and declines rather than marking every namespace at
+  once.
+
+Held up by `tests/test_a_refusal_travels_and_is_gated.py`, which drives
+the proxy.
 
 **Still open: `Clearance`.** It declares `claim="clearance"` and wants an
 ordered level, and nothing in a MongoDB role says which level a role

@@ -119,12 +119,16 @@ def test_a_peer_that_vanishes_mid_message_is_a_disconnect():
 
 def test_merge_adds_up_every_worker_including_reasons():
     total = w.merge([
-        {"served": 3, "refused": 2, "revoked": 1,
+        {"served": 3, "refused": 2, "revoked": 1, "cascaded": 7,
          "reasons": {"expired": 2}},
+        # A worker that predates a counter, or simply never touched a
+        # lineage collection, omits the key. Summing must treat that as
+        # zero rather than dropping the column, because an undercount is
+        # the one direction this number must never be wrong in.
         {"served": 4, "refused": 5, "revoked": 0,
          "reasons": {"expired": 1, "revoked": 4}},
     ])
-    assert total == {"served": 7, "refused": 7, "revoked": 1,
+    assert total == {"served": 7, "refused": 7, "revoked": 1, "cascaded": 7,
                      "reasons": {"expired": 3, "revoked": 4}}
 
 

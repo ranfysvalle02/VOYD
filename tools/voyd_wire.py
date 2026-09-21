@@ -84,6 +84,7 @@ try:
 except ImportError:  # pragma: no cover - the one dependency, and it is pymongo's
     sys.exit("pip install pymongo   (for the bson library)")
 
+import voyd_cascade
 import voyd_ensure
 import voyd_fanout
 import voyd_preflight
@@ -121,6 +122,19 @@ class Guard:
         self.refused = 0
         self.admitted = 0
         self.revoked = 0
+        # What was marked because it was *made out of* something the caller
+        # revoked, as opposed to what the caller named. Two numbers rather
+        # than one because "you asked to erase 2 facts and 7 things built on
+        # them went too" is the sentence an auditor needs, and a single
+        # total cannot say it.
+        self.cascaded = 0
+        # The proxy's own connection, attached per worker by `_run` and only
+        # when this collection declares `lineage_field`. `None` everywhere
+        # else, which is the overwhelmingly common case and costs nothing.
+        # A `Guard` is still constructible with no database at all -- the
+        # per-document check has never needed one, and that is what made it
+        # movable to a wire.
+        self.cascade: "voyd_cascade.Cascade | None" = None
         # Refusals that happened during decryption rather than during
         # `reachable()`. Counted on the guard so one collection has one
         # tally: an operator asking "what did this refuse" should not have
@@ -434,7 +448,8 @@ def _collection_of(reply: Mapping) -> str | None:
 
 
 def revoke_instead_of_delete(raw: bytes, req_id: int, resp_to: int,
-                             guard: Guard, verbose: bool) -> bytes | None:
+                             guard: Guard, verbose: bool,
+                             pins: list[list] | None = None) -> bytes | None:
     """Turn a client's ``delete`` into the revocation it should have been.
 
     This is the half of the story the read path could not tell. A boundary
@@ -462,6 +477,14 @@ def revoke_instead_of_delete(raw: bytes, req_id: int, resp_to: int,
     forgotten through the library are the same document afterwards. Two
     spellings that produced different rows would be the drift this whole
     package is about.
+
+    ``pins`` arrives from ``cascade_first`` on a collection that declares
+    lineage: the ids that clause actually matched, already resolved, with
+    their descendants already marked. Pinning the clause to them rather
+    than re-sending the caller's filter is what makes the two halves agree
+    -- ``deleteOne`` asks the server to pick one of the matches and does
+    not say which, so a cascade computed from the filter and a revocation
+    computed from the filter can land on different documents.
     """
     decoded = decode_sections(raw)
     if decoded is None:
@@ -474,12 +497,32 @@ def revoke_instead_of_delete(raw: bytes, req_id: int, resp_to: int,
     if not pipeline:
         return None          # nothing to mark with; forward the real delete
 
-    updates = [{
-        "q": d.get("q", {}),
-        # `limit: 1` means deleteOne; anything else is deleteMany.
-        "multi": d.get("limit", 0) == 0,
-        "u": pipeline,
-    } for d in docs]
+    updates = []
+    for i, d in enumerate(docs):
+        pin = pins[i] if pins is not None and i < len(pins) else None
+        if pin is None:
+            updates.append({
+                "q": d.get("q", {}),
+                # `limit: 1` means deleteOne; anything else is deleteMany.
+                "multi": d.get("limit", 0) == 0,
+                "u": pipeline,
+            })
+        else:
+            # Pinned by id: the filter has already been resolved, and an
+            # empty pin is a filter that matched nothing -- `$in: []`
+            # matches nothing too, which keeps the reply's `n` honest
+            # instead of turning a no-op into an unfiltered update.
+            #
+            # `multi` still comes from the clause and not from the pin's
+            # length, because the driver marked a `deleteOne` retryable and
+            # **the server rejects a retryable write with `multi: true`**
+            # (code 72). Setting it from the resolved set looked more
+            # accurate and turned every `deleteOne` on a lineage collection
+            # into a write error. A pinned `deleteOne` resolves to at most
+            # one id, so `multi: false` is not a narrowing anyway.
+            updates.append({"q": {"_id": {"$in": pin}},
+                            "multi": d.get("limit", 0) == 0,
+                            "u": pipeline})
 
     new_body = {("update" if k == "delete" else k): v for k, v in body.items()}
     if verbose:
@@ -515,7 +558,8 @@ def _forget_pipeline(spec, reason: str) -> list:
 
 
 def revoke_instead_of_find_and_delete(raw: bytes, req_id: int, resp_to: int,
-                                      guard: Guard, verbose: bool) -> bytes | None:
+                                      guard: Guard, verbose: bool,
+                                      pin: list | None = None) -> bytes | None:
     """`findOneAndDelete`, which is a different command and was a real hole.
 
     `delete` and `findAndModify` are separate wire commands, so intercepting
@@ -542,6 +586,13 @@ def revoke_instead_of_find_and_delete(raw: bytes, req_id: int, resp_to: int,
 
     body = {k: v for k, v in body.items() if k != "remove"}
     body["update"] = pipeline
+    if pin is not None:
+        # The cascade already resolved which document this is, honouring
+        # the caller's own `sort`. Re-sending the filter would let the
+        # server pick a different one, and the descendants of *that* one
+        # would still be reachable.
+        body["query"] = {"_id": {"$in": pin}}
+        body.pop("sort", None)
     # `new: false` is what a delete means here: the caller asked for the
     # document as it was, which is also the only version that still reads.
     body.setdefault("new", False)
@@ -1422,6 +1473,159 @@ async def erase_first(body: Mapping, statements: list,
               flush=True)
 
 
+async def cascade_first(raw: bytes, guard: Guard, database: str,
+                        verbose: bool) -> list[list] | None:
+    """Mark what was made out of these facts, *before* revoking the facts.
+
+    Children first. A crash after this and before the forwarded revocation
+    leaves the source still reachable and its derivations already gone --
+    a half-erasure the caller fixes by re-running an idempotent delete. The
+    other order leaves the source refused and the summary of it still
+    answering prompts, with nothing anywhere saying so.
+
+    Returns the ids each delete clause matched, so the revocation that
+    follows is pinned to exactly the documents this cascaded from, or
+    ``None`` when there is no lineage here and the bytes should be left
+    alone.
+    """
+    cascade = guard.cascade
+    if cascade is None or not guard.spec.lineage_field:
+        return None
+    decoded = decode_sections(raw)
+    if decoded is None:
+        return None
+    _flags, body, ident, docs = decoded
+    if body.get("delete") != guard.collection or ident != "deletes":
+        return None
+    pipeline = _forget_pipeline(guard.spec, "derived from a fact deleted "
+                                            "via voyd-wire")
+    if not pipeline:
+        return None
+
+    pins = []
+    for clause in docs:
+        query = clause.get("q", {})
+        ids = await cascade.resolve(database, guard, query,
+                                    one=clause.get("limit", 0) == 1)
+        guard.cascaded += await cascade.mark_descendants(
+            database, guard, ids, pipeline, query)
+        pins.append(ids)
+    return pins
+
+
+async def cascade_first_for_one(raw: bytes, guard: Guard, database: str,
+                                verbose: bool) -> list | None:
+    """The same, for ``findOneAndDelete``.
+
+    A separate wire command, and intercepting one and not the other is how
+    this boundary already shipped the guarantee for `deleteOne` and
+    silently not for `findOneAndDelete`. The lineage half is not going to
+    repeat that on its first commit.
+    """
+    cascade = guard.cascade
+    if cascade is None or not guard.spec.lineage_field:
+        return None
+    decoded = decode_op_msg(raw)
+    if decoded is None:
+        return None
+    _flags, body = decoded
+    if body.get("findAndModify") != guard.collection or not body.get("remove"):
+        return None
+    pipeline = _forget_pipeline(guard.spec, "derived from a fact deleted "
+                                            "via voyd-wire")
+    if not pipeline:
+        return None
+    query = body.get("query", {})
+    # `findAndModify` with a `sort` means the caller cares which one, so the
+    # resolution has to honour it or the cascade and the revocation pick
+    # different documents -- the same defect `pins` exists to prevent.
+    ids = await cascade.resolve(database, guard, query, one=True,
+                                sort=body.get("sort"))
+    guard.cascaded += await cascade.mark_descendants(
+        database, guard, ids, pipeline, query)
+    return ids
+
+
+async def derive_on_insert(raw: bytes, req_id: int, resp_to: int,
+                           guards: dict[str, Guard], verbose: bool
+                           ) -> tuple[bytes, bytes | None]:
+    """An insert that says what it was made out of, made to mean it.
+
+    This is the other half of the claim, and without it the first half is
+    a demo. ``cascade_first`` reaches everything carrying an id in
+    ``lineage``, in one ``$in``, at any depth -- but only because the
+    ancestry stored on each document is *transitively closed*. A client
+    that writes ``{"lineage": [summary_id]}`` and nothing else has written
+    a grandchild the cascade cannot see, and the erasure that looked
+    complete stops one generation short. Silently.
+
+    The library got that closure from ``derive()``, which the application
+    had to import and call. The boundary gets it from the field the
+    application already writes, which is the difference this whole cut is
+    about: the guarantee stops being something you remember to use.
+
+    Two things happen here, and refusing is the first:
+
+    - a parent that is missing, out of scope, or already refused fails the
+      insert. You cannot legitimately derive a new fact from one that may
+      not reach a prompt, and writing the child and marking it in the same
+      breath would hide the race that got you here.
+    - a surviving insert has its ``lineage`` replaced by the closure and
+      its deadline pulled back to the earliest among its parents.
+
+    Returns ``(bytes, refusal)``: the command to forward, and an error to
+    answer with instead if there is one.
+    """
+    decoded = decode_sections(raw)
+    if decoded is None:
+        return raw, None
+    flags, body, ident, docs = decoded
+    name = body.get("insert")
+    guard = guards.get(name) if isinstance(name, str) else None
+    if guard is None or ident != "documents" or not docs:
+        return raw, None
+    cascade, field = guard.cascade, guard.spec.lineage_field
+    if cascade is None or not field:
+        return raw, None
+    if not any(isinstance(d.get(field), (list, tuple)) and d.get(field)
+               for d in docs):
+        return raw, None                      # ordinary inserts, untouched
+
+    database = body.get("$db", "")
+    at = guard.spec.at_field
+    prepared = []
+    for doc in docs:
+        parents = doc.get(field)
+        if not isinstance(parents, (list, tuple)) or not parents:
+            prepared.append(doc)
+            continue
+        closure, deadlines, broken = await cascade.parentage(
+            database, guard, list(parents), doc)
+        if broken:
+            return raw, _refuse(
+                req_id, guard.collection,
+                f"this document says it was derived from "
+                f"{', '.join(broken)}, which cannot be reached -- missing, "
+                f"out of scope, or already refused. A fact made out of a "
+                f"fact that may not reach a prompt may not either",
+                verbose)
+        row = dict(doc)
+        row[field] = closure
+        if deadlines:
+            own, soonest = row.get(at), min(deadlines)
+            # Never overwrite a shorter one the caller set deliberately.
+            row[at] = (min(own, soonest) if hasattr(own, "timestamp")
+                       else soonest)
+        prepared.append(row)
+
+    if verbose:
+        print(f"  voyd: {guard.collection}: closed the lineage on "
+              f"{len(prepared)} derived document(s), so a revocation of any "
+              f"ancestor reaches them in one query", flush=True)
+    return encode_sections(req_id, resp_to, flags, body, ident,
+                           prepared), None
+
+
 def seal_refusal(req_id: int, resp_to: int, why: str) -> bytes:
     """Answer a write this boundary will not seal, without forwarding it.
 
@@ -1684,8 +1888,12 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
 
                 target = guard_for(guards, body, "delete")
                 if target is not None and target.on_delete == "revoke":
+                    # Children first. See `cascade_first` for why this
+                    # order and not a transaction.
+                    pins = await cascade_first(
+                        raw, target, body.get("$db", ""), verbose)
                     swapped = revoke_instead_of_delete(
-                        raw, req_id, resp_to, target, verbose)
+                        raw, req_id, resp_to, target, verbose, pins)
                     if swapped is not None:
                         raw = swapped
                         rewritten.add(req_id)
@@ -1695,10 +1903,22 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # guarantee for one delete verb and silently not the other.
                 fam = guard_for(guards, body, "findAndModify")
                 if fam is not None and fam.on_delete == "revoke":
+                    pin = await cascade_first_for_one(
+                        raw, fam, body.get("$db", ""), verbose)
                     swapped = revoke_instead_of_find_and_delete(
-                        raw, req_id, resp_to, fam, verbose)
+                        raw, req_id, resp_to, fam, verbose, pin)
                     if swapped is not None:
                         raw = swapped
+
+                # The write-side half of lineage. Before sealing, because
+                # it rewrites the same documents the vault would encrypt
+                # and reading a stale parse is the bug that combination
+                # invites.
+                raw, refused = await derive_on_insert(
+                    raw, req_id, resp_to, guards, verbose)
+                if refused is not None:
+                    await send(back, refused)
+                    continue
 
                 # Sealing is last, and after a re-decode rather than on
                 # the `head` above, because the two rewrites before it may
@@ -2941,17 +3161,27 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
 
             target = guard_for(guards, body, "delete")
             if target is not None and target.on_delete == "revoke":
+                pins = await cascade_first(
+                    raw, target, body.get("$db", ""), verbose)
                 swapped = revoke_instead_of_delete(
-                    raw, req_id, resp_to, target, verbose)
+                    raw, req_id, resp_to, target, verbose, pins)
                 if swapped is not None:
                     raw = swapped
                     rewritten.add(req_id)
             fam = guard_for(guards, body, "findAndModify")
             if fam is not None and fam.on_delete == "revoke":
+                pin = await cascade_first_for_one(
+                    raw, fam, body.get("$db", ""), verbose)
                 swapped = revoke_instead_of_find_and_delete(
-                    raw, req_id, resp_to, fam, verbose)
+                    raw, req_id, resp_to, fam, verbose, pin)
                 if swapped is not None:
                     raw = swapped
+
+            raw, refused = await derive_on_insert(
+                raw, req_id, resp_to, guards, verbose)
+            if refused is not None:
+                await conv.to_client(refused)
+                continue
 
             # The same call the single-upstream pump makes, for the same
             # reason the delete rewrites above are duplicated rather than
@@ -3251,6 +3481,7 @@ def tally(guards: dict[str, Guard],
     counts = {"served": sum(g.admitted for g in guards.values()),
               "refused": sum(g.refused for g in guards.values()),
               "revoked": sum(g.revoked for g in guards.values()),
+              "cascaded": sum(g.cascaded for g in guards.values()),
               "reasons": reasons}
     if vault is not None:
         counts["sealed"] = vault.sealed_writes
@@ -3266,7 +3497,7 @@ def merge(tallies: list[dict]) -> dict:
     # made the reason accumulator untypeable -- and it is also why
     # `total[key] += ...` and `total["reasons"][reason] = ...` read as the
     # same kind of operation when they are not.
-    counts = {"served": 0, "refused": 0, "revoked": 0}
+    counts = {"served": 0, "refused": 0, "revoked": 0, "cascaded": 0}
     reasons: dict[str, int] = {}
     for one in tallies:
         for key in counts:
@@ -3287,6 +3518,15 @@ def summarise(counts: dict | dict[str, Guard]) -> None:
     reasons = counts.get("reasons") or {}
     print(f"voyd-wire: served {served}, refused {refused} {reasons or '{}'}, "
           f"turned {revoked} delete(s) into revocations", flush=True)
+    cascaded = counts.get("cascaded", 0)
+    if cascaded:
+        # Said separately from `revoked` on purpose. "3 facts revoked" and
+        # "3 facts revoked and 41 things made out of them went too" are
+        # different sentences, and the second one is the only one that
+        # answers an erasure request honestly.
+        print(f"voyd-wire: the refusal travelled to {cascaded} document(s) "
+              f"derived from those facts, marked before the source was",
+              flush=True)
     sealed = counts.get("sealed")
     if sealed is not None:
         print(f"voyd-wire: sealed {sealed} document(s) on the way in, "
@@ -3330,6 +3570,20 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
         print(f"voyd-wire: guarding {name}: {g.spec.describe()}"
               + (", delete -> revoke" if g.on_delete == "revoke" else ""),
               flush=True)
+        if g.spec.lineage_field:
+            # Worth its own line: this is the only declaration that makes
+            # the boundary write to documents the caller never named, and
+            # an operator who finds extra rows marked should find the
+            # reason in the startup output rather than in a stack trace.
+            print(f"voyd-wire: {name} tracks derivation in "
+                  f"{g.spec.lineage_field!r}: an insert naming a parent has "
+                  f"its ancestry closed and is refused if that parent is "
+                  f"already refused"
+                  + ("; a delete marks the derivations first, then the "
+                     "source" if g.on_delete == "revoke" else
+                     ". Deletes here are FORWARDED and really delete, so "
+                     "nothing cascades -- add on_delete='revoke' if that "
+                     "is not what you meant"), flush=True)
         for claim in unsuppliable_claims(g):
             # Said at boot, loudly, because the alternative is correct and
             # useless: a rule whose claim this boundary cannot fill gets
@@ -3424,6 +3678,18 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
     vault = voyd_seal.Vault(**vault_spec) if vault_spec else None
     if vault is not None:
         await vault.open()
+    # Per worker, after the fork, for the same reason the vault is: it owns
+    # sockets and an event loop and neither survives one. Attached to the
+    # guards rather than threaded through a dozen signatures because it is
+    # a property of a *collection that declares lineage*, and every site
+    # that needs it already has that collection's guard in hand.
+    cascade = None
+    if voyd_cascade.Cascade.wanted(guards):
+        cascade = voyd_cascade.Cascade(_vault_uri(target), verbose=verbose)
+        await cascade.open()
+        for g in guards.values():
+            if g.spec.lineage_field:
+                g.cascade = cascade
     secondaries = (Secondaries(fan_out, verbose=verbose, meter=meter,
                                give_up=give_up)
                    if fan_out else None)
@@ -3551,6 +3817,8 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         # down on the way out. A boundary that argues at length about
         # holding a handle you cannot close should not leave one open.
         await vault.aclose()
+    if cascade is not None:
+        await cascade.aclose()
     return counted
 
 
