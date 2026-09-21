@@ -134,6 +134,24 @@ than one awkward example:
 | `over_budget` | how much room is left | no |
 | `redundant` | what is already in the room | no |
 
+And a third thing cannot see them either, which is worth stating because
+this repository ships one. A **source scanner** finds a forgotten rule by
+looking for the filter that expresses it — `voyd-scan` infers the field
+from what a collection's reads agree on, and reports the read that
+deviates. A rule with no query half has no filter, in anybody's source, to
+be the deviation *from*: the reads `over_budget` refuses look exactly like
+the reads it admits. That is not a limit of this scanner to be fixed by a
+better parser — Semgrep and CodeQL have the same nothing to work with.
+
+So the table above is also the reach of every static tool there is, and
+the partition is checked over the whole rule set in
+[`tests/test_the_scanner_and_the_handle_are_one_idea.py`](../tests/test_the_scanner_and_the_handle_are_one_idea.py),
+which runs both halves off the same `Rule` objects: what the handle
+refuses at runtime, the scanner recovers from a hand-rolled repository —
+until the query half runs out, and then nothing does. Egress is not the
+better place to enforce a set-relative rule. It is the only place one can
+be seen at all.
+
 The long version, including what policy engines *are* good at and the
 division of labour that follows, is
 [`policy-engines.md`](policy-engines.md).

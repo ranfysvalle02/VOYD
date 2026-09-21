@@ -197,7 +197,21 @@ calls gone. Route it through a filter on the mark — and if you would rather
 that be enforced structurally than remembered by every person who opens the
 file, that is what [VOYD](../README.md) is for. The same abstraction runs at
 both ends: what this infers statically from your conventions, VOYD's handle
-enforces at runtime as a `Rule`.
+enforces at runtime as a `Rule` — and that sentence is a test rather than a
+sales line. `tests/test_the_scanner_and_the_handle_are_one_idea.py` drives
+both halves off the same rule objects: every rule's query half names a field,
+this scanner recovers that field from a hand-rolled repository without being
+told it, and the read that forgot it is the finding.
+
+**Where that stops, and why it is the interesting part.** Some rules have no
+query half at all — a token budget refuses a document because of the *other*
+documents on the page, so it has no per-document filter and never can. There
+is no filter in your source for this tool to look for, and none for a missing
+one to be the deviation from. Semgrep and CodeQL have the same nothing to work
+with. The partition is checked over the whole rule set in the test above, so
+the honest summary is: a scanner reaches exactly the rules that have a query
+half, which is why a per-document check on the way out is not an optimisation
+of this tool but the only place the rest can live.
 
 The classifier's judgements — and the two ways it could lie about its own
 result — are pinned by `tests/test_leak_scan.py` in the parent repository,
