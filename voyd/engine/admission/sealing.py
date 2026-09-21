@@ -243,34 +243,14 @@ class Sealing(_Composed):
         return Page(kept, refused=tally, examined=len(documents))
 
     async def _why_undecryptable(self, keyring, scope, cache: dict) -> str:
-        """Was the key destroyed, or merely unreachable? ``(the difference)``
+        """Was the key destroyed, or merely unreachable?
 
-        These produce an identical failure at the driver and mean opposite
-        things: one is the feature working -- somebody asked to be
-        forgotten and the key is gone -- and the other is an outage, during
-        which a dashboard reporting "erasures: 41" is reporting a lie.
-
-        **Discriminated by asking our own key vault, not by reading the
-        driver's error text.** A message like *"not all keys requested were
-        satisfied"* is a string in somebody else's library and will change
-        without telling us; whether the key document still exists is a fact
-        we own. Present and undecryptable means the KMS could not unwrap
-        it. Absent means it was shredded.
-
-        Cached per call, because a page of fifty documents from one erased
-        scope should cost one lookup, not fifty. And when the lookup itself
-        fails, the answer is ``key_unavailable`` -- if the key vault cannot
-        be read, "the key is gone" is a conclusion the evidence does not
-        support.
+        One line, because the answer belongs to the key vault rather than
+        to this read path: ``tools/voyd_seal.py`` asks the identical
+        question for a read crossing the wire, and two implementations of
+        it would let one deployment call the same event an erasure here
+        and an outage there. See ``keyring.why_undecryptable``.
         """
-        if scope is None or keyring is None:
-            return UNRECOVERABLE
-        if scope in cache:
-            return cache[scope]
-        try:
-            alive = await keyring.db[keyring.collection].find_one(
-                {"keyAltNames": scope}, {"_id": 1}) is not None
-        except Exception:  # noqa: BLE001 - see docstring
-            alive = True
-        cache[scope] = KEY_UNAVAILABLE if alive else UNRECOVERABLE
-        return cache[scope]
+        from ..keyring import why_undecryptable
+
+        return await why_undecryptable(keyring, scope, cache)

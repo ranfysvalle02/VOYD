@@ -223,7 +223,8 @@ def read_shape(body: Mapping, name: str, collection: str
 
 
 def routes_to_secondary(body: Mapping, guards: Mapping[str, Any],
-                        withdrawn: frozenset = frozenset()
+                        withdrawn: frozenset = frozenset(),
+                        sealed: frozenset = frozenset()
                         ) -> tuple[str, str, int] | None:
     """Should this be ranked on a secondary? Its shape, or ``None``.
 
@@ -251,6 +252,20 @@ def routes_to_secondary(body: Mapping, guards: Mapping[str, Any],
         return None                      # a write wearing a read's name
     if collection in guards and not correlatable(body):
         # Guarded and unverifiable is the one combination that must stay put.
+        return None
+    if collection in sealed:
+        # A sealed collection is never ranked on a secondary, and this is
+        # a correctness stop rather than a performance one. Fan-out takes
+        # the *marks* from the primary and the documents from the
+        # secondary, which is exactly right for a verdict that reads marks
+        # -- and wrong for one that has to decrypt the document it was
+        # handed. The secondary's copy would be decrypted and released
+        # while the primary was only ever asked about `expire_at`, so a
+        # field re-sealed under a new key, or a scope shredded a moment
+        # ago, would be resolved against whichever copy the replica
+        # happened to have. Sealing and fan-out compose; this is the
+        # narrow case where they must not, so it is named rather than
+        # discovered. See LIMITS.md §5.
         return None
     shape = read_shape(body, name, collection)
     if shape in withdrawn:

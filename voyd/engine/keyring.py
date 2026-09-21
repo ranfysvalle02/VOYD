@@ -749,3 +749,46 @@ class _Declared(Custody):
             "process cannot report where the master key lives or who may "
             "destroy it. Use custody=Aws(...)/LocalFile(...) to make that "
             "answerable.", where)
+
+
+async def why_undecryptable(keyring, scope, cache: dict) -> str:
+    """Was the key destroyed, or merely unreachable? ``(the difference)``
+
+    These produce an identical failure at the driver and mean opposite
+    things: one is the feature working -- somebody asked to be forgotten
+    and the key is gone -- and the other is an outage, during which a
+    dashboard reporting "erasures: 41" is reporting a lie.
+
+    **Discriminated by asking our own key vault, not by reading the
+    driver's error text.** A message like *"not all keys requested were
+    satisfied"* is a string in somebody else's library and will change
+    without telling us; whether the key document still exists is a fact we
+    own. Present and undecryptable means the KMS could not unwrap it.
+    Absent means it was shredded.
+
+    Cached per call, because a page of fifty documents from one erased
+    scope should cost one lookup, not fifty. And when the lookup itself
+    fails, the answer is ``key_unavailable`` -- if the key vault cannot be
+    read, "the key is gone" is a conclusion the evidence does not support.
+
+    **A module function rather than a method, because there are now two
+    callers and they must not drift.** ``Sealing.unseal`` asks it for a
+    library read; ``tools/voyd_seal.py`` asks it for a read crossing the
+    wire. A document refused as ``unrecoverable`` through one and
+    ``key_unavailable`` through the other would be the same deployment
+    reporting an erasure and an outage for one event, and whichever answer
+    somebody happened to get would decide whether they paged.
+    """
+    from .admission.reasons import KEY_UNAVAILABLE
+
+    if scope is None or keyring is None:
+        return UNRECOVERABLE
+    if scope in cache:
+        return cache[scope]
+    try:
+        alive = await keyring.db[keyring.collection].find_one(
+            {"keyAltNames": scope}, {"_id": 1}) is not None
+    except Exception:  # noqa: BLE001 - see docstring
+        alive = True
+    cache[scope] = KEY_UNAVAILABLE if alive else UNRECOVERABLE
+    return cache[scope]

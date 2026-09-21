@@ -38,7 +38,11 @@ def test_a_policy_file_compiles_to_the_same_objects_the_library_uses(tmp_path):
     assert spec.rules[0].at_field == "expire_at"
     assert spec.rules[1].field == "forgotten"
     assert spec.rules[1].reversible is False, "a revocation is not a hypothesis"
-    assert OPTIONS["notes"] == {"on_delete": "revoke"}
+    assert OPTIONS["notes"] == {"on_delete": "revoke", "sealed": (),
+                                "scope_field": "tenant_id"}, (
+        "OPTIONS carries the policy choices that are not rules; asserting "
+        "the whole dict rather than one key is deliberate, so a new one "
+        "cannot be added without a reader of this file finding out")
 
 
 def test_the_whole_vocabulary_compiles(tmp_path):
@@ -46,7 +50,7 @@ def test_the_whole_vocabulary_compiles(tmp_path):
     declaration that raises is worse than an undocumented one."""
     spec = load(write(tmp_path, """
 from voyd import (guard, deadline, revocable, holdable, tenant,
-                  restricted_to, embedded_with, budget, distinct)
+                  restricted_to, embedded_with, budget, distinct, sealed)
 
 @guard("everything")
 class E:
@@ -58,11 +62,16 @@ class E:
     model      = embedded_with("voyage-3")
     tokens     = budget(8000)
     chunk      = distinct()
+    secret     = sealed()
 """))["everything"]
     assert spec.tenant == "tenant_id"
     assert [type(r).__name__ for r in spec.rules] == [
         "Deadline", "Marked", "Marked", "Restricted", "EmbeddedWith",
-        "Budget", "Distinct"], "seven rules; tenant is a scope, not a rule"
+        "Budget", "Distinct", "Unrecoverable"], (
+        "eight rules; tenant is a scope, not a rule. sealed() contributes "
+        "an Unrecoverable so a ciphertext field that reaches a read path "
+        "which never decrypted it is refused by name rather than "
+        "serialised into a prompt as a Binary pretending to be text")
 
 
 @pytest.mark.parametrize("body,why", [

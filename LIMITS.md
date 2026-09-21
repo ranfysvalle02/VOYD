@@ -13,25 +13,30 @@ yet. They are marked.
 
 ## 1. The one that actually matters
 
-**Nobody has used this but its author.** 87 commits, one contributor, zero
+**Nobody has used this but its author.** 96 commits, one contributor, zero
 external users, zero pilots. Every claim in this repository is verified by
 somebody who also wrote the claim.
 
 That is not a coverage problem and no amount of code fixes it. The suite is
 good at holding claims somebody thought to state; it has never once been the
 thing that caught a problem a *user* hit, because there have been no users.
-Thirteen defects this month, and the way they were found is the point.
-Nine came from running something new: three from exercising paths nobody
-had exercised, four from the hostile pass in §4, and two more from the
+Fifteen defects this month, and the way they were found is the point.
+Eleven came from running something new: three from exercising paths nobody
+had exercised, four from the hostile pass in §4, two more from the
 hostile pass against fan-out in §3 -- a cheap query pattern withdrawing
 the expensive one it shared a collection with, and a secondary's error
-becoming the client's. One came from the benchmark contradicting a commit
+becoming the client's -- and two from pointing an ordinary driver at
+`--key-vault` and reading what came back: an erasure that destroyed the key
+without first revoking the documents, leaving them readable for the length
+of a key cache (§5), and a delete clause read from the command body when a
+`delete` carries it in a document sequence, which made the boundary miss
+every erasure request it was sent. One came from the benchmark contradicting a commit
 message that had already been pushed. Three came from *writing a test*: the scanner's two-mark finding in §4; the
 read-preference claim in §3, where the defect was in the prose and three
 files had spent weeks talking a reader out of something the proxy could
 already do; and fan-out's identity check, which looked for a standalone
 `saslStart`, never fired against a real driver's speculative handshake, and
-was fail-open while it did not — the most serious of the eleven, and the
+was fail-open while it did not — the most serious of the fifteen, and the
 only one a user could have been harmed by rather than merely misled.
 
 That last one is worth the sentence it costs. It was written *and* reviewed
@@ -44,6 +49,13 @@ where writing the assertion was the search.
 Not one was found by the suite going red. That is the honest description of
 where an outside perspective would land: the suite is a ratchet, not a
 search, and everything above was a search.
+
+The two newest are the cleanest example on the page, because they cost
+nothing to find. The feature was finished, the code read correctly, and the
+first client pointed at it produced a shredded tenant's plaintext and an
+erasure the boundary never noticed. Fifteen minutes of *using* it beat every
+hour of writing it. That is not an argument for more testing; it is the
+argument for the paragraph above this one.
 
 **What would change it:** one team, two weeks, their own corpus. Everything
 else on this page is second.
@@ -76,7 +88,10 @@ rather than an import) and the entire reason cryptographic erasure exists
 beside it (a destroyed key is not bypassable by connecting somewhere else).
 
 Neither fully closes it. A DBA with a shell still reads everything that is
-not encrypted.
+not encrypted -- and as of `--key-vault` (§5), what a policy declares
+`sealed()` is encrypted for every writer in every language rather than only
+for the ones that imported this package. What that DBA reads there is
+ciphertext, and once the scope's key is destroyed so is everybody's.
 
 ### Admission is a veto, not a constructor
 
@@ -624,7 +639,132 @@ boundary survived a full `mongod` restart without one of its own.
 
 ---
 
-## 5. Operational notes that will surprise somebody
+## 5. What `--key-vault` costs
+
+This section exists because the trade is real and the README leads with the
+property it spends. Everything else the wire boundary does is a refusal: it
+is handed documents and returns the ones a prompt may see, which is why
+`reachable()` is pure, why the proxy holds no database connection of its own,
+and why refusal costs 2.3 microseconds per document. Those are the same fact
+said three ways, and `--key-vault` gives all three up.
+
+**Why it had to be given up.** Refusal binds *this application's read path*
+(§2). A replica does not run it, a snapshot does not, a backup restored next
+year does not, and a DBA with a shell does not. No amount of refusing closes
+that -- the plaintext is on disk and every copy of the disk has it.
+Destroying a key closes it for every copy at once without visiting any of
+them. But a key is a thing you must hold, and a boundary that holds no keys
+cannot destroy one.
+
+**What is now true with the flag on**, stated rather than discovered:
+
+- **The boundary has a database connection of its own.** One per worker, to
+  the key vault. Every other upstream connection this proxy makes is the
+  client's.
+- **The boundary holds KMS credentials and is a custody holder.** It prints
+  which rung is in force at startup, and prints `THIS BOUNDARY NOW HOLDS
+  KEYS` beside it, because a reader who learned the purity claim from the
+  README is owed the correction louder than a footnote.
+- **A sealed read is no longer 2.3 microseconds.** It decrypts before it
+  refuses. That ordering is not a preference: it is the order
+  `Admission._unsealed` uses, and the two must agree or the same document
+  would be admitted through the library and refused through the wire.
+  Unsealed collections are untouched and still take the pure path, so a
+  deployment sealing one collection of twelve pays for one of twelve.
+- **A document refused by a deadline has still been decrypted** by the time
+  the deadline sees it. Wasted work, not a leak -- it never leaves the
+  process -- but worth naming.
+
+**What is bought** is the sentence the library version cannot say. In-process,
+`schema_map` encrypts below the *application*, so no writer in that Python
+process can forget. On the wire it encrypts below the *driver*, so no writer
+in any language can: not the Node service, not the migration script, not the
+shell, not the notebook, not the one written next year by somebody who has
+not read any of this. That is the same upgrade the wire gave `delete`,
+applied to the stronger guarantee.
+
+### The defect that running it found
+
+The first working version destroyed the key and nothing else, which is what
+"crypto-shredding on the wire" sounds like it should mean. It was wrong, and
+it was wrong in the way this repository is named after.
+
+Destroying a key is not instant at the reader. libmongocrypt caches data
+keys, so a process that decrypted a scope a moment ago keeps decrypting it
+until that cache turns over -- about 60 seconds, which is the same shape and
+very nearly the same number as the TTL monitor window the README opens by
+complaining about. A shred on its own therefore opened *a second
+delete-is-a-wish window, inside the feature that exists to close the first
+one*: the boundary reported an erasure, the operator believed it, and the
+plaintext kept being served for the next minute.
+
+`keyring.py` already had the answer written down -- *unreachable first,
+erased second; the reverse order is the bug* -- and the wire shipped the
+reverse order anyway. So an erasure through the boundary is now two things
+in one command: the scope's documents are revoked, which makes them
+unreachable on the very next read with no window at all, and *then* the key
+is destroyed, which makes every copy unreadable everywhere once the cache
+turns over. The two halves cover each other exactly, which is the argument
+for having both rather than choosing.
+
+It was found by pointing a driver at it and reading the output, not by the
+suite going red -- §1, again, and this is the fourteenth. The assertion that
+now catches it (`test_destroying_a_key_is_immediate_not_eventual`) was
+written after the defect, which is the honest order.
+
+### Open, and marked
+
+**An erasure is recognised by its shape, not by a verb.** The key vault is an
+ordinary collection, so `db["__keys"].delete_one({"keyAltNames": "alice"})`
+is how any driver in any language asks -- which is the right interface and
+is also why the boundary has to *notice*. Only an exact match or an `$in` on
+`keyAltNames` is recognised. A filter this cannot read forwards the delete,
+so the key still dies, and the revocation that should have preceded it is
+skipped. **Consider:** that is fail-open on the *window*, not on the erasure.
+A regex or `$nin` delete against the vault would erase correctly and leave
+the minute-long window open, and nothing currently refuses it.
+
+**A sealed collection is never ranked on a secondary.** Fan-out takes the
+marks from the primary and the documents from a secondary, which is right
+for a verdict that reads marks and wrong for one that must decrypt what it
+was handed. Sealing and fan-out otherwise compose; this is the narrow case
+where they must not, so it is a routing rule with a test rather than a
+discovery.
+
+**Ephemeral custody with `--workers N` is a data-loss shape, and is avoided
+by construction rather than by care.** The master key is built in the parent
+before the fork and inherited, so every worker has the same one. Built per
+worker it would mint a different key each, and a tenant written through one
+worker would be undecryptable through the next -- a bug that appears only at
+`--workers 2` and looks like corruption. The default custody is still
+`Ephemeral`, which does not survive a restart, and the boundary says so in
+capitals at startup.
+
+**A pipeline update that may assign a sealed field is refused.** Its stages
+compute values inside the server, where this boundary cannot encrypt what
+they produce, so the field would land as plaintext written by the server
+itself. Detected by looking for the field name in the pipeline's text, which
+is deliberately over-broad: a pipeline that merely mentions the name is
+refused too. **Consider:** that is the safe direction and it is still a
+false positive somebody will hit.
+
+**`$inc`, `$push` and `$rename` on a sealed field are refused**, because a
+sealed value is opaque ciphertext and those operations have no meaning
+against one. `$set` and `$setOnInsert` are the two that do.
+
+**The server-side validator is not applied by the wire.** In-process,
+`Keyring.enforce()` puts a `binData` validator on a sealed collection, so a
+writer that bypasses the library entirely is refused by the *server*. The
+wire boundary does not install it, so a second service connecting directly
+to the cluster can still write plaintext into a sealed field. **Consider:**
+the boundary could install the same validator at startup. It would close the
+gap for every writer, and it would also mean a proxy silently altering
+collection options on a cluster it does not own, which is a bigger surprise
+than the one it fixes. Undecided, and unclosed today.
+
+---
+
+## 6. Operational notes that will surprise somebody
 
 **A search index is not free, and `mongot` is shared.** Nine abandoned
 databases carrying 24 search indexes between them was enough to starve new
@@ -650,7 +790,7 @@ which on a replica set reads perfectly and rejects every write.
 
 ---
 
-## 6. Decisions waiting on evidence
+## 7. Decisions waiting on evidence
 
 Not frozen out of caution — frozen because building them before somebody
 wants them adds surface that has to be kept honest forever.
@@ -665,7 +805,7 @@ wants them adds surface that has to be kept honest forever.
 
 ---
 
-## 7. Deliberately not doing
+## 8. Deliberately not doing
 
 Reasons recorded so they are not relitigated every six months.
 
@@ -687,7 +827,7 @@ Reasons recorded so they are not relitigated every six months.
 
 ---
 
-## 8. If you read one thing
+## 9. If you read one thing
 
 The recurring defect in this project is not a category of bug. It is a
 **category of silence**: an instrument that is wrong and says nothing. The

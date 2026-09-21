@@ -50,6 +50,7 @@ from typing import Any, Callable
 
 from .engine import (Budget, Deadline, Distinct, EmbeddedWith, Marked,
                      Restricted, revoked)
+from .engine.admission.rules import Unrecoverable
 from .engine.admission import AdmissionSpec
 
 
@@ -132,9 +133,44 @@ def distinct() -> _Field:
     return _Field("rule", lambda f: Distinct(on=f))
 
 
+def sealed() -> _Field:
+    """This field is ciphertext at rest, under a key scoped to the tenant.
+
+    The one thing refusal structurally cannot do. Refusal binds *this*
+    application's read path, so it has nothing to say about a replica, a
+    snapshot, or the backup somebody restores next year -- none of those run
+    this read path. Destroying the key binds all of them at once, and this
+    is how a field opts into being destroyable that way.
+
+    **The key is the tenant's, which is why this requires ``tenant()``.**
+    A scope with no name is a scope with one key, and one key per collection
+    makes erasure all-or-nothing: the subject who asked to be forgotten takes
+    every other tenant with them. So ``sealed()`` without ``tenant()`` is
+    refused at *load*, in the same breath as every other way a policy file
+    can be wrong.
+
+    Declared here and enforced two ways, which are not the same guarantee:
+
+    - through the library, ``schema_map`` encrypts below the application, so
+      no writer in this process can forget;
+    - through the wire, ``--key-vault`` encrypts on the boundary, so no
+      writer in any *language* can forget -- including the shell, the
+      migration script, and the service written next year by somebody who
+      has not read this file.
+
+    The second is the one that took the proxy's purity. See
+    ``LIMITS.md`` §5.
+
+    An ``Unrecoverable`` rule is attached alongside, so a sealed field that
+    reaches a read path which never decrypted it is refused by name rather
+    than serialised into a prompt as a ``Binary`` blob pretending to be text.
+    """
+    return _Field("sealed", lambda f: Unrecoverable(field=f))
+
+
 # Every collection declared in a loaded policy file, by name, with the
-# policy choices that are not rules -- today that is only what a `delete`
-# on the wire should mean.
+# policy choices that are not rules: what a `delete` on the wire should
+# mean, and which fields are ciphertext at rest under whose key.
 REGISTRY: dict[str, AdmissionSpec] = {}
 OPTIONS: dict[str, dict] = {}
 
@@ -162,6 +198,7 @@ def guard(collection: str, *, lineage_field: str | None = None,
             f"{ON_DELETE}. 'forward' lets a delete really delete")
     def decorate(cls):
         rules, tenant_field, seen = [], None, set()
+        sealed_fields: list[str] = []
         for name, value in vars(cls).items():
             if name.startswith("__") or not isinstance(value, _Field):
                 continue
@@ -176,9 +213,21 @@ def guard(collection: str, *, lineage_field: str | None = None,
                 raise ValueError(
                     f"{collection}: two deadline fields. Two clocks is the "
                     f"drift this exists to remove")
+            if value.kind == "sealed":
+                sealed_fields.append(name)
             seen.add(value.kind)
             assert value.build is not None
             rules.append(value.build(name))
+
+        if sealed_fields and tenant_field is None:
+            raise ValueError(
+                f"{collection}: sealed() on {', '.join(sealed_fields)} with "
+                f"no tenant() field. The key is scoped to the tenant, so a "
+                f"scope with no name is one key for the whole collection -- "
+                f"and destroying it to forget one subject would make every "
+                f"other tenant's rows unreadable at the same instant. "
+                f"Declare tenant(), or encrypt with a literal keyId outside "
+                f"this boundary and accept that erasure is all-or-nothing")
 
         if not rules and tenant_field is None:
             raise ValueError(
@@ -197,7 +246,9 @@ def guard(collection: str, *, lineage_field: str | None = None,
         REGISTRY[collection] = AdmissionSpec(
             collection, rules=tuple(rules), tenant=tenant_field,
             lineage_field=lineage_field)
-        OPTIONS[collection] = {"on_delete": on_delete}
+        OPTIONS[collection] = {"on_delete": on_delete,
+                               "sealed": tuple(sealed_fields),
+                               "scope_field": tenant_field}
         return cls
     return decorate
 

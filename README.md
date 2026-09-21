@@ -132,7 +132,8 @@ Run it: `uv run python examples/wire.py`.
 
 The proxy holds no database connection of its own. The per-document check is
 pure — handed documents, returns the ones a prompt may see — which is what
-makes it movable to a wire at all.
+makes it movable to a wire at all. One flag spends that, deliberately and in
+one place: [`--key-vault`](#the-erasure-refusal-cannot-perform).
 
 ## The vocabulary
 
@@ -146,6 +147,7 @@ makes it movable to a wire at all.
 | `embedded_with(model)` | refuse a vector from a different embedding model |
 | `budget(n)` | refuse once the prompt has no room left |
 | `distinct()` | refuse a repeat of content already on the page |
+| `sealed()` | ciphertext at rest, under a key scoped to the tenant |
 
 The last two are **set-relative**: they refuse a document because of the
 *other* documents on the page, so the same document is admitted alone and
@@ -197,11 +199,136 @@ await docs.revoke({"_id": x}, reason="credential leaked")
 `revoke()` makes a fact unreachable on the next read while its row is still on
 disk. Unreachable first, erased second — the reverse order is the bug.
 
-Also kept, and both are reachable only from the library today:
-**automatic encryption** (a key per scope, destroyed on the same deadline, so
-every copy becomes unreadable at once — the one question refusal cannot
-answer) and **server-side embedding** (`auto_embed`, so the index owns the
-vector and a client-side embedder cannot drift from it).
+Also kept: **server-side embedding** (`auto_embed`, so the index owns the
+vector and a client-side embedder cannot drift from it), which is reachable
+only from the library today. Encryption is not on that list any more — see
+below.
+
+## The erasure refusal cannot perform
+
+Refusal answers *may this fact reach a prompt* — immediately, on every read,
+whatever the sweeper is doing. It has nothing to say about a replica, a
+snapshot, or a backup somebody restores next year, because **none of those
+run this read path**. That is the honest gap. It is in
+[LIMITS.md](LIMITS.md) §2 and no amount of refusing closes it: the plaintext
+is on disk and every copy of the disk has it.
+
+Destroying a key closes it for every copy at once, without visiting any of
+them. Declare which field:
+
+```python
+@guard("notes", on_delete="revoke")
+class Notes:
+    expire_at = deadline()
+    forgotten = revocable()
+    tenant_id = tenant()
+    text      = sealed()          # ciphertext at rest, key per tenant
+```
+
+```bash
+python tools/voyd_wire.py --config voydfile.py --target "$ATLAS" \
+    --key-vault app --kms local:/etc/voyd/master.key
+```
+
+Then the same plain driver, with no encryption configured and no VOYD import
+in it:
+
+```
+  db.notes.insert_one({"tenant_id": "alice", "text": SECRET})
+
+  through the boundary  'alice was treated for a stress fracture in March'
+  on disk               Binary(b'\x02\x06;\x8c4\xbc\xbfI\xba\x8b...', 6)
+```
+
+**`sealed()` requires `tenant()`, and that is the whole design.** The key is
+the tenant's, so erasing one subject touches nobody else. A literal `keyId`
+would give one key per collection, and honouring one person's erasure
+request would make every other tenant's rows unreadable at the same instant.
+Declaring `sealed()` with nothing to scope it to is refused when the policy
+file is *loaded*.
+
+### Erasure is two things, in one order
+
+An erasure needs no new verb, because the key vault is an ordinary
+collection:
+
+```
+  db["__keys"].delete_one({"keyAltNames": "alice"})
+
+  alice, through the boundary   []          <- immediately
+  bob,   through the boundary   ['the fault code is P0301']
+  rows on disk                  2           <- nothing was destroyed
+  alice's mark                  'key destroyed' at 2026-09-21T12:31:04
+  alice's bytes                 Binary(...) <- noise, in every copy
+```
+
+The boundary **revokes the scope's documents, then destroys its key**, and
+the order is the entire correctness of the feature rather than a nicety.
+Destroying a key is not instant at the reader: libmongocrypt caches data
+keys, so a process that decrypted a scope a moment ago keeps decrypting it
+until that cache turns over — about 60 seconds, which is the same shape and
+very nearly the same number as the TTL window this README opens by
+complaining about.
+
+A shred on its own therefore opens *a second delete-is-a-wish window, inside
+the feature that exists to close the first one*. The first working version
+of this did exactly that, and served a shredded tenant's plaintext for
+thirty seconds while reporting the erasure as done. **Unreachable first,
+erased second.** The two halves cover each other exactly:
+
+```
+  the key cache is a window where the ciphertext still reads
+      -> refusal already refused the document, on the first read
+         after the revocation, with no window at all
+  refusal only binds this application's read path
+      -> the key is gone, so a backup restored next year is noise
+```
+
+### What this costs, stated rather than discovered
+
+This is the one flag that spends the property the rest of this README leads
+with, so it says so at startup rather than in a footnote:
+
+```
+voyd-wire: key vault app.__keys; custody is LocalFile -- /etc/voyd/master.key
+voyd-wire: sealing notes.{text} under a key per tenant_id; shred one and
+           every copy of that tenant's ciphertext is noise
+voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database connection of its
+           own and is a custody holder; sealed reads decrypt before they
+           refuse. See LIMITS.md §5
+```
+
+- **A connection of its own**, one per worker, to the key vault. Every other
+  upstream connection this proxy makes is the client's.
+- **A credential of its own.** `--kms local:/path` keeps the master key in a
+  file; `--kms env:PREFIX` reaches the rungs where destroying it is somebody
+  else's audited operation. The default is ephemeral, does not survive a
+  restart, and says so in capitals.
+- **A sealed read is no longer 2.3µs.** It decrypts before it refuses —
+  which is the order the library uses, and the two must agree or the same
+  document would be admitted one way and refused the other. Unsealed
+  collections still take the pure path untouched.
+- **A write it cannot seal is refused, never forwarded.** No tenant in the
+  document, a pipeline update that may assign a sealed field, `$inc` on
+  ciphertext: the error goes straight back and the server never sees the
+  command. There is no safe fallback — forwarding puts plaintext on the
+  disk, the replica and the backup, permanently, and no later fix reaches
+  the copy that already has it.
+- **A sealed collection is never ranked on a secondary.** Fan-out takes the
+  marks from the primary and the documents from a replica, which is right
+  for a verdict that reads marks and wrong for one that must decrypt what it
+  was handed.
+
+**What it buys is the sentence the library version cannot say.** In-process,
+`schema_map` encrypts below the *application*, so no writer in that Python
+process can forget. On the wire it encrypts below the *driver*, so no writer
+in any language can — not the Node service, not the migration script, not
+the shell, not the notebook, not the one written next year by somebody who
+has not read this file. That is the same upgrade the wire gave `delete`,
+applied to the stronger guarantee.
+
+Run it: `uv run python examples/seal.py`. The full trade, including what is
+still open, is [LIMITS.md](LIMITS.md) §5.
 
 ## Status
 
@@ -211,7 +338,7 @@ the hash-chain ledger and the context index are gone, along with ~817 tests
 and ~35,000 words of documentation that described them. What is left is the
 boundary, the policy file, and the wire.
 
-The suite is **110 tests**, and it is the foundation rather than a census —
+The suite is **268 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie:
 
@@ -223,6 +350,7 @@ above it a lie:
 | a plain driver gets all of it | real `mongod`, real proxy, real driver |
 | the write path forgets without deleting | the deadline moves *earlier only*; a quarantine stays pinned; a revocation cannot be lifted |
 | encryption is the answer refusal cannot give | plaintext is not on disk, shredding one tenant leaves the others readable |
+| **the boundary seals and shreds** | a plain driver with no encryption configured writes ciphertext; an erasure is unreachable *immediately* and unreadable everywhere after |
 | a refusal travels | revoke a source, the summary and the answer and the embedding go with it |
 | the boundary sizes its own fetch | `numCandidates` from the measured refusal rate, not a constant |
 | it is operable | TLS termination, a capped message size, keepalive, a draining `SIGTERM` |
@@ -239,7 +367,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 106 tests, 16 seconds -- the inner loop
+pytest              # 268 tests, 93 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 
@@ -250,8 +378,9 @@ changed, and CI runs those three in a step with no database to make it
 obvious.
 
 The suite is checked against sabotage rather than trusted: disabling the
-delete rewrite, the tenant egress check, the tenant *shape* check, cascade, or
-refusal itself each turns it red.
+delete rewrite, the tenant egress check, the tenant *shape* check, cascade,
+refusal itself, wire-side encryption, or the revocation that must precede a
+shred each turns it red.
 
 ### Fan-out
 

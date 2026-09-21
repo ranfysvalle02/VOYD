@@ -78,6 +78,7 @@ except ImportError:  # pragma: no cover - the one dependency, and it is pymongo'
     sys.exit("pip install pymongo   (for the bson library)")
 
 import voyd_fanout
+import voyd_seal
 import voyd_metrics
 from voyd.declare import OPTIONS, load
 from voyd.engine import Deadline, revoked
@@ -111,6 +112,12 @@ class Guard:
         self.refused = 0
         self.admitted = 0
         self.revoked = 0
+        # Refusals that happened during decryption rather than during
+        # `reachable()`. Counted on the guard so one collection has one
+        # tally: an operator asking "what did this refuse" should not have
+        # to know that `unrecoverable` is answered by a different object
+        # than `expired` is.
+        self.sealed_refused: dict[str, int] = {}
 
     @classmethod
     def defaults(cls, collection: str, *, at_field: str, mark_field: str):
@@ -140,8 +147,16 @@ class Guard:
         self.admitted += len(kept)
         return kept
 
+    def note_sealed(self, tally: dict[str, int]) -> None:
+        for reason, count in tally.items():
+            self.sealed_refused[reason] = self.sealed_refused.get(reason, 0) + count
+        self.refused += sum(tally.values())
+
     def reasons(self) -> dict:
-        return self.handle.receipts().get("refused_by_reason", {})
+        counts = dict(self.handle.receipts().get("refused_by_reason", {}))
+        for reason, count in self.sealed_refused.items():
+            counts[reason] = counts.get(reason, 0) + count
+        return counts
 
 
 # MongoDB's own ceiling (`maxMessageSizeBytes`). A length field arrives from
@@ -759,12 +774,127 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
     return encode_op_msg(req_id, resp_to, flags, reply)
 
 
+async def erase_first(body: Mapping, statements: list,
+                      guards: dict[str, Guard],
+                      vault: "voyd_seal.Vault | None", verbose: bool) -> None:
+    """If this client is destroying a key, revoke its documents first.
+
+    Sequenced here, on the request, rather than left to the operator to
+    remember as two commands in the right order. Getting it backwards is
+    not a style question: a key destroyed before the documents are marked
+    leaves them readable for as long as a decrypting process keeps the key
+    cached, which is about a minute -- the same window, in the same shape,
+    as the TTL monitor this repository opens by complaining about.
+    """
+    if vault is None:
+        return
+    scopes = vault.erasing(body, statements, body.get("$db", ""))
+    if not scopes:
+        return
+    pipelines = {name: _forget_pipeline(g.spec, "key destroyed")
+                 for name, g in guards.items()}
+    marked = await vault.revoke_first(scopes, pipelines)
+    for name, g in guards.items():
+        if vault.seals(name):
+            g.revoked += marked
+    if verbose:
+        print(f"  voyd: erasure of {', '.join(scopes)}: revoked {marked} "
+              f"document(s) first, so they are unreachable now rather than "
+              f"when the key cache turns over; destroying the key next",
+              flush=True)
+
+
+def seal_refusal(req_id: int, resp_to: int, why: str) -> bytes:
+    """Answer a write this boundary will not seal, without forwarding it.
+
+    The error goes straight back and the server never sees the command, so
+    the plaintext never leaves this process. A refused write is loud,
+    harmless and fixable; a forwarded one is silent, permanent and already
+    in the backup.
+    """
+    print(f"  voyd: REFUSED a write it cannot seal: {why}", flush=True)
+    return encode_op_msg(req_id, resp_to, 0, {
+        "ok": 0.0, "code": 8000, "codeName": "AtlasError",
+        "errmsg": f"voyd-wire refuses this write: {why}",
+    })
+
+
+async def judge(raw: bytes, req_id: int, resp_to: int,
+                guards: dict[str, Guard], verbose: bool,
+                vault: "voyd_seal.Vault | None") -> bytes:
+    """`enforce`, plus decryption for the collections that declared it.
+
+    **The fast path is byte-for-byte the old one.** With no `--key-vault`,
+    or on a collection nobody sealed, this is one dictionary lookup and
+    then `enforce` -- still pure, still `bytes -> bytes`, still about 2.3
+    microseconds per document. That matters because sealing is opt-in per
+    collection and a deployment that seals one of twelve should pay for
+    one of twelve.
+
+    **The sealed path decrypts before it refuses, and the order is not a
+    preference.** It is the order `Admission._unsealed` uses, and the two
+    have to agree or the same document would be admitted through the
+    library and refused through the wire. It also costs something real: a
+    rule that reads a sealed field is reading plaintext, which it could not
+    do if refusal ran first, and a document refused by a deadline has still
+    been decrypted by the time the deadline sees it. Decrypting something
+    that is then refused is wasted work, not a leak -- it never leaves this
+    process -- but it is wasted work worth naming.
+    """
+    if vault is None:
+        return enforce(raw, req_id, resp_to, guards, verbose)
+
+    peek = decode_op_msg(raw, LAZY)
+    if peek is None:
+        return raw
+    collection = _collection_of(peek[1])
+    if not vault.seals(collection):
+        return enforce(raw, req_id, resp_to, guards, verbose)
+
+    # Eager, unlike the fast path: these documents are about to be rebuilt
+    # with a decrypted field in them, so there is no forwarding the bytes
+    # they arrived in and nothing to be lazy for.
+    decoded = decode_op_msg(raw)
+    if decoded is None:
+        return raw
+    flags, reply = decoded
+    cursor = reply.get("cursor")
+    if not isinstance(cursor, Mapping):
+        return raw
+    key = "firstBatch" if "firstBatch" in cursor else (
+        "nextBatch" if "nextBatch" in cursor else None)
+    if key is None:
+        return raw
+    batch = cursor[key]
+    if not isinstance(batch, list) or not batch:
+        return raw
+
+    assert collection is not None
+    guard = guards.get(collection)
+    plain, tally = await vault.unseal(batch, collection)
+    if guard is not None:
+        if tally:
+            guard.note_sealed(tally)
+        kept = guard.filter(plain)
+    else:
+        kept = plain
+
+    reply = dict(reply)
+    reply["cursor"] = dict(cursor)
+    reply["cursor"][key] = kept
+    if verbose and (tally or len(kept) != len(batch)):
+        named = guard.reasons() if guard is not None else tally
+        print(f"  voyd: {collection}: refused {len(batch) - len(kept)} of "
+              f"{len(batch)}  {named}", flush=True)
+    return encode_op_msg(req_id, resp_to, flags, reply)
+
 async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                back: asyncio.StreamWriter, *, to_server: bool,
                guards: dict[str, Guard], verbose: bool,
                rewritten: set[int],
                upstream: Upstream | None = None,
                advertise: str | None = None,
+               vault: "voyd_seal.Vault | None" = None,
                meter: "voyd_metrics.Meter | None" = None) -> str:
     """One direction of one connection.
 
@@ -849,6 +979,29 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         raw, req_id, resp_to, fam, verbose)
                     if swapped is not None:
                         raw = swapped
+
+                # Sealing is last, and after a re-decode rather than on
+                # the `head` above, because the two rewrites before it may
+                # have replaced the message. Reading a stale parse here
+                # would seal a command that is no longer the one being
+                # sent, which is the kind of bug that only shows up on the
+                # combination nobody ran.
+                await erase_first(body, head[3] if head else [],
+                                  guards, vault, verbose)
+
+                if vault is not None and vault.targets(body):
+                    again = decode_sections(raw)
+                    if again is not None:
+                        try:
+                            resealed = await vault.seal_command(
+                                dict(again[1]), again[2], again[3])
+                        except voyd_seal.SealError as exc:
+                            await send(back, seal_refusal(
+                                req_id, req_id, str(exc)))
+                            continue
+                        if resealed is not None:
+                            raw = encode_sections(req_id, resp_to, again[0],
+                                                  *resealed)
             elif opcode == OP_MSG:
                 if advertise:
                     rebuilt = rewrite_topology(raw, req_id, resp_to, advertise)
@@ -869,7 +1022,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                             upstream.invalidate(why)
 
                 raw = (delete_reply(raw, req_id, resp_to) if was_delete
-                       else enforce(raw, req_id, resp_to, guards, verbose))
+                       else await judge(raw, req_id, resp_to, guards,
+                                        verbose, vault))
             await send(writer, raw)
     except Hangup:
         # Not an error, and the one disconnect the caller may still be
@@ -1433,6 +1587,7 @@ class Live:
 async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter,
                   upstream: Upstream, guards: dict[str, Guard], verbose: bool,
                   live: Live, advertise: str | None = None,
+                  vault: "voyd_seal.Vault | None" = None,
                   meter: "voyd_metrics.Meter | None" = None,
                   half_close_seconds: float = 10.0) -> None:
     """One client connection, start to finish, as one coroutine pair.
@@ -1464,7 +1619,7 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
         rewritten: set[int] = set()
         common = {"guards": guards, "verbose": verbose,
                   "rewritten": rewritten, "upstream": upstream,
-                  "advertise": advertise, "meter": meter}
+                  "advertise": advertise, "vault": vault, "meter": meter}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
         back = asyncio.ensure_future(pump(up_r, client_w, up_w,
@@ -1793,7 +1948,7 @@ def authenticating(body: Mapping) -> tuple[bool, tuple[str, str] | None]:
 async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 upstream: Upstream, secondaries: Secondaries,
                 guards: dict[str, Guard], verbose: bool,
-                rewritten: set[int],
+                rewritten: set[int], vault: "voyd_seal.Vault | None",
                 meter: "voyd_metrics.Meter | None") -> str:
     """client -> upstream, choosing which upstream each message goes to.
 
@@ -1849,6 +2004,31 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 if swapped is not None:
                     raw = swapped
 
+            # The same call the single-upstream pump makes, for the same
+            # reason the delete rewrites above are duplicated rather than
+            # factored: the two paths must agree about what a sealed write
+            # means, and the way to be sure of that is that both call
+            # `vault.seal_command` -- not that one of them calls the other.
+            # A write is never fanned out, so this is only ever on the
+            # primary leg.
+            await erase_first(body, head[3] if head else [],
+                              guards, vault, verbose)
+
+            if vault is not None and vault.targets(body):
+                again = decode_sections(raw)
+                if again is not None:
+                    try:
+                        resealed = await vault.seal_command(
+                            dict(again[1]), again[2], again[3])
+                    except voyd_seal.SealError as exc:
+                        await conv.to_client(
+                            seal_refusal(req_id, req_id, str(exc)))
+                        continue
+                    if resealed is not None:
+                        raw = encode_sections(req_id, resp_to, again[0],
+                                              *resealed)
+                        original = raw
+
             # ---- the identity check -------------------------------------
             #
             # The secondary connection is this proxy's, not the client's. If
@@ -1877,7 +2057,8 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 if isinstance(more, int):
                     dest = conv.home.get(more, "primary")
                 elif (shape := voyd_fanout.routes_to_secondary(
-                        body, guards, secondaries.payoff.withdrawn())):
+                        body, guards, secondaries.payoff.withdrawn(),
+                        frozenset(vault.sealed) if vault else frozenset())):
                     if conv.secondary_w is None:
                         opened = await secondaries.open()
                         if opened is not None:
@@ -1924,7 +2105,7 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
 async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
                   source: str, guards: dict[str, Guard], verbose: bool,
                   rewritten: set[int], upstream: Upstream | None,
-                  advertise: str | None,
+                  advertise: str | None, vault: "voyd_seal.Vault | None",
                   meter: "voyd_metrics.Meter | None") -> str:
     """One upstream -> the client, with the verdict taken on the way.
 
@@ -2006,7 +2187,8 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
                 was_delete = resp_to in rewritten
                 rewritten.discard(resp_to)
                 raw = (delete_reply(raw, req_id, resp_to) if was_delete
-                       else enforce(raw, req_id, resp_to, guards, verbose))
+                       else await judge(raw, req_id, resp_to, guards,
+                                        verbose, vault))
             await conv.to_client(raw)
     except Hangup:
         return "hangup"
@@ -2023,7 +2205,7 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
 
 async def fanned_session(client_r, client_w, upstream: Upstream,
                          secondaries: Secondaries, guards, verbose: bool,
-                         live: Live, advertise, meter) -> None:
+                         live: Live, advertise, vault, meter) -> None:
     """One client connection when `--fan-out` is on.
 
     Deliberately a sibling of `session` rather than a mode inside it. The
@@ -2046,12 +2228,14 @@ async def fanned_session(client_r, client_w, upstream: Upstream,
         rewritten: set[int] = set()
         tasks = [
             asyncio.ensure_future(route(client_r, conv, upstream, secondaries,
-                                        guards, verbose, rewritten, meter)),
+                                        guards, verbose, rewritten, vault,
+                                        meter)),
             asyncio.ensure_future(replies(up_r, conv, source="primary",
                                           guards=guards, verbose=verbose,
                                           rewritten=rewritten,
                                           upstream=upstream,
-                                          advertise=advertise, meter=meter)),
+                                          advertise=advertise, vault=vault,
+                                          meter=meter)),
         ]
         secondary_task = None
         try:
@@ -2068,7 +2252,7 @@ async def fanned_session(client_r, client_w, upstream: Upstream,
                         replies(conv.secondary_r, conv, source="secondary",
                                 guards=guards, verbose=verbose,
                                 rewritten=rewritten, upstream=None,
-                                advertise=None, meter=meter))
+                                advertise=None, vault=vault, meter=meter))
                     continue
                 if done:
                     break
@@ -2146,7 +2330,8 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           keyfile: str | None = None, max_connections: int = 200,
           drain_seconds: float = 20.0, advertise: str | None = None,
           workers: int = 1, metrics_port: int | None = None,
-          fan_out: str | None = None, give_up: float = 1.0) -> None:
+          fan_out: str | None = None, give_up: float = 1.0,
+          vault_spec: dict | None = None) -> None:
     """Bind, announce, then run the boundary -- in this process or N of them.
 
     The listening socket is bound *here*, once, before any fork. That is
@@ -2177,6 +2362,29 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
         print("voyd-wire: NOT rewriting topology -- clients must pass "
               "directConnection=true or they will walk past this boundary",
               flush=True)
+    if vault_spec:
+        seals = vault_spec["sealed"]
+        rung = vault_spec["custody"]
+        print(f"voyd-wire: key vault {vault_spec['database']}."
+              f"{vault_spec.get('collection', '__keys')}; custody is "
+              f"{type(rung).__name__} -- {rung.detail()}", flush=True)
+        for name, (fields, scope) in sorted(seals.items()):
+            print(f"voyd-wire: sealing {name}.{{{', '.join(fields)}}} under "
+                  f"a key per {scope}; shred one and every copy of that "
+                  f"tenant's ciphertext is noise", flush=True)
+        # Said out loud because it is the property this flag spends. Every
+        # other thing this process does is pure; this one holds a
+        # connection and a credential, and a reader who learned the purity
+        # claim from the README is owed the correction here rather than in
+        # a footnote.
+        print("voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database "
+              "connection of its own and is a custody holder; sealed reads "
+              "decrypt before they refuse. See LIMITS.md \u00a75", flush=True)
+        if not rung.durable:
+            print("voyd-wire: WARNING: custody is ephemeral -- the master "
+                  "key is in this process's memory and a restart makes "
+                  "every sealed document unreadable. Demo-grade. Use "
+                  "--kms local:/path/to/master.key to keep it", flush=True)
     print("voyd-wire: connect any driver to "
           f"mongodb{'+tls' if certfile else ''}://localhost:{listen_port}/"
           "?directConnection=true\n", flush=True)
@@ -2197,7 +2405,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                   ssl_ctx=ssl_ctx, max_connections=max_connections,
                   drain_seconds=drain_seconds, advertise=advertise,
                   slab=slab, meters=meters, metrics_port=metrics_port,
-                  fan_out=fan_out, give_up=give_up)
+                  fan_out=fan_out, give_up=give_up, vault_spec=vault_spec)
         return
 
     if slab is not None and metrics_port is not None:
@@ -2206,7 +2414,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                               max_connections=max_connections,
                               drain_seconds=drain_seconds,
                               advertise=advertise, fan_out=fan_out,
-                              give_up=give_up,
+                              give_up=give_up, vault_spec=vault_spec,
                               meter=meters[0] if meters else None))
     summarise(counts)
 
@@ -2215,10 +2423,19 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
                target: str, guards: dict[str, Guard], verbose: bool, *,
                max_connections: int, drain_seconds: float,
                advertise: str | None, fan_out: str | None = None,
-               give_up: float = 1.0,
+               give_up: float = 1.0, vault_spec: dict | None = None,
                meter: "voyd_metrics.Meter | None" = None) -> dict:
     """One worker: accept, serve, drain, and report what it counted."""
     upstream = Upstream(target, verbose=verbose, meter=meter)
+    # Built per worker, after the fork, because an encrypting handle owns
+    # sockets and an event loop and neither survives one. The *custody* is
+    # built before the fork and inherited, which is the part that has to be
+    # shared: an `Ephemeral` master key minted per worker would give each
+    # of them a different key for the same tenant, and a document written
+    # through one worker would be unreadable through the next.
+    vault = voyd_seal.Vault(**vault_spec) if vault_spec else None
+    if vault is not None:
+        await vault.open()
     secondaries = (Secondaries(fan_out, verbose=verbose, meter=meter,
                                give_up=give_up)
                    if fan_out else None)
@@ -2266,10 +2483,11 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
             return
         if secondaries is not None:
             await fanned_session(reader, writer, upstream, secondaries,
-                                 guards, verbose, live, advertise, meter)
+                                 guards, verbose, live, advertise, vault,
+                                 meter)
         else:
             await session(reader, writer, upstream, guards, verbose, live,
-                          advertise, meter)
+                          advertise, vault, meter)
 
     # A failed TLS handshake, a port scan, a plain-TCP probe against a TLS
     # listener: one client's problem, never the listener's. An earlier
@@ -2333,6 +2551,11 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
               f"{drain_seconds}s; closing anyway", flush=True)
     if flusher is not None:
         await asyncio.gather(flusher, return_exceptions=True)
+    if vault is not None:
+        # The one connection this process opened on its own behalf, put
+        # down on the way out. A boundary that argues at length about
+        # holding a handle you cannot close should not leave one open.
+        await vault.aclose()
     return tally(guards)
 
 
@@ -2343,7 +2566,8 @@ def supervise(sock: socket.socket, workers: int, target: str,
               slab: "voyd_metrics.Slab | None" = None,
               meters: "list[voyd_metrics.Meter] | None" = None,
               metrics_port: int | None = None,
-              fan_out: str | None = None, give_up: float = 1.0) -> None:
+              fan_out: str | None = None, give_up: float = 1.0,
+              vault_spec: dict | None = None) -> None:
     """N worker processes over one listening socket, and one honest total.
 
     Why processes at all, when the loop already removed the thread stacks:
@@ -2394,6 +2618,7 @@ def supervise(sock: socket.socket, workers: int, target: str,
                     max_connections=max_connections,
                     drain_seconds=drain_seconds, advertise=advertise,
                     fan_out=fan_out, give_up=give_up,
+                    vault_spec=vault_spec,
                     meter=meters[index] if meters else None))
             except BaseException:
                 traceback.print_exc()
@@ -2530,6 +2755,85 @@ def supervise(sock: socket.socket, workers: int, target: str,
     summarise(merge(tallies))
 
 
+def _custody(spec: str):
+    """`local`, `local:/path`, or `env:PREFIX`. Never a guess.
+
+    Built here, in the parent, *before* any fork -- so every worker
+    inherits the same master key. An `Ephemeral` custody constructed per
+    worker would mint a different key each, and a tenant written through
+    one worker would be undecryptable through the next: a data-loss bug
+    that only appears with `--workers 2` and looks like corruption.
+    """
+    from voyd.engine.custody import Ephemeral, LocalFile, from_env
+
+    if spec == "local":
+        return Ephemeral()
+    if spec.startswith("local:"):
+        return LocalFile(path=spec.split(":", 1)[1])
+    if spec.startswith("env:"):
+        return from_env(spec.split(":", 1)[1])
+    raise ValueError(
+        f"--kms {spec!r}: expected `local`, `local:/path/to/master.key`, or "
+        f"`env:PREFIX`. Custody is the whole of the erasure claim, so this "
+        f"refuses to guess at it")
+
+
+def _vault_from(args) -> dict | int:
+    """The vault configuration, or an exit code and a reason on stderr.
+
+    Three ways to be wrong, and all three are startup errors rather than
+    surprises later:
+
+    - a policy declares `sealed()` and nobody passed `--key-vault`. The
+      boundary would read ciphertext it could not decrypt and refuse every
+      sealed document under `unrecoverable` -- fail-closed, but a
+      deployment reporting a total erasure it never asked for.
+    - `--key-vault` with no `sealed()` anywhere. Holding keys buys nothing
+      and costs a credential, so it is a mistake worth naming.
+    - a `--kms` this cannot parse.
+    """
+    declared = voyd_seal.sealed_from(OPTIONS)
+    if declared and not args.key_vault:
+        print("voyd-wire: this policy declares sealed() on "
+              + ", ".join(sorted(declared))
+              + " but no --key-vault was given. Without one this boundary "
+                "holds no keys, so it cannot decrypt those fields and would "
+                "refuse every document in them as unrecoverable -- a total "
+                "erasure nobody asked for, reported as if it were working. "
+                "Pass --key-vault DB, or drop sealed() from the policy",
+              file=sys.stderr)
+        return 2
+    if args.key_vault and not declared:
+        print("voyd-wire: --key-vault was given but no collection declares "
+              "sealed(). Holding a master key buys nothing here and costs "
+              "this process a credential it does not need", file=sys.stderr)
+        return 2
+    if not declared:
+        return {}
+    database, _, collection = args.key_vault.partition(".")
+    try:
+        custody = _custody(args.kms)
+    except ValueError as exc:
+        print(f"voyd-wire: {exc}", file=sys.stderr)
+        return 2
+    return {"uri": _vault_uri(args.target), "database": database,
+            "sealed": declared, "custody": custody,
+            "collection": collection or "__keys"}
+
+
+def _vault_uri(target: str) -> str:
+    """The connection string the vault dials, from `--target`.
+
+    The same deployment the boundary forwards to, by construction rather
+    than by a second flag somebody could point elsewhere. A key vault on a
+    different cluster than the ciphertext is a failure that looks like
+    "the keys are missing" rather than like a misconfiguration.
+    """
+    if "://" in target:
+        return target
+    return f"mongodb://{target}/?directConnection=true"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2602,6 +2906,29 @@ def main(argv: list[str] | None = None) -> int:
                          "loopback, with no flag to change it: a refusal "
                          "count broken down by reason describes what a "
                          "corpus holds and who has been probing it")
+    ap.add_argument("--key-vault", metavar="DB[.COLLECTION]", default=None,
+                    help="hold the keys for the fields a policy file "
+                         "declared sealed(), encrypting them on the way in "
+                         "and decrypting them on the way out. This is the "
+                         "one flag that costs this boundary its purity: it "
+                         "opens a database connection of its own, holds KMS "
+                         "credentials, and makes a sealed read cost a "
+                         "decrypt rather than 2.3us. What it buys is the "
+                         "erasure refusal cannot perform -- destroying a "
+                         "key makes every copy of that tenant's ciphertext "
+                         "unreadable, in every replica, snapshot and "
+                         "backup, without visiting any of them. See "
+                         "LIMITS.md \u00a75")
+    ap.add_argument("--kms", metavar="SPEC", default="local",
+                    help="who holds the master key: `local` (ephemeral, "
+                         "demo-grade, gone on restart), "
+                         "`local:/path/to/master.key` (durable; custody is "
+                         "a file permission), or `env:PREFIX` to read a "
+                         "provider out of the environment the way "
+                         "voyd.engine.custody.from_env does -- which is the "
+                         "rung that gets you aws/azure/gcp/kmip, where "
+                         "destroying the master key is somebody else's "
+                         "audited operation")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -2616,7 +2943,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             for collection, spec in load(args.config).items():
                 guards[collection] = Guard(
-                    spec, **OPTIONS.get(collection, {}))
+                    spec,
+                    on_delete=OPTIONS.get(collection, {}).get(
+                        "on_delete", "forward"))
         except Exception as exc:
             # A policy file that is wrong must fail here, loudly, rather than
             # at the first query. Starting a boundary from a broken
@@ -2633,6 +2962,9 @@ def main(argv: list[str] | None = None) -> int:
         advertise = args.advertise
         if args.advertise_self and not advertise:
             advertise = f"localhost:{args.listen}"
+        vault_spec = _vault_from(args)
+        if isinstance(vault_spec, int):
+            return vault_spec
         if args.workers < 1:
             print("voyd-wire: --workers must be at least 1", file=sys.stderr)
             return 2
@@ -2645,7 +2977,8 @@ def main(argv: list[str] | None = None) -> int:
               certfile=args.tls_cert, keyfile=args.tls_key,
               max_connections=args.max_connections, advertise=advertise,
               workers=args.workers, metrics_port=args.metrics,
-              fan_out=args.fan_out, give_up=args.fan_out_give_up)
+              fan_out=args.fan_out, give_up=args.fan_out_give_up,
+              vault_spec=vault_spec)
     except KeyboardInterrupt:
         summarise(guards)
     return 0
