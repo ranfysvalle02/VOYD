@@ -478,7 +478,12 @@ def seal_cost(uri: str, docs: int, pad: int, runs: int) -> int:
 
     database = f"voyd_bench_seal_{os.getpid()}"
 
-    async def go() -> tuple[float, float]:
+    # `list[float]` per direction, not a single figure each: this returned
+    # two floats until the spread was added, and the annotation kept saying
+    # so afterwards -- which is how a function that reports a median and a
+    # range was documented as returning one number. Every `min`/`max`/
+    # `median` call below is a type error against the old signature.
+    async def go() -> tuple[list[float], list[float]]:
         vault = voyd_seal.Vault(uri, database=database,
                                 sealed={"notes": (("text",), "tenant_id")},
                                 custody=Ephemeral())
@@ -520,7 +525,7 @@ def seal_cost(uri: str, docs: int, pad: int, runs: int) -> int:
         finally:
             await vault.aclose()
             from pymongo import AsyncMongoClient
-            scratch = AsyncMongoClient(uri)
+            scratch: AsyncMongoClient = AsyncMongoClient(uri)
             await scratch.drop_database(database)
             await scratch.close()
 

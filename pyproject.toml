@@ -110,22 +110,24 @@ select = ["E4", "E7", "E9", "F"]
 "tests/*" = ["E402"]
 
 [tool.mypy]
+# Everything this repository ships or runs, which now includes `tools/`.
+#
 # `scanner` is here because it ships as its own distribution and judges
 # somebody else's repository -- the one piece of this project that runs
 # against code nobody here has seen.
 #
-# `tools` is deliberately *not* here yet. It is mostly a `Meter | None` the
-# runtime guards and the checker cannot see, and turning it on means fixing
-# those rather than blanket-ignoring them. Recorded in LIMITS.md, not
-# forgotten.
+# `tools/` was excluded for a long time, and the exclusion outlived its
+# reason. It was justified here by a count -- "voyd_wire.py has 31 errors"
+# -- which had reached 59 by the time anybody re-measured, in the 3,180-line
+# file with the concurrency, the failover and the byte-level protocol
+# rewriting in it. The hardest code in the repository was the least
+# statically checked, and the stale number was the argument for leaving it
+# that way.
 #
-# This comment used to carry a count. It said 31 and the real number had
-# reached 61, because the count was a claim about code with no expiry and
-# nobody responsible for it -- which is the category this project exists to
-# complain about, sitting in its own build file. A number nobody re-measures
-# is worse than no number: it reads as current. Run `mypy tools/` for the
-# real one.
-files = ["voyd", "scanner/voyd_scan"]
+# It is zero now, and the 59 were not 59 problems. Seventeen were one
+# dynamic-attribute decision in `Meter`; sixteen were one unannotated dict
+# splatted into `**kwargs`. Two root causes were a third of the total.
+files = ["voyd", "tools", "scanner/voyd_scan"]
 # No `python_version` pin, deliberately. Pinning it to the 3.11 floor makes
 # mypy read every installed stub under 3.11 syntax, so any dependency
 # resolved for a newer interpreter can fail to *parse* -- which is fatal, and
@@ -161,7 +163,7 @@ check_untyped_defs = true
 # reported `unused section(s): module = ['voyageai.*']` on every single run,
 # which is the tool saying so out loud for however long nobody read it.
 [[tool.mypy.overrides]]
-module = ["pymongocrypt.*"]
+module = ["pymongocrypt.*", "snappy.*", "zstandard.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

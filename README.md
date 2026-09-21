@@ -786,7 +786,7 @@ from somebody asking why a paragraph said what it said. One
 team, two weeks, their own corpus is worth more than anything else that
 could be built next.
 
-The suite is **365 tests**, and it is the foundation rather than a census —
+The suite is **366 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie. Each one and the file that holds it up is
 **[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim with
@@ -808,7 +808,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 365 tests, 105 seconds -- the inner loop
+pytest              # 366 tests, 106 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 

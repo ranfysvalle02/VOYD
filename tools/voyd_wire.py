@@ -68,7 +68,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Mapping
+from typing import Mapping, TypedDict
 
 try:
     import bson
@@ -551,7 +551,7 @@ UNREWRITABLE = {
 EXFILTRATING_STAGES = ("$out", "$merge")
 
 
-def writes_elsewhere(body: dict) -> str | None:
+def writes_elsewhere(body: Mapping) -> str | None:
     """Does this aggregation end by writing somewhere the policy is not?"""
     pipeline = body.get("pipeline")
     if not isinstance(pipeline, list):
@@ -637,6 +637,28 @@ def refuse_client_vector(raw: bytes, req_id: int, resp_to: int,
     })
 
 
+def guard_for(guards: dict[str, Guard], body: Mapping,
+              verb: str) -> Guard | None:
+    """The guard for the collection this command names, if any.
+
+    A command's target arrives from the wire, so it is whatever was in the
+    bytes: absent, a string, or a number somebody sent on purpose. Every
+    call site was spelling `guards.get(body.get(verb))`, which reads fine
+    and asks a `dict[str, Guard]` to look up a value of unknown type -- five
+    of this file's type errors, in the five places that decide whether a
+    policy applies to a write. Narrowed once, here.
+
+    Not called `named`, which was the first choice and was a live bug:
+    `refuse_unrewritable` already binds a local `named` (a collection name)
+    further down, so the name was function-scoped there and the call at the
+    top of that same function raised `NameError` before reaching the
+    server. `ruff` caught it in a second; `mypy` did not, which is a fair
+    reminder of what each one is for.
+    """
+    name = body.get(verb)
+    return guards.get(name) if isinstance(name, str) else None
+
+
 def refuse_unrewritable(raw: bytes, req_id: int, resp_to: int,
                         guards: dict[str, Guard]) -> bytes | None:
     """Answer the client with an error rather than let the fact be destroyed.
@@ -651,9 +673,9 @@ def refuse_unrewritable(raw: bytes, req_id: int, resp_to: int,
         return None
     _flags, body = decoded
 
-    guard = guards.get(body.get("aggregate"))
+    guard = guard_for(guards, body, "aggregate")
     stage = writes_elsewhere(body) if guard is not None else None
-    if stage is not None:
+    if guard is not None and stage is not None:
         print(f"  voyd: REFUSED {stage} on {guard.collection}: it copies "
               f"documents server-side, past the boundary", flush=True)
         return encode_op_msg(req_id, resp_to, 0, {
@@ -972,6 +994,26 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
               f"{len(batch)}  {named}", flush=True)
     return encode_op_msg(req_id, resp_to, flags, reply)
 
+class _Pump(TypedDict):
+    """The state both directions of one connection share.
+
+    Exists so `session` can hand `pump` the same eight things twice without
+    the splat erasing their types. `total=True`: every key is required,
+    which is the property worth having -- a direction started with one of
+    these missing would enforce a different policy from its sibling, on the
+    same connection, and nothing downstream would say so.
+    """
+
+    guards: dict[str, Guard]
+    verbose: bool
+    rewritten: set[int]
+    upstream: "Upstream | None"
+    advertise: str | None
+    vault: "voyd_seal.Vault | None"
+    embeds: Mapping | None
+    meter: "voyd_metrics.Meter | None"
+
+
 async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                back: asyncio.StreamWriter, *, to_server: bool,
                guards: dict[str, Guard], verbose: bool,
@@ -1049,7 +1091,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     await send(back, refusal)
                     continue
 
-                target = guards.get(body.get("delete"))
+                target = guard_for(guards, body, "delete")
                 if target is not None and target.on_delete == "revoke":
                     swapped = revoke_instead_of_delete(
                         raw, req_id, resp_to, target, verbose)
@@ -1060,7 +1102,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # `findOneAndDelete` is a *different command*, and
                 # intercepting one and not the other gave a team the
                 # guarantee for one delete verb and silently not the other.
-                fam = guards.get(body.get("findAndModify"))
+                fam = guard_for(guards, body, "findAndModify")
                 if fam is not None and fam.on_delete == "revoke":
                     swapped = revoke_instead_of_find_and_delete(
                         raw, req_id, resp_to, fam, verbose)
@@ -1108,9 +1150,16 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # getting anyway. No health check, no timer: the server is
                 # already telling us, on the one message that proves it.
                 if upstream is not None:
-                    head = decode_op_msg(raw)
-                    if head is not None:
-                        why = stepped_down(head[1])
+                    # `reply`, not `head`: twenty lines up `head` holds a
+                    # `decode_sections` 4-tuple and here it held a
+                    # `decode_op_msg` 2-tuple. One name for two shapes in
+                    # one function, distinguished only by which branch the
+                    # reader is in -- and `head[1]` means the body in both,
+                    # which is exactly the coincidence that keeps a reuse
+                    # like this alive until the shapes diverge.
+                    reply = decode_op_msg(raw)
+                    if reply is not None:
+                        why = stepped_down(reply[1])
                         if why:
                             upstream.invalidate(why)
 
@@ -1237,7 +1286,9 @@ class Upstream:
                                          target.startswith("mongodb+srv")))
         try:
             from pymongo import MongoClient
-            with MongoClient(target, serverSelectionTimeoutMS=15000) as probe:
+            probe: MongoClient = MongoClient(
+                target, serverSelectionTimeoutMS=15000)
+            with probe:
                 # `ping` first: the driver connects lazily, and `.primary` on
                 # an undiscovered topology is `None` -- which silently
                 # selected the first DNS node and looked exactly like this
@@ -1384,7 +1435,9 @@ class Secondaries:
                                          self.uri.startswith("mongodb+srv")))
         try:
             from pymongo import MongoClient
-            with MongoClient(self.uri, serverSelectionTimeoutMS=15000) as probe:
+            probe: MongoClient = MongoClient(
+                self.uri, serverSelectionTimeoutMS=15000)
+            with probe:
                 probe.admin.command("ping")
                 found = sorted(probe.secondaries)
         except Exception as exc:
@@ -1395,7 +1448,12 @@ class Secondaries:
         if self.verbose:
             where = ", ".join(f"{h}:{p}" for h, p in found) or "none"
             print(f"voyd-wire: ranking reads on {where}", flush=True)
-        return [(h, p, tls) for h, p in found]
+        # `p is not None` is not defensive noise: pymongo's address type is
+        # `(host, port | None)`, and an entry with no port is not something
+        # this proxy can open a socket to. Dropped and counted out of the
+        # list rather than carried as a tuple that fails later, further
+        # away, as a connection error.
+        return [(h, p, tls) for h, p in found if p is not None]
 
     async def pick(self) -> tuple[str, int, bool] | None:
         """The next secondary, round robin, or `None` if there are none."""
@@ -1578,11 +1636,20 @@ def authenticate(exchange, uri: str) -> bool:
     try:
         from pymongo.synchronous.auth import _authenticate_scram
     except ImportError:                  # pymongo < 4.9 laid it out flat
-        from pymongo.auth import _authenticate_scram  # type: ignore[no-redef]
+        from pymongo.auth import (  # type: ignore[attr-defined,no-redef]
+            _authenticate_scram)
     credentials = _build_credentials_tuple(
         mechanism, source, username, password, {}, source)
     try:
-        _authenticate_scram(credentials, shim, mechanism)
+        # `shim` is not a pymongo `Connection` and is not pretending to be
+        # one beyond the two methods SCRAM calls on it. That is the whole
+        # design -- see `_AuthShim`: the client proof, the salting and the
+        # server-signature check stay in the library, and what this file
+        # supplies is a way to send a document and get one back. Ignored
+        # rather than satisfied, because satisfying it means constructing a
+        # real `Connection`, which means a real socket pool, which is the
+        # thing being avoided.
+        _authenticate_scram(credentials, shim, mechanism)  # type: ignore[arg-type]
     except Exception as exc:
         # Deliberately not the server's message: an authentication failure
         # reply can carry the mechanism and the user, and this line goes to
@@ -1594,7 +1661,7 @@ def authenticate(exchange, uri: str) -> bool:
     return True
 
 
-def stepped_down(reply: dict) -> str | None:
+def stepped_down(reply: Mapping) -> str | None:
     """Did the server just say this node may not write?
 
     Read from the reply the client was going to get anyway. A write error
@@ -1711,10 +1778,19 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
             return
 
         rewritten: set[int] = set()
-        common = {"guards": guards, "verbose": verbose,
-                  "rewritten": rewritten, "upstream": upstream,
-                  "advertise": advertise, "vault": vault,
-                  "embeds": embeds, "meter": meter}
+        # Annotated, because an unannotated dict splatted into `**kwargs`
+        # is inferred as `dict[str, object]` and every one of `pump`'s eight
+        # keyword arguments then fails to type-check -- sixteen of the
+        # errors that kept this file unchecked came from these four lines.
+        # A `TypedDict` costs one declaration and makes the splat as
+        # checked as writing the arguments out twice would be, without
+        # writing them out twice: the two directions of this connection must
+        # be handed *identical* state or the boundary means different things
+        # depending on which way a message is travelling.
+        common: _Pump = {"guards": guards, "verbose": verbose,
+                         "rewritten": rewritten, "upstream": upstream,
+                         "advertise": advertise, "vault": vault,
+                         "embeds": embeds, "meter": meter}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
         back = asyncio.ensure_future(pump(up_r, client_w, up_w,
@@ -1932,8 +2008,12 @@ class Conversation:
         fresh = (await self.authoritative(db, collection, ids, fields)
                  if ids is not None else None)
         verified_in = time.monotonic() - began
-        if (self.payoff is not None and ranked_in is not None
-                and fresh is not None):
+        # `sent is not None` rather than `ranked_in is not None`, which is
+        # the same condition by construction one line up -- and being the
+        # same condition *by construction* is the problem: a reader has to
+        # derive it, and a checker cannot. Test the value being indexed.
+        if (self.payoff is not None and sent is not None
+                and ranked_in is not None and fresh is not None):
             why = self.payoff.record(sent[1], ranked_in, verified_in)
             if why is not None:
                 where, kind, size = sent[1]
@@ -2088,14 +2168,14 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 await conv.to_client(refusal)
                 continue
 
-            target = guards.get(body.get("delete"))
+            target = guard_for(guards, body, "delete")
             if target is not None and target.on_delete == "revoke":
                 swapped = revoke_instead_of_delete(
                     raw, req_id, resp_to, target, verbose)
                 if swapped is not None:
                     raw = swapped
                     rewritten.add(req_id)
-            fam = guards.get(body.get("findAndModify"))
+            fam = guard_for(guards, body, "findAndModify")
             if fam is not None and fam.on_delete == "revoke":
                 swapped = revoke_instead_of_find_and_delete(
                     raw, req_id, resp_to, fam, verbose)
@@ -2412,20 +2492,26 @@ def tally(guards: dict[str, Guard],
 
 def merge(tallies: list[dict]) -> dict:
     """N workers' counts, added up."""
-    total = {"served": 0, "refused": 0, "revoked": 0, "reasons": {}}
+    # Counts and reasons kept apart while summing, then joined on the way
+    # out. One dict holding both an `int` and a `dict[str, int]` is what
+    # made the reason accumulator untypeable -- and it is also why
+    # `total[key] += ...` and `total["reasons"][reason] = ...` read as the
+    # same kind of operation when they are not.
+    counts = {"served": 0, "refused": 0, "revoked": 0}
+    reasons: dict[str, int] = {}
     for one in tallies:
-        for key in ("served", "refused", "revoked"):
-            total[key] += one.get(key, 0)
+        for key in counts:
+            counts[key] += one.get(key, 0)
         for reason, n in (one.get("reasons") or {}).items():
-            total["reasons"][reason] = total["reasons"].get(reason, 0) + n
-    return total
+            reasons[reason] = reasons.get(reason, 0) + n
+    return {**counts, "reasons": reasons}
 
 
 def summarise(counts: dict | dict[str, Guard]) -> None:
     """What this boundary actually did. A guarantee nobody counted is a
     claim about one."""
     if counts and all(isinstance(v, Guard) for v in counts.values()):
-        counts = tally(counts)          # type: ignore[arg-type]
+        counts = tally(counts)
     served = counts.get("served", 0)
     refused = counts.get("refused", 0)
     revoked = counts.get("revoked", 0)
@@ -2560,7 +2646,7 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
     live = Live()
     stopping = asyncio.Event()
 
-    async def flushing() -> None:
+    async def flushing(meter: "voyd_metrics.Meter") -> None:
         """Copy this worker's counters into shared memory, once a second.
 
         On the timer rather than on the message path: refusal costs about
@@ -2582,7 +2668,13 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         meter.connections_total = live.total
         meter.flush(guards)          # a last one, so a drain is visible
 
-    flusher = (asyncio.ensure_future(flushing()) if meter is not None
+    # Started only when there is a meter, and `flushing` closes over the
+    # narrowed local rather than the optional parameter: a closure cannot
+    # carry a narrowing from its enclosing scope, so six `Meter | None`
+    # errors lived in a function that is only ever called when it is not
+    # None. The local makes the precondition part of the code instead of a
+    # fact about the call site.
+    flusher = (asyncio.ensure_future(flushing(meter)) if meter is not None
                else None)
 
     async def handle(reader: asyncio.StreamReader,
@@ -2819,10 +2911,11 @@ def supervise(sock: socket.socket, workers: int, target: str,
         if dead == 0:
             time.sleep(0.2)
             continue
-        index = next((i for i, (pid, _fd) in slots.items() if pid == dead),
+        found = next((i for i, (pid, _fd) in slots.items() if pid == dead),
                      None)
-        if index is None:
+        if found is None:
             continue
+        index = found
         left_a_tally = collect(index)
         if slab is not None:
             slab.set_header(workers_live=len(slots))

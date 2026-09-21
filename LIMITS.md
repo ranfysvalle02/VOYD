@@ -13,14 +13,14 @@ yet. They are marked.
 
 ## 1. The one that actually matters
 
-**Nobody has used this but its author.** 104 commits, one contributor, zero
+**Nobody has used this but its author.** 105 commits, one contributor, zero
 external users, zero pilots. Every claim in this repository is verified by
 somebody who also wrote the claim.
 
 That is not a coverage problem and no amount of code fixes it. The suite is
 good at holding claims somebody thought to state; it has never once been the
 thing that caught a problem a *user* hit, because there have been no users.
-Nineteen defects this month, and the way they were found is the point.
+Twenty defects this month, and the way they were found is the point.
 Eleven came from running something new: three from exercising paths nobody
 had exercised, four from the hostile pass in §4, two more from the
 hostile pass against fan-out in §3 -- a cheap query pattern withdrawing
@@ -36,7 +36,7 @@ read-preference claim in §3, where the defect was in the prose and three
 files had spent weeks talking a reader out of something the proxy could
 already do; and fan-out's identity check, which looked for a standalone
 `saslStart`, never fired against a real driver's speculative handshake, and
-was fail-open while it did not — the most serious of the nineteen, and the
+was fail-open while it did not — the most serious of the twenty, and the
 only one a user could have been harmed by rather than merely misled; and two
 from the sealing work -- an erasure that revoked rows its key had never
 protected, making unencrypted documents of the same tenant unreachable as a
@@ -45,6 +45,13 @@ a verb; and a metrics `Meter` that hand-listed the counters `flush` reads, so
 adding one raised inside the flusher task, killed that worker's reporting,
 and presented as the proxy dropping connections -- a reporting bug wearing
 the costume of a network one.
+
+One was found by a type checker being pointed at code it had never read:
+`voyd_bench`'s inner coroutine claimed to return two floats and had been
+returning two lists since the spread was added, so a function reporting a
+median and a range was documented as reporting one number. That is the
+whole argument for §4's `tools/` change in one line -- the annotation was
+wrong for as long as nothing checked it.
 
 And one was a defect in the *suite* rather than in the code, which belongs
 here more than any of the others. A test named
@@ -565,7 +572,7 @@ documents?"
 
 ## 4. Coverage
 
-369 tests, ~6,738 lines, against 8,220 lines of `voyd/` and 5,922 of
+370 tests, ~6,761 lines, against 8,220 lines of `voyd/` and 5,922 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -642,31 +649,55 @@ no `PYTHONPATH` -- against this repository's own source. The claim that it
 costs a stranger nothing to try is worth exactly as much as the last time
 somebody tried it that way.
 
-**`mypy` now reads `scanner/voyd_scan` too, and still not `tools/`.**
-Adding the scanner cost nothing: it was already clean. `tools/` is a
-different matter -- mostly a `Meter | None` the runtime guards and the
-checker cannot see. That is real work rather than a config line, and
-blanket-ignoring it would leave the front door -- the hardest code here,
-with the concurrency and the failover handling -- checked by nobody while
-appearing to be checked. It stays open.
+**`mypy` reads `tools/` now, and the exclusion is gone.** This entry used to
+explain why it did not, and the explanation was a count: *`voyd_wire.py` has
+31 errors*. By the time anybody re-measured it was 59, in a file that had
+grown to 3,180 lines and holds the concurrency, the failover and the
+byte-level protocol rewriting -- the hardest code here, and the least
+statically checked, kept that way by a stale number acting as an argument.
 
-`voyd_seal.py`, `voyd_preflight.py` and `voyd_metrics.py` *are* clean as of
-this writing, which is three of the five files and the three most recently
-written; the debt is the two oldest and largest.
+It is zero. And the 59 were never 59 problems, which is the part worth
+recording: **two root causes were a third of the total.** Seventeen
+`attr-defined` errors were one decision -- `Meter` setting its counters from
+`GLOBAL` instead of declaring them, which had removed a real drift and paid
+for it in visibility. Sixteen `arg-type` errors were one unannotated dict
+splatted into `**kwargs`, where `dict[str, object]` erased all eight of
+`pump`'s parameters. Both are fixed in a way that keeps what the original
+change bought: the counters are declared *and* initialised from `GLOBAL`,
+with a test asserting the two sets are equal, so the duplication is checked
+rather than merely present. Duplication that cannot drift is two views of
+one fact.
 
-**This entry used to end "with a number attached", and the number was
-wrong.** It said `voyd_wire.py` had 31 errors in a 1,716-line file. By the
-time anybody checked it was 59 errors in 3,180 lines, and the same stale 31
-was sitting in `pyproject.toml` as the stated reason for the exclusion. The
-count was a claim about code with no expiry and nobody responsible for it,
-which is the category §3 and `capabilities.py` both exist to complain about,
-written into this project's own build configuration and this page.
+The rest were individual, and most were narrowings a reader was doing in
+their head: a payoff record indexed after checking a *different* variable's
+nullity, a guard printed after a check that did not include it, a
+`Meter | None` used inside a closure that only ever runs when it is not
+None. Two were real if unlikely -- pymongo's address type permits a portless
+entry, which this proxy cannot dial and now drops explicitly; and one name
+held two different tuple shapes in one function, readable only because
+`[1]` happened to mean the body in both.
 
-Both numbers are gone rather than corrected. A figure nobody re-measures
-reads as current, which is strictly worse than no figure: `mypy tools/`
-takes four seconds and is always right. Attaching a number felt like rigour
-and was the opposite -- it moved the claim from "go and look" to "trust this
-sentence", and then the sentence rotted.
+One was a committed lie about a return type. `voyd_bench.seal_cost`'s inner
+coroutine was annotated `tuple[float, float]` and had been returning
+`tuple[list[float], list[float]]` since the spread was added -- so the
+function that reports a median and a range was documented as returning one
+number each way, and seven errors downstream were the checker noticing.
+
+**The two remaining suppressions are both at the pymongo boundary**, and
+neither is a blanket. Reaching into `_authenticate_scram` is deliberate and
+argued where it happens: the client proof, the salting and the
+server-signature check stay in the library. The `_AuthShim` handed to it is
+not a `Connection` and is not pretending to be beyond the two methods SCRAM
+calls on it -- satisfying that type means constructing a real connection
+pool, which is the thing being avoided.
+
+**And `ruff` caught a bug `mypy` did not.** The helper that narrows a
+command's target was first called `named`, and `refuse_unrewritable` already
+binds a local `named` further down -- so the name was function-scoped there,
+and the call at the top of that same function would have raised `NameError`
+before a byte reached the server. `F823`, in about a second, on a line a
+type checker had nothing to say about. Worth remembering which tool is for
+what.
 
 `capabilities.py` was listed here as "the one with no real excuse" and now
 has seventeen. It was a bad gap specifically because that module decides
@@ -676,7 +707,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (365 tests, ~105 seconds) with
+**Consider:** the suite is fast by default (366 tests, ~106 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports

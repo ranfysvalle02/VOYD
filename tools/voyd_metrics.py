@@ -226,16 +226,44 @@ class Meter:
     that the message path should not pay for reporting.
     """
 
-    # Every counter starts at zero and is named exactly once, in `GLOBAL`.
-    # This used to be fifteen hand-written assignments, and adding a
-    # sixteenth name to `GLOBAL` without adding it here left `flush` doing
-    # `getattr` on an attribute that did not exist -- which raised inside
-    # the flusher task, killed the worker's reporting, and presented as the
-    # proxy dropping connections. One list, one place to add to.
+    # Declared for the type checker, *initialised* from `GLOBAL`, and the
+    # two held in step by a test rather than by care.
     #
-    # `__slots__` is deliberately not used: the fields are derived from a
-    # tuple at runtime, and the point of this change is that nothing here
-    # repeats that tuple.
+    # Both halves of that are a correction. Originally these were seventeen
+    # hand-written assignments in `__init__`, and adding a name to `GLOBAL`
+    # without adding it here left `flush` calling `getattr` on an attribute
+    # that did not exist -- which raised inside the flusher task, killed the
+    # worker's reporting, and presented as the proxy dropping connections.
+    #
+    # The fix for that dropped the list and set every field from `GLOBAL`,
+    # which removed the drift and cost every counter its visibility: mypy
+    # could no longer see one of them, and those seventeen `attr-defined`
+    # errors were a third of the reason `tools/` went unchecked. A dynamic
+    # attribute is not cheaper than a declared one; it moves who fails to
+    # notice from the author to the compiler.
+    #
+    # So: annotations for the checker, one loop for the values, and
+    # `test_the_declared_counters_are_exactly_the_series` standing between
+    # them. Duplication that is *checked* is not drift -- it is two views of
+    # one fact with a test in between.
+    connections_open: int
+    connections_total: int
+    connections_refused_total: int
+    upstream_reresolve_total: int
+    messages_from_client_total: int
+    messages_from_upstream_total: int
+    worker_flushes_total: int
+    fanout_reads_total: int
+    fanout_verified_total: int
+    fanout_unverified_total: int
+    fanout_withdrawn_total: int
+    fanout_retried_on_primary_total: int
+    sealed_writes_total: int
+    sealed_reads_total: int
+    seal_refused_writes_total: int
+    erasures_total: int
+    erasure_revocations_total: int
+
     def __init__(self, layout: Layout, slab: Slab, slot: int):
         self.layout = layout
         self.slab = slab
@@ -263,16 +291,7 @@ class Meter:
         object.__setattr__(self, name, value)
 
     def flush(self, guards: dict) -> None:
-        # A type checker cannot see these attributes, because they are set
-        # from `GLOBAL` rather than written out one per line. That is the
-        # trade this class made on purpose: the hand-written list drifted
-        # from `GLOBAL` and broke a worker's reporting, and static
-        # visibility is a smaller loss than that. The runtime guard in
-        # `__setattr__` is stronger than the checker would have been for
-        # writes -- it refuses a name that is not a series, which mypy
-        # never did -- and `tools/` is not type-checked today anyway. If it
-        # ever is, this is the class that needs the shim.
-        self.worker_flushes_total += 1                      # type: ignore[attr-defined]
+        self.worker_flushes_total += 1
         values = [0] * self.layout.size
         for field in GLOBAL:
             values[self.layout.index(field)] = getattr(self, field)

@@ -64,6 +64,29 @@ def test_no_series_survives_its_reason_being_renamed():
         assert isinstance(reason, str) and reason
 
 
+def test_the_declared_counters_are_exactly_the_series():
+    """`Meter`'s annotations and `GLOBAL` are two views of one fact.
+
+    They have to both exist. The annotations are what lets a type checker
+    see a counter at all -- without them `tools/` had seventeen
+    `attr-defined` errors and went unchecked, which is how the front door
+    ended up being the least statically verified file in the repository.
+    `GLOBAL` is what allocates the slot and exposes the series.
+
+    Duplication that is checked is not drift. This is the check, and it is
+    the thing that was missing the first time: the original hand-written
+    list *also* duplicated `GLOBAL`, nothing compared them, and adding one
+    name to one of them killed a worker's reporting.
+    """
+    declared = {name for name, kind in m.Meter.__annotations__.items()
+                if kind is int or kind == "int"}
+    assert declared == set(m.GLOBAL), (
+        f"declared but not a series: {sorted(declared - set(m.GLOBAL))}; "
+        f"a series with no annotation: {sorted(set(m.GLOBAL) - declared)}. "
+        f"Both directions matter -- the first is a counter nothing reads, "
+        f"the second is a counter no checker can see")
+
+
 def test_every_global_counter_exists_on_a_fresh_meter():
     """`flush` does `getattr` for every name in GLOBAL.
 
