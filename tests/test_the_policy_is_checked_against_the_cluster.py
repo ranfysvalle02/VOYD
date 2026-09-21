@@ -315,7 +315,7 @@ def test_a_probe_that_could_not_run_never_reports_a_clean_bill():
 
 def test_findings_are_reported_worst_first():
     order = pf.report(
-        [pf.Declared and pf.Finding("n", "deadline", pf.WARN, "d", "r"),
+        [pf.Finding("n", "deadline", pf.WARN, "d", "r"),
          pf.Finding("n", "auto_embed", pf.FATAL, "d", "r")], None)
     assert "FATAL" in order[0]
 
@@ -478,3 +478,32 @@ def test_an_unreachable_cluster_does_not_block_the_boundary(tmp_path):
     assert "preflight could not run" in done.stdout
     assert "unreachable is not misconfigured" in done.stdout
     assert "matches the policy file" not in done.stdout
+
+
+def test_unreadable_search_indexes_are_not_a_contradiction():
+    """Ignorance and a contradiction are different findings.
+
+    A deployment with no mongot cannot answer `$listSearchIndexes`. Reading
+    it and finding no autoEmbed field means the policy is wrong; *failing to
+    read it* means nothing yet. Conflating them would tell a plain `mongod`
+    that its auto_embed declaration was fatally broken -- false, and the
+    loudest available way to be false.
+    """
+    assert audit(pf.Declared("notes", auto_embed={"body": "voyage-3"}),
+                 check_embedding=False) == []
+
+
+def test_the_other_checks_still_run_when_embedding_cannot_be_read():
+    """The bug this flag was added for.
+
+    An earlier version returned from the whole probe on the first
+    unanswerable collection, so a policy with five collections and no mongot
+    got one of them checked and a message that mentioned only auto_embed.
+    Partial coverage, described as a narrower failure than it was.
+    """
+    found = audit(pf.Declared("notes", deadline="expire_at",
+                              tenant="tenant_id",
+                              auto_embed={"body": "voyage-3"}),
+                  check_embedding=False)
+    assert checks(found) == {"deadline", "tenant"}
+    assert not pf.fatal(found)

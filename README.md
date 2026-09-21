@@ -286,68 +286,6 @@ database, no Atlas and no index. Which is why almost all of
 beside the codec and the boundary itself. Run it:
 `uv run python examples/embed.py`.
 
-### The declaration is checked against the cluster
-
-A voydfile is a set of claims about a cluster this process does not own:
-*there is a TTL index on `expire_at`*, *the vector index embeds `body` with
-voyage-3*, *the server refuses plaintext in this sealed field*. Every one can
-be false, and when one is false nothing says so — the boundary goes on
-enforcing a policy the storage underneath it is not holding up.
-
-`capabilities.py` exists because this engine used to *infer* what a
-deployment could do, and both times it inferred it was wrong for months
-without a log line. Its own conclusion is the argument: **a version floor is
-a claim about software this package does not ship, with no expiry and nobody
-responsible for it.** `auto_embed("voyage-3")` is exactly that. So it is
-asked:
-
-```bash
-python tools/voyd_wire.py --config voydfile.py --target "$ATLAS" \
-    --verify app --verify-only          # a deploy gate: exit 0, 3, or why not
-```
-
-```
-voyd-wire: preflight FATAL [notes.auto_embed]: auto_embed('voyage-3') on
-    'body' but no search index declares an 'autoEmbed' field on that path.
-    The index present needs a client-supplied vector and the boundary
-    refuses exactly those, so every vector read here is an error
-    remedy: either add an autoEmbed field on 'body' to the search index, or
-    remove auto_embed() from the policy
-
-voyd-wire: preflight warning [notes.deadline]: deadline() names 'expire_at'
-    and there is no TTL index on it. Refusal still works -- an expired fact
-    is unreachable on the next read -- but nothing ever reclaims the bytes,
-    so this collection grows without bound
-    remedy: db.notes.createIndex({"expire_at": 1}, {expireAfterSeconds: 0})
-```
-
-Four claims, four checks, and **every one of them read-only** —
-`listIndexes`, `$listSearchIndexes`, `listCollections`. It creates nothing.
-That distinction is what took a while to see: *creating* an index from the
-declaration is a schema change against somebody else's cluster and deserves
-caution, but *reading one back* is a query, and the risk of the first is not
-a reason to skip the second.
-
-**Fatal means a contradiction; a warning means a missing layer.** A
-declaration the index cannot satisfy is an outage discovered one query at a
-time, so the boundary refuses to start and names the line. A deadline with no
-TTL index, a tenant with no index leading with it, a sealed field the server
-still accepts plaintext into — refusal keeps working in all three, so they
-print and the boundary serves. A deployment that has run that way for a month
-should not have its next restart blocked by this noticing.
-
-**Unreachable is not misconfigured.** They look identical from here and mean
-opposite things, so a probe that cannot run says why and the boundary starts
-anyway. And a probe that failed never reports a clean bill — "preflight found
-nothing" on a run where preflight never ran would be the confidently-wrong
-shape this whole project is named after.
-
-The connection is closed before the listener accepts anything, so this is not
-`--key-vault`: nothing here is on the read path.
-
-What is still *not* on the wire is **creating** the index. That one stays
-with the library, deliberately — [LIMITS.md](LIMITS.md) §5.
-
 ### Two declarations of one thing have to agree
 
 `embedded_with("voyage-3")` beside `auto_embed("voyage-3.5")` is refused when
@@ -507,6 +445,70 @@ applied to the stronger guarantee.
 
 Run it: `uv run python examples/seal.py`. The full trade, including what is
 still open, is [LIMITS.md](LIMITS.md) §5.
+
+## The policy is checked against the cluster
+
+A voydfile is a set of claims about a cluster this process does not own:
+*there is a TTL index on `expire_at`*, *the vector index embeds `body` with
+voyage-3*, *the server refuses plaintext in this sealed field*. Every one can
+be false, and when one is false nothing says so — the boundary goes on
+enforcing a policy the storage underneath it is not holding up.
+
+`capabilities.py` exists because this engine used to *infer* what a
+deployment could do, and both times it inferred it was wrong for months
+without a log line. Its own conclusion is the argument: **a version floor is
+a claim about software this package does not ship, with no expiry and nobody
+responsible for it.** `auto_embed("voyage-3")` is exactly that. So it is
+asked:
+
+```bash
+python tools/voyd_wire.py --config voydfile.py --target "$ATLAS" \
+    --verify app --verify-only          # a deploy gate: exit 0, 3, or why not
+```
+
+```
+voyd-wire: preflight FATAL [notes.auto_embed]: auto_embed('voyage-3') on
+    'body' but no search index declares an 'autoEmbed' field on that path.
+    The index present needs a client-supplied vector and the boundary
+    refuses exactly those, so every vector read here is an error
+    remedy: either add an autoEmbed field on 'body' to the search index, or
+    remove auto_embed() from the policy
+
+voyd-wire: preflight warning [notes.deadline]: deadline() names 'expire_at'
+    and there is no TTL index on it. Refusal still works -- an expired fact
+    is unreachable on the next read -- but nothing ever reclaims the bytes,
+    so this collection grows without bound
+    remedy: db.notes.createIndex({"expire_at": 1}, {expireAfterSeconds: 0})
+```
+
+Four claims, four checks, and **every one of them read-only** —
+`listIndexes`, `$listSearchIndexes`, `listCollections`. It creates nothing.
+That distinction is what took a while to see: *creating* an index from the
+declaration is a schema change against somebody else's cluster and deserves
+caution, but *reading one back* is a query, and the risk of the first is not
+a reason to skip the second.
+
+**Fatal means a contradiction; a warning means a missing layer.** A
+declaration the index cannot satisfy is an outage discovered one query at a
+time, so the boundary refuses to start and names the line. A deadline with no
+TTL index, a tenant with no index leading with it, a sealed field the server
+still accepts plaintext into — refusal keeps working in all three, so they
+print and the boundary serves. A deployment that has run that way for a month
+should not have its next restart blocked by this noticing.
+
+**Unreachable is not misconfigured.** They look identical from here and mean
+opposite things, so a probe that cannot run says why and the boundary starts
+anyway. And a probe that failed never reports a clean bill — "preflight found
+nothing" on a run where preflight never ran would be the confidently-wrong
+shape this whole project is named after.
+
+The connection is closed before the listener accepts anything, so this is not
+`--key-vault`: nothing here is on the read path.
+
+What is still *not* on the wire is **creating** an index from the
+declaration. That one stays with the library, deliberately — the detection
+half is a query and the creation half is a schema change against a cluster
+this process does not own. [LIMITS.md](LIMITS.md) §5.
 
 ## Fan-out
 
@@ -726,7 +728,7 @@ of them was caught by the suite going red — they came from running it. One
 team, two weeks, their own corpus is worth more than anything else that
 could be built next.
 
-The suite is **313 tests**, and it is the foundation rather than a census —
+The suite is **315 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie:
 
@@ -757,7 +759,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 313 tests, 106 seconds -- the inner loop
+pytest              # 315 tests, 106 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 

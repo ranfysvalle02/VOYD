@@ -13,7 +13,7 @@ yet. They are marked.
 
 ## 1. The one that actually matters
 
-**Nobody has used this but its author.** 101 commits, one contributor, zero
+**Nobody has used this but its author.** 102 commits, one contributor, zero
 external users, zero pilots. Every claim in this repository is verified by
 somebody who also wrote the claim.
 
@@ -565,7 +565,7 @@ documents?"
 
 ## 4. Coverage
 
-317 tests, ~6,523 lines, against 8,152 lines of `voyd/` and 5,886 of
+319 tests, ~6,552 lines, against 8,152 lines of `voyd/` and 5,933 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -625,7 +625,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (313 tests, ~106 seconds) with
+**Consider:** the suite is fast by default (315 tests, ~106 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports

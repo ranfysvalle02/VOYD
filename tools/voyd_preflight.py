@@ -72,11 +72,8 @@ have its next restart blocked by this file noticing.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
-
-log = logging.getLogger("voyd.preflight")
 
 FATAL = "fatal"
 WARN = "warn"
@@ -158,8 +155,17 @@ def _auto_embed_fields(search_indexes: Iterable[Mapping]) -> list[Mapping]:
 def audit(declared: Declared, *, indexes: Iterable[Mapping],
           search_indexes: Iterable[Mapping],
           validator: Mapping | None,
-          exists: bool = True) -> list[Finding]:
-    """Every way this collection's storage disagrees with its policy."""
+          exists: bool = True,
+          check_embedding: bool = True) -> list[Finding]:
+    """Every way this collection's storage disagrees with its policy.
+
+    ``check_embedding=False`` says the caller could not read the search
+    indexes, which is not the same as reading them and finding none -- the
+    first is ignorance and the second is a contradiction. Without the
+    distinction a deployment with no mongot would be told its `auto_embed`
+    declaration was fatally wrong, which is both false and the loudest
+    possible way to be false.
+    """
     indexes = list(indexes)
     search_indexes = list(search_indexes)
     found: list[Finding] = []
@@ -198,7 +204,8 @@ def audit(declared: Declared, *, indexes: Iterable[Mapping],
             f'db.{declared.collection}.createIndex('
             f'{{"{declared.tenant}": 1}})'))
 
-    for field, model in (declared.auto_embed or {}).items():
+    embedding_claims = (declared.auto_embed or {}) if check_embedding else {}
+    for field, model in embedding_claims.items():
         embedded = _auto_embed_fields(search_indexes)
         mine = [f for f in embedded if f.get("path") == field
                 and f.get("type") == "autoEmbed"]
@@ -326,6 +333,14 @@ async def inspect(uri: str, database: str,
             pass                                    # validators unreadable
 
         found: list[Finding] = []
+        # Collections whose `auto_embed` claim could not be checked, and why.
+        # Accumulated rather than returned on the spot: an early return here
+        # abandoned every collection after the first unanswerable one while
+        # reporting only "auto_embed could not be verified", so a policy with
+        # five collections and no mongot got one collection checked and a
+        # message that did not say so. Partial coverage described as a
+        # narrower failure than it was.
+        blind: list[str] = []
         for one in declared:
             if one.collection not in names:
                 found.extend(audit(one, indexes=(), search_indexes=(),
@@ -334,21 +349,29 @@ async def inspect(uri: str, database: str,
             coll = db[one.collection]
             indexes = [dict(i) async for i in await coll.list_indexes()]
             search: list[Mapping] = []
+            skip_embedding = False
             if one.auto_embed:
                 try:
                     search = [dict(i) async for i
                               in await coll.list_search_indexes()]
                 except Exception as exc:            # noqa: BLE001
-                    # A deployment with no mongot cannot answer this, and
-                    # that is a fact about the deployment rather than a
-                    # disagreement with the policy. Reported as the reason
-                    # the probe is incomplete, not as a clean bill.
-                    return found, (f"$listSearchIndexes is unavailable on "
-                                   f"this deployment ({type(exc).__name__}), "
-                                   f"so auto_embed could not be verified")
+                    # A deployment with no mongot cannot answer this, which
+                    # is a fact about the deployment rather than a
+                    # disagreement with the policy. The *other* checks on
+                    # this collection are still worth running, and are.
+                    blind.append(f"{one.collection} ({type(exc).__name__})")
+                    skip_embedding = True
             found.extend(audit(
                 one, indexes=indexes, search_indexes=search,
-                validator=(info.get(one.collection) or {}).get("validator")))
+                validator=(info.get(one.collection) or {}).get("validator"),
+                check_embedding=not skip_embedding))
+        if blind:
+            return found, (
+                f"$listSearchIndexes could not be read for "
+                f"{', '.join(blind)}, so the auto_embed declaration"
+                f"{'s' if len(blind) > 1 else ''} there "
+                f"{'were' if len(blind) > 1 else 'was'} not verified. "
+                f"Everything else on this page was")
         return found, None
     finally:
         # Closed before the listener accepts anything. This process holds no
