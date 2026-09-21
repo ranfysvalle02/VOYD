@@ -1,7 +1,8 @@
 # NEXT-TODO — what the next level needs, measured
 
-Written at `64b3e7f`, tree clean, 477 tests, 476 passing and one
-deselected (the contention-flaky Atlas index build). Successor to
+Written at `64b3e7f` and corrected at `dba7340`. Tree clean, **477 tests
+and all of them pass** -- 476 in the default run plus the Atlas one,
+which is now run isolated and passes in 78 seconds. Successor to
 `TODO.md`, which described the cut and is now deleted because the cut
 landed. Delete this one the same way.
 
@@ -202,11 +203,17 @@ production behaviour first; the test cost is the symptom.
   grep -oE "tests/test_[a-z_]+\.py" CLAIMS.md | sort -u | wc -l
   find voyd -name '*.py' | xargs wc -l | tail -1
   ```
-- **The Atlas test is contention-flaky, not broken.**
-  `test_the_server_embeds_and_refusal_still_holds` passes alone and fails
-  beside the other three in its file -- index builds on one shared cluster
-  outlast the poll budget. Run it isolated. CI gates it behind a secret in
-  its own step.
+- **The Atlas test is still run isolated**, though it is no longer racing
+  a sweeper: its refusable row is revoked rather than expired, because
+  `--ensure` builds the TTL index and the monitor collected an
+  already-expired row mid-build. Four index builds on one shared cluster
+  can still outlast the poll budget, so the deselection stands. CI gates
+  it behind a secret in its own step.
+- **A client talking to the proxy must carry its own credentials.** The
+  boundary forwards SCRAM and authenticates for nobody, so against a
+  deployment that requires auth an unauthenticated client gets
+  `Unauthorized` *through* the proxy. Correct, and it looks like a proxy
+  bug the first time.
 - **`voyd-mongo` stepped down mid-run once** (`not primary`, code 10107),
   producing 24 spurious errors. A cluster of fixture errors on
   `insert_many` is the container, not the code.
