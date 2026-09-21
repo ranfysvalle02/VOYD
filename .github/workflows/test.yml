@@ -86,7 +86,7 @@ jobs:
         run: |
           uv run --no-sync python -c "
           import sys, voyd
-          assert 'Engine' in voyd.__all__ and 'guard' in voyd.__all__
+          assert 'guard' in voyd.__all__ and 'Engine' not in voyd.__all__
           third = {m.split('.')[0] for m in sys.modules
                    if not m.startswith(('_', 'voyd'))} - sys.stdlib_module_names
           unexpected = third - {'pymongo', 'bson', 'gridfs', 'dns',
@@ -100,16 +100,24 @@ jobs:
           uv venv /tmp/wheelcheck
           VIRTUAL_ENV=/tmp/wheelcheck uv pip install dist/*.whl
           /tmp/wheelcheck/bin/python -c "
-          import voyd
-          from voyd import Engine, guard, deadline, revocable
+          import voyd, voyd.engine
+          from voyd import guard, deadline, revocable
           for gone in ('voyd.app', 'voyd.web', 'voyd.mcp', 'voyd.store',
-                       'voyd.engine.ledger', 'voyd.engine.perimeter'):
+                       'voyd.engine.ledger', 'voyd.engine.perimeter',
+                       'voyd.engine.model'):
               try:
                   __import__(gone)
               except ImportError:
                   continue
               raise AssertionError(f'{gone} is back in the wheel')
-          print('wheel: the policy vocabulary imports, the cut stayed cut')"
+          # The assertion that inverted. This line used to check that
+          # \`from voyd import Engine\` *worked*. The library front door is
+          # the thing that was cut, so it now has to be absent -- and a
+          # wheel is where a re-export sneaks back without anyone noticing.
+          for name in ('Engine', 'Model'):
+              assert not hasattr(voyd, name), f'{name} is back in the wheel'
+              assert not hasattr(voyd.engine, name), f'voyd.engine.{name} is back'
+          print('wheel: the policy vocabulary imports, the front door is gone')"
 
       - name: End to end, real driver through a real boundary
         # Atlas Local is a real mongod and a real mongot, not a mock. The

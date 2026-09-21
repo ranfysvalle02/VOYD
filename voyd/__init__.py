@@ -9,20 +9,7 @@ vector from a model that was swapped.
 VOYD answers that question at the one place every read passes through on the
 way out.
 
-**In your process**, a handle with no unfiltered read on it::
-
-    from voyd import Engine
-
-    engine = Engine(client, db)
-    await engine.connect()
-    docs = engine.model("notes").forgettable()
-    await engine.ensure(search_wait_s=0)
-
-    await docs.find({})                       # cannot return a forgotten fact
-    await docs.including_refused().find({})   # break-glass: gated, and counted
-    await docs.revoke({"_id": x}, reason="credential leaked")
-
-**Or on the wire**, where it binds the connection instead of the import.
+**There is one way to use it, and it is not an import.** VOYD is a proxy.
 Declare the rules once, in a file that is not your application::
 
     # voydfile.py
@@ -36,11 +23,24 @@ Declare the rules once, in a file that is not your application::
 
     # then: python tools/voyd_wire.py --config voydfile.py --target ...
 
-Same check, no code. Any driver in any language pointed at that port cannot
-read a forgotten fact, because the boundary is not something a caller can
-forget to use -- there is nothing to reach past. The proxy holds no database
-connection of its own: ``reachable()`` is pure, which is what makes it
-movable at all.
+No code. Any driver in any language pointed at that port cannot read a
+forgotten fact, because the boundary is not something a caller can forget
+to use -- there is nothing to reach past.
+
+This package used to ship a second front door, an ``Engine`` handle you
+constructed and called ``find()`` on. It is gone. Two doors onto one
+guarantee is the gap this project exists to make visible, and several
+claims were held up only by the door the README did not recommend. What
+stays importable is the policy vocabulary above -- ``guard``, ``deadline``,
+``revocable`` and the rest -- because the proxy loads it, plus the parts an
+operator's tools provision with. Nothing in ``voyd/`` is application-facing.
+
+``reachable()`` is pure -- no database, no connection, no I/O -- and that is
+the property that made the check movable to a wire at all. The proxy opens
+one connection of its own, and only when a policy declares ``lineage_field``:
+making a refusal reach what was derived from a fact is a write the caller
+did not issue, so it is not put on the caller's session. See ``LIMITS.md``
+section 6b.
 
 The pieces, and everything else is mechanics:
 
@@ -66,18 +66,21 @@ provenance quota -- which refuse a document because of the *other* documents
 on the page, and which no index filter and no policy engine can express. See
 ``examples/rosetta.py`` and ``examples/portfolio.py``.
 
-**Refusal travels.** ``derive()`` records what a document was made out of, so
-revoking a source reaches the summary, the answer and the embedding built on
-it -- and ``find({"lineage": id})`` answers the question from the other end.
-See ``examples/lineage.py``.
+**Refusal travels.** A collection declaring ``lineage_field`` records what
+each document was made out of, so revoking a source reaches the summary, the
+answer and the embedding built on it -- children marked first, then the
+source, because a crash the other way round leaves a summary of an erased
+fact still answering prompts. The boundary closes a document's ancestry
+transitively when it is written, which is what makes the cascade one query
+at any depth, and refuses an insert that claims a parent it may not reach.
+``find({"lineage": id})`` answers the question from the other end.
 
-**And it is provable.** Every revocation is a link in an append-only hash
-chain, ``as_of(t)`` replays the scope as it stood, and ``receipt_for(page)``
-hashes what reached a prompt. What lies outside this process is enumerated
-rather than claimed: see ``engine.perimeter``. Refusal binds a read path and a
-restored snapshot does not run it, which is what ``engine.keyring`` is for --
-a key per scope, destroyed on the same deadline, so every copy becomes
-unreadable at once. See ``examples/shred.py``.
+**And refusal is not the whole answer, which is said here rather than
+discovered later.** Refusal binds a read path, and a restored snapshot does
+not run it. That is what ``sealed()`` and ``--key-vault`` are for -- a key
+per scope, so destroying it makes every copy unreadable at once, and the
+boundary revokes the documents *first* so the key cache is not a second
+window. See ``examples/shred.py`` and ``LIMITS.md`` section 5.
 
 Every claim above is asserted by the test suite against a real MongoDB --
 no mock tier, on purpose, because these properties are only true if the
@@ -89,12 +92,10 @@ from __future__ import annotations
 from .declare import (auto_embed, budget, deadline, distinct, embedded_with,
                       guard, holdable, restricted_to, revocable, sealed,
                       tenant)
-from .engine import Engine
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "Engine",
     # The declarative policy surface -- everything `voydfile.py` needs.
     "guard", "deadline", "revocable", "holdable", "tenant",
     "restricted_to", "embedded_with", "budget", "distinct", "sealed",

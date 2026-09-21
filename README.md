@@ -58,8 +58,9 @@ So this repository applies it to itself, and not as a slogan:
 - **[CLAIMS.md](CLAIMS.md)** maps every guarantee to the file that would go
   red if it stopped holding. The mapping is checked in both directions by
   `tests/test_every_claim_names_its_evidence.py` — a claim with no test, or
-  a test no claim points at, fails the suite. Currently 28 claims, 28 files,
-  and a bijection.
+  a test no claim points at, fails the suite. Currently 29 claims across 28
+  files — lineage is two of them, because the cascade on read and the
+  ancestry closed on write fail separately.
 - **[LIMITS.md](LIMITS.md)** counts this project's own defects, names its
   own bad numbers, and opens with the one that matters: nobody has used this
   but its author.
@@ -244,6 +245,8 @@ back with the wrong rows.
 
 The one rule that needs to know *who is asking*, which for a long time was
 the one thing the library handle could do and the wire could not. The
+handle is gone now and the wire does this; what it still cannot do is an
+*ordered* clearance, and `LIMITS.md` section 6b says why. The
 question is not how to pass claims to the boundary — it is why the
 boundary should believe any. `for_caller` in `admission/core.py` puts it
 bluntly: a handle that believed `{"clearance": "secret"}` because it was
@@ -309,30 +312,30 @@ the size of the collection. Refill still guarantees the page; this just
 stops it needing three trips to get there. `receipts()["over_fetch"]` shows
 the number.
 
-## In-process, if you want it
+## There is no in-process form, and that is the change
 
-The declarative form compiles to the same objects the library exposes, so
-there is no cliff between declaring a rule and writing one:
+This section used to say "in-process, if you want it", and show an `Engine`
+handle you constructed and called `find()` on. It is gone.
 
-```python
-from voyd import Engine
+Two front doors onto one guarantee is precisely the gap this project exists
+to make visible, and it was inside the project. Several claims in
+`CLAIMS.md` were held up only by the door this README does not recommend —
+a reader had no way to tell which ones — and the one that mattered most,
+that a revocation reaches what was derived from the fact, was library-only
+while being printed as a headline. The wire holds it now; see
+`LIMITS.md` section 6b for how, and for what it costs.
 
-engine = Engine(client, db)
-await engine.connect()
-docs = engine.model("notes").forgettable()
+What stays importable is the policy vocabulary — `guard`, `deadline`,
+`revocable`, `tenant`, `restricted_to`, `sealed`, `auto_embed` and the rest
+— because the proxy loads it, plus the parts `--ensure` and `--verify`
+provision with. Nothing in `voyd/` is application-facing. `pip install voyd`
+is not the artifact; `voydfile.py` and a connection string are.
 
-await docs.find({})                      # cannot return a forgotten fact
-await docs.revoke({"_id": x}, reason="credential leaked")
-```
-
-`revoke()` makes a fact unreachable on the next read while its row is still on
-disk. Unreachable first, erased second — the reverse order is the bug.
-
-Encryption used to be library-only and is not any more — it is
-[two sections down](#the-erasure-refusal-cannot-perform). What is still
-library-only is **creating** the search index; declaring who owns the
-encoding, and refusing the query that goes around it, is on the wire and is
-[the next section](#the-server-owns-the-encoding).
+The one thing you still run in your own process is a **measurement**, and
+only because a boundary would defeat the point of it: `examples/shadow.py`
+counts how many documents your existing read path serves that your own
+database has already marked as gone, changing nothing. When that number
+convinces somebody, the same spec becomes a policy file.
 
 ## The server owns the encoding
 
@@ -402,9 +405,7 @@ data problem for a week.
 And a field cannot be both `sealed()` and `auto_embed()`, because the server
 cannot be denied a field and also asked to embed it: it would either embed
 the ciphertext (vectors of noise, and a relevance failure nobody attributes)
-or be handed the plaintext you sealed it against. `Engine` checks that at
-connect time, comparing a keyring against a search spec. **In a policy file
-it cannot be written at all** — the path *is* the attribute name, so Python
+or be handed the plaintext you sealed it against. **In a policy file it cannot be written at all** — the path *is* the attribute name, so Python
 binds it once and the second declaration wins. That is one more answer to
 "why a class body rather than a dict": a shape where a contradiction has
 nowhere to live beats a shape that detects it. Sealing one field and
@@ -833,7 +834,7 @@ from somebody asking why a paragraph said what it said. One
 team, two weeks, their own corpus is worth more than anything else that
 could be built next.
 
-The suite is **366 tests**, and it is the foundation rather than a census —
+The suite is **477 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie. Each one and the file that holds it up is
 **[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim with
@@ -855,7 +856,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 366 tests, 106 seconds -- the inner loop
+pytest              # 473 tests, ~150 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 

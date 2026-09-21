@@ -1,14 +1,14 @@
 [project]
 name = "voyd"
 version = "0.1.0"
-description = "Ranking is not permission. A retrieval read path that cannot return a fact it has forgotten -- admission control for what may reach a prompt."
+description = "Ranking is not permission. A MongoDB wire proxy that cannot serve a fact it has forgotten -- admission control for what may reach a prompt, in one policy file and one connection string."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Fabian Valle" }]
 requires-python = ">=3.11"
 keywords = [
     "mongodb", "vector-search", "retrieval", "rag", "admission-control",
-    "ttl", "expiry", "erasure", "audit-log",
+    "ttl", "expiry", "erasure", "audit-log", "proxy", "wire-protocol",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -20,8 +20,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
-# The body is Engine. `import voyd` / `from voyd import Engine` needs only a
-# MongoDB driver -- everything else is an extra you opt into.
+# The body is the proxy. `import voyd` is the policy vocabulary a
+# `voydfile.py` needs and nothing else, and it needs only a MongoDB driver
+# -- everything else is an extra you opt into.
 dependencies = [
     "pymongo>=4.9",            # async: from pymongo import AsyncMongoClient (NO motor)
 ]
@@ -100,8 +101,8 @@ target-version = "py311"
 # whatever the installed ruff currently defaults to -- and that moves: the
 # same code linted clean under 0.5 and produced 115 findings under 0.16,
 # without a line changing. A build that changes under you is the thing this
-# codebase pins settings to avoid everywhere else (see `Engine`, which fixes
-# its own clock and codecs rather than inheriting the caller's client).
+# codebase pins settings to avoid everywhere else (see `voyd-wire`, which
+# fixes its own clock and codecs rather than inheriting the caller's).
 #
 # This is the historical default -- pyflakes plus the pycodestyle errors that
 # are actually errors -- and adding a rule should be a deliberate commit that

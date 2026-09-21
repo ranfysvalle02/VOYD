@@ -681,17 +681,19 @@ the guarded side only.
 
 ## 4. Coverage
 
-475 tests, ~8,251 lines, against 8,220 lines of `voyd/` and 7,062 of
-`tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
+477 tests, ~8,479 lines, against 7,626 lines of `voyd/` and 7,555 of
+`tools/`. `voyd/` shrank by ~600 and `tools/` grew by ~500 in the same
+pass: the library front door was deleted and the guarantee it was the last
+holder of moved to the wire. A cut that only subtracted would have been a
+smaller number and a smaller product. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
 
-**189 lines across two files are mentioned by no test file**, and both are
-defensible: `composition.py` (124) declares the protocols a type checker
-reads and the runtime never imports, and `trait.py` (65) is the extension
-point -- whose `Trait` protocol is now what `Engine.use()` is annotated
-with, so it is enforced by `mypy` on every call site rather than merely
-described.
+**124 lines in one file are mentioned by no test file**, and it is
+defensible: `composition.py` declares the protocols a type checker reads
+and the runtime never imports. It used to be two files and 189 lines;
+`trait.py` joined the tested set when the tools that provision indexes
+became its callers.
 
 That figure is a name-scan, not coverage, and it is re-measurable in four
 lines rather than quoted -- which it needed to be. It previously read "557
@@ -708,8 +710,10 @@ tests = "\n".join(p.read_text() for p in Path("tests").glob("*.py"))
 **Every claim is attached to a file, and that mapping is checked.**
 `CLAIMS.md` names each guarantee and the test that would go red if it stopped
 holding; `tests/test_every_claim_names_its_evidence.py` asserts the mapping
-in both directions and refuses a citation it cannot parse. Currently 23
-claims, 23 test files, a bijection.
+in both directions and refuses a citation it cannot parse. Currently 29
+claims across 28 test files -- not quite a bijection, because lineage is
+two claims held by one file: the cascade on read, and the ancestry closed
+on write. They fail separately, so they are stated separately.
 
 **What that is worth, stated narrowly.** It closes the gap between a README
 sentence and a file that runs in CI. It does *not* know whether a test is any
@@ -816,7 +820,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (366 tests, ~106 seconds) with
+**Consider:** the suite is fast by default (473 tests, ~150 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
