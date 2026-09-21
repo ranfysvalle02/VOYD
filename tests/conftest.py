@@ -57,10 +57,15 @@ ATLAS_URI = os.environ.get("VOYD_ATLAS_URI")
 # claim the default deployment cannot test: Atlas Local is a single-node set,
 # so it has a primary and nothing to fan out to, and every routing assertion
 # against it would pass by having nowhere else to go.
+#
+# It authenticates, and that is load-bearing rather than tidy: fan-out has
+# to open a connection of its own to a secondary and prove an identity on
+# it, so a rig without `--auth` would exercise the one path that needs no
+# SCRAM at all.
 RS_URI = os.environ.get(
     "VOYD_TEST_RS_URI",
-    "mongodb://localhost:27021,localhost:27022,localhost:27023"
-    "/?replicaSet=voydrs")
+    "mongodb://voyd:voyd@localhost:27021,localhost:27022,localhost:27023"
+    "/?replicaSet=voydrs&authSource=admin")
 
 # ---------------------------------------------------------------------------
 # Leaked databases, and why this exists.

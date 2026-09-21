@@ -32,13 +32,29 @@ import pytest
 
 from voyd.engine.time import now
 
-from .conftest import free_port
+from .conftest import RS_URI, free_port
 
 pymongo = pytest.importorskip("pymongo")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import voyd_fanout  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _credential() -> str:
+    """``user:pass@`` from the rig's URI, or empty on an open deployment."""
+    head = RS_URI.split("//", 1)[1]
+    return head.split("@")[0] + "@" if "@" in head.split("/")[0] else ""
+
+
+CRED = _credential()
+
+
+def direct(hostport: str) -> str:
+    """A direct URI for one member, carrying the rig's credential."""
+    return (f"mongodb://{CRED}{hostport}/?directConnection=true"
+            + ("&authSource=admin" if CRED else ""))
+
 PAST = now() - timedelta(days=1)
 
 POLICY = """
@@ -194,7 +210,8 @@ def _wire(tmp_path, uri, *extra):
                 time.sleep(0.1)
         else:
             pytest.fail("voyd-wire never started listening")
-        yield f"mongodb://localhost:{port}/"
+        yield (f"mongodb://{CRED}localhost:{port}/"
+               + ("?authSource=admin" if CRED else ""))
     finally:
         proc.terminate()
         try:
@@ -247,7 +264,7 @@ def replication_stopped(uri):
     # stale, and report it as "replication won the race" -- the same trap
     # `Upstream._resolve` documents for `.primary`, walked into again here.
     client.admin.command("ping")
-    nodes = [pymongo.MongoClient(f"mongodb://{h}:{p}/?directConnection=true",
+    nodes = [pymongo.MongoClient(direct(f"{h}:{p}"),
                                  serverSelectionTimeoutMS=8000)
              for h, p in sorted(client.secondaries)]
     for node in nodes:
@@ -290,9 +307,8 @@ def test_the_read_is_actually_ranked_on_a_secondary(seeded, fanned):
     where the work happened, which is not something this process can talk
     itself into.
     """
-    client = pymongo.MongoClient(
-        "mongodb://localhost:27022/?directConnection=true",
-        serverSelectionTimeoutMS=8000)
+    client = pymongo.MongoClient(direct("localhost:27022"),
+                                 serverSelectionTimeoutMS=8000)
     try:
         before = client.admin.command("serverStatus")["opcounters"]["query"]
         for _ in range(6):     # round robin: make sure this node sees some
@@ -387,3 +403,92 @@ def test_a_cursor_opened_on_a_secondary_is_paged_from_the_same_secondary(
         client.close()
     assert got == [f"n{i:03d}" for i in range(250)], (
         "paging across a fanned-out cursor lost or duplicated documents")
+
+
+# --------------------------------------------------------------------------
+# Authentication, which is what decides whether fan-out is a real feature or
+# a localhost one.
+#
+# A secondary connection cannot replay the client's handshake -- SCRAM is a
+# challenge-response bound to a nonce, and this proxy does not hold the
+# password. So the boundary authenticates that connection itself, as the
+# `--fan-out` URI's identity. Two things follow, and both are tested here:
+# it has to actually work against an authenticated deployment, and it must
+# not quietly serve one user's reads over another user's connection.
+# --------------------------------------------------------------------------
+
+def _requires_auth():
+    if not CRED:
+        pytest.skip("the rig is unauthenticated; nothing to prove here")
+
+
+def test_fan_out_authenticates_its_own_connection_to_a_secondary(seeded,
+                                                                 fanned):
+    """The whole of what made fan-out a localhost feature until now.
+
+    The rig runs with `--auth` and a keyfile, so a secondary refuses an
+    unauthenticated read outright. A batch coming back ranked means SCRAM
+    completed on a connection this process opened and proved an identity
+    on -- there is no path to this assertion that skipped it.
+    """
+    _requires_auth()
+    client = pymongo.MongoClient(direct("localhost:27022"),
+                                 serverSelectionTimeoutMS=8000)
+    try:
+        before = client.admin.command("serverStatus")["opcounters"]["query"]
+        for _ in range(6):
+            assert texts(fanned, seeded.name, {"tenant_id": "acme"}) == ["live"]
+        after = client.admin.command("serverStatus")["opcounters"]["query"]
+    finally:
+        client.close()
+    assert after > before, (
+        "no read reached the authenticated secondary: SCRAM did not complete "
+        "and fan-out silently degraded to the primary")
+
+
+def test_a_client_arriving_as_somebody_else_is_not_served_over_this_identity(
+        seeded, fanned):
+    """The privilege check, and the reason it is not optional.
+
+    The secondary connection is authenticated as the `--fan-out` user. A
+    client that authenticated as a different user has its reads served over
+    that connection only if nobody is looking -- which is a privilege change
+    wearing the shape of an optimisation. So fan-out switches off for the
+    connection, and the read still happens, on the primary, correctly.
+    """
+    _requires_auth()
+    port = fanned.split("localhost:")[1].split("/")[0]
+    other = (f"mongodb://someone-else:someone-else@localhost:{port}"
+             f"/?authSource=admin")
+    node = pymongo.MongoClient(direct("localhost:27022"),
+                               serverSelectionTimeoutMS=8000)
+    client = pymongo.MongoClient(other, serverSelectionTimeoutMS=8000)
+    try:
+        before = node.admin.command("serverStatus")["opcounters"]["query"]
+        for _ in range(6):
+            got = sorted(d["text"] for d in
+                         client[seeded.name].notes.find({"tenant_id": "acme"}))
+            assert got == ["live"], "the answer changed, not just the route"
+        after = node.admin.command("serverStatus")["opcounters"]["query"]
+    finally:
+        client.close()
+        node.close()
+    assert after == before, (
+        "a client authenticated as someone-else had its reads served over a "
+        "connection authenticated as voyd")
+
+
+def test_a_fan_out_credential_that_does_not_work_degrades_to_the_primary(
+        seeded, tmp_path, replica_set):
+    """Wrong password, right answers.
+
+    An optimisation that cannot authenticate must not become an outage, and
+    it must not become a silent unauthenticated read either. The only
+    acceptable outcome is the behaviour of every version of this proxy
+    before fan-out existed.
+    """
+    _requires_auth()
+    broken = replica_set.replace("voyd:voyd@", "voyd:wrong@")
+    with _wire(tmp_path, replica_set, "--fan-out", broken,
+               "--advertise-self") as uri:
+        assert texts(uri, seeded.name, {"tenant_id": "acme"}) == ["live"]

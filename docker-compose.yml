@@ -57,6 +57,13 @@ services:
       - -c
       - |
         set -e
+        # Internal auth needs a shared key, and turning `--auth` on is not a
+        # detail of the rig: fan-out has to open a connection of its own to
+        # a secondary and authenticate it, and an unauthenticated rig would
+        # test the one path that needs no SCRAM at all.
+        openssl rand -base64 756 > /data/keyfile
+        chmod 400 /data/keyfile
+        chown mongodb /data/keyfile || true
         for p in 27021 27022 27023; do
           mkdir -p /data/rs$$p
           # `enableTestCommands` is what makes `configureFailPoint`
@@ -68,9 +75,13 @@ services:
           # never a flag for a real deployment.
           mongod --replSet voydrs --port $$p --dbpath /data/rs$$p \
                  --bind_ip_all --oplogSize 128 --fork \
+                 --keyFile /data/keyfile \
                  --setParameter enableTestCommands=1 \
                  --logpath /data/rs$$p/mongod.log
         done
+        # The localhost exception lets exactly one thing happen before a
+        # user exists: create the first user. Both steps run unauthenticated
+        # and everything after them does not.
         mongosh --quiet --port 27021 --eval '
           try { rs.status() } catch (e) {
             rs.initiate({_id: "voydrs", members: [
@@ -78,6 +89,23 @@ services:
               {_id: 1, host: "localhost:27022", priority: 1},
               {_id: 2, host: "localhost:27023", priority: 1}]})
           }'
+        until mongosh --quiet --port 27021 --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'; do sleep 1; done
+        mongosh --quiet --port 27021 --eval '
+          try {
+            db.getSiblingDB("admin").createUser({user: "voyd", pwd: "voyd",
+              roles: [{role: "root", db: "admin"}]})
+          } catch (e) { if (!/already exists/.test(e.message)) throw e }'
+        # A second identity, and the reason it exists: fan-out serves reads
+        # over a connection this proxy authenticated, so a client arriving
+        # as somebody else must not be served over it. That check needs two
+        # users to be a test rather than an assertion about one. Created
+        # authenticated, because the localhost exception covers only the
+        # first user on a deployment.
+        mongosh --quiet --port 27021 -u voyd -p voyd --authenticationDatabase admin --eval '
+          try {
+            db.getSiblingDB("admin").createUser({user: "someone-else",
+              pwd: "someone-else", roles: [{role: "readWriteAnyDatabase", db: "admin"}]})
+          } catch (e) { if (!/already exists/.test(e.message)) throw e }'
         # Hold the container open; the mongods are forked into the background.
         tail -f /data/rs27021/mongod.log
     healthcheck:
@@ -87,7 +115,7 @@ services:
       test:
         - CMD-SHELL
         - >-
-          mongosh --quiet --port 27021 --eval
+          mongosh --quiet --port 27021 -u voyd -p voyd --authenticationDatabase admin --eval
           'quit(rs.status().members.filter(m => m.stateStr == "PRIMARY").length == 1
            && rs.status().members.filter(m => m.stateStr == "SECONDARY").length == 2 ? 0 : 1)'
       interval: 5s

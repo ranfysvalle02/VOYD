@@ -1167,41 +1167,160 @@ class Secondaries:
         raw_sock = writer.get_extra_info("socket")
         if raw_sock is not None:
             keepalive(raw_sock)
-        if not await handshake(reader, writer, self.uri):
+        if not await self._identify(reader, writer):
             await close(writer)
             self.forget()
             return None
         return reader, writer
 
+    async def _identify(self, reader: asyncio.StreamReader,
+                        writer: asyncio.StreamWriter) -> bool:
+        """Run the handshake and SCRAM over this stream pair.
 
-async def handshake(reader: asyncio.StreamReader,
-                    writer: asyncio.StreamWriter, uri: str) -> bool:
-    """Authenticate this proxy's own connection to a secondary.
+        `authenticate` is pymongo's synchronous code driven through a shim,
+        so it runs in a worker thread; every round trip it asks for is
+        marshalled back here. Nothing else is on the connection yet -- the
+        reply pump does not start until this returns -- so reading the next
+        message is unambiguous rather than a race with a client's traffic.
+        """
+        loop = asyncio.get_running_loop()
+        counter = [0]
 
-    Done with pymongo's machinery rather than by hand: SCRAM is a two-round
-    challenge-response with a salted proof, and an implementation of it
-    written here to save a dependency would be a security primitive written
-    by somebody who did not have to. The connection is a plain socket pair,
-    so the exchange is driven message by message over it.
+        async def round_trip(body: dict) -> dict:
+            from pymongo.errors import OperationFailure
+            counter[0] += 1
+            req_id = counter[0]
+            writer.write(encode_op_msg(req_id, 0, 0, body))
+            await writer.drain()
+            raw, _len, _rid, _resp, opcode = await read_message_async(reader)
+            if opcode == OP_COMPRESSED:
+                expanded = uncompress_message(raw)
+                if expanded is None:
+                    raise OperationFailure("unreadable compressed reply")
+                raw = expanded
+            decoded = decode_op_msg(raw)
+            if decoded is None:
+                raise OperationFailure("unreadable reply while authenticating")
+            reply = dict(decoded[1])
+            if not reply.get("ok"):
+                raise OperationFailure(
+                    reply.get("errmsg", "authentication failed"),
+                    reply.get("code"), reply)
+            return reply
+
+        def exchange(body: dict) -> dict:
+            return asyncio.run_coroutine_threadsafe(
+                round_trip(body), loop).result(30)
+
+        try:
+            return await loop.run_in_executor(
+                None, authenticate, exchange, self.uri)
+        except Exception as exc:
+            print(f"voyd-wire: secondary handshake failed "
+                  f"({type(exc).__name__}); reads stay on the primary",
+                  flush=True)
+            return False
+
+
+class _AuthShim:
+    """Just enough of a pymongo ``Connection`` for its SCRAM code to run.
+
+    SCRAM is a salted challenge-response over two round trips, and the
+    earlier version of this declined to implement it with the note that a
+    security primitive should not be written by somebody who did not have
+    to. That reasoning was right and the conclusion was wrong: the choice
+    was never "write SCRAM or skip authentication", it was "write SCRAM or
+    *drive the implementation already installed*".
+
+    ``_authenticate_scram`` touches exactly two things on the connection it
+    is handed -- ``auth_ctx`` and ``command`` -- which is little enough that
+    this is a transport rather than a reimplementation. The client proof,
+    the salted password, the iteration count and the server-signature check
+    that stops a man in the middle finishing the exchange all stay in
+    pymongo. What is supplied here is a way to send a document and get one
+    back.
     """
+
+    auth_ctx = None
+
+    def __init__(self, exchange):
+        self._exchange = exchange
+
+    def command(self, dbname: str, spec: Mapping, *args, **kwargs) -> dict:
+        body = dict(spec)
+        body["$db"] = dbname
+        return self._exchange(body)
+
+
+def authenticate(exchange, uri: str) -> bool:
+    """Hand this proxy's own secondary connection its identity.
+
+    ``exchange`` is a *blocking* callable taking a command document and
+    returning the reply. This function therefore runs in a worker thread,
+    and the callable marshals each round trip back to the event loop -- the
+    only arrangement that works for both a plain socket and a TLS one,
+    because an already-wrapped `SSLSocket` cannot be handed to asyncio and
+    a TLS handshake cannot happen after authentication.
+
+    Returns False rather than raising on every failure path. A secondary
+    this proxy cannot authenticate to is not an outage; it is a deployment
+    where reads stay on the primary, which is what every version of this
+    file did before fan-out existed.
+    """
+    from pymongo.auth_shared import _build_credentials_tuple
     from pymongo.uri_parser import parse_uri
+
     parsed = parse_uri(uri)
-    if not parsed.get("username"):
-        # No credential in the fan-out URI: an unauthenticated deployment,
-        # where the handshake is a `hello` and nothing more.
-        return True
+    username, password = parsed.get("username"), parsed.get("password")
+    options = parsed.get("options") or {}
+    source = (options.get("authSource") or parsed.get("database") or "admin")
+
+    # The handshake proper. Every MongoDB connection owes the server one of
+    # these before anything else, and `saslSupportedMechs` is how the server
+    # is *asked* which mechanisms this user has rather than told which one
+    # this proxy guessed -- the difference between working on a SCRAM-SHA-1
+    # deployment and failing on one.
+    shim = _AuthShim(exchange)
+    hello: dict = {"hello": 1, "client": {
+        "driver": {"name": "voyd-wire", "version": "0"},
+        "os": {"type": sys.platform}}}
+    if username:
+        hello["saslSupportedMechs"] = f"{source}.{username}"
     try:
-        import pymongo.auth as _auth  # noqa: F401
-    except Exception:
+        reply = shim.command("admin", hello)
+    except Exception as exc:
+        print(f"voyd-wire: secondary handshake failed "
+              f"({type(exc).__name__}); reads stay on the primary", flush=True)
         return False
-    # Deliberately unimplemented in this pass, and it fails *closed*: an
-    # authenticated deployment gets no fan-out rather than an unauthenticated
-    # secondary connection. Writing the SCRAM exchange onto a raw stream pair
-    # is the remaining work, and shipping a half-done version of it is how a
-    # boundary ends up with an upstream socket that skipped authentication.
-    print("voyd-wire: fan-out to an authenticated secondary is not "
-          "implemented; reads stay on the primary", flush=True)
-    return False
+    if not username:
+        return True                      # an unauthenticated deployment
+
+    offered = reply.get("saslSupportedMechs") or []
+    mechanism = ("SCRAM-SHA-256" if "SCRAM-SHA-256" in offered
+                 else "SCRAM-SHA-1" if "SCRAM-SHA-1" in offered else None)
+    if mechanism is None:
+        print(f"voyd-wire: the secondary offers {list(offered) or 'nothing'} "
+              f"for {username!r}, and fan-out speaks only SCRAM; reads stay "
+              f"on the primary", flush=True)
+        return False
+
+    try:
+        from pymongo.synchronous.auth import _authenticate_scram
+    except ImportError:                  # pymongo < 4.9 laid it out flat
+        from pymongo.auth import _authenticate_scram  # type: ignore[no-redef]
+    credentials = _build_credentials_tuple(
+        mechanism, source, username, password, {}, source)
+    try:
+        _authenticate_scram(credentials, shim, mechanism)
+    except Exception as exc:
+        # Deliberately not the server's message: an authentication failure
+        # reply can carry the mechanism and the user, and this line goes to
+        # an operator's log.
+        print(f"voyd-wire: could not authenticate to the secondary as "
+              f"{username!r} ({type(exc).__name__}); reads stay on the "
+              f"primary", flush=True)
+        return False
+    return True
 
 
 def stepped_down(reply: dict) -> str | None:
@@ -1409,6 +1528,11 @@ class Conversation:
         self._next_ask = ASKED_BASE
         self.client_lock = asyncio.Lock()
         self.primary_lock = asyncio.Lock()
+        # Starts *off* wherever the secondaries need a credential, and is
+        # turned on only by a client proving the same identity. The other
+        # way round -- on until somebody is caught -- is fail-open, and it
+        # failed open for exactly as long as this file only looked for a
+        # standalone `saslStart`.
         self.fan_out_ok = True
 
     async def to_client(self, payload: bytes) -> None:
@@ -1557,25 +1681,43 @@ def _cursor_id(reply: Mapping) -> int | None:
     return None
 
 
-def _scram_user(body: Mapping) -> str | None:
-    """The username a client is authenticating as, off the SCRAM first message.
+def authenticating(body: Mapping) -> tuple[bool, str | None]:
+    """Is this an authentication attempt, and as whom?
 
-    SCRAM sends `n,,n=<user>,r=<nonce>` in the clear -- the *proof* is what
-    is protected, not the identity -- so this is readable without holding
-    any credential, which is the only reason the identity check below can
-    exist at all.
+    Two shapes, and missing the second one was a real bug rather than a
+    theoretical gap. A driver may send `saslStart` as its own command, but
+    pymongo -- and every other modern driver -- folds the first round into
+    the handshake as `speculativeAuthenticate` to save a round trip. A
+    check that only looked for `saslStart` therefore never fired against a
+    real driver, and fan-out stayed on for a client authenticated as
+    somebody else. The test that found it is
+    `test_a_client_arriving_as_somebody_else_is_not_served_over_this_identity`.
+
+    The username comes off the SCRAM first message, `n,,n=<user>,r=<nonce>`,
+    which is in the clear -- the *proof* is what is protected, not the
+    identity -- so reading it needs no credential.
+
+    Returns ``(attempted, username)``. ``(True, None)`` is the important
+    case: an authentication this function does not understand, X.509 or AWS
+    or OIDC, where the answer to "as whom" is unknown and the caller must
+    treat it as "not us".
     """
+    inner = body.get("speculativeAuthenticate")
+    if isinstance(inner, Mapping):
+        body = inner
+    elif not ({"saslStart", "authenticate"} & set(body)):
+        return False, None
     payload = body.get("payload")
     raw = getattr(payload, "value", payload)
     if not isinstance(raw, (bytes, bytearray)):
-        return None
+        return True, None
     try:
         for part in raw.decode("utf8", "replace").split(","):
             if part.startswith("n="):
-                return part[2:]
+                return True, part[2:].replace("=2C", ",").replace("=3D", "=")
     except Exception:
-        return None
-    return None
+        return True, None
+    return True, None
 
 
 async def route(client_r: asyncio.StreamReader, conv: Conversation,
@@ -1644,15 +1786,14 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
             # privilege change wearing the shape of an optimisation. So
             # fan-out is switched off for this connection unless the two
             # identities are the same name.
-            if "saslStart" in body or "authenticate" in body:
-                who = _scram_user(body)
-                if who != secondaries.user:
-                    if conv.fan_out_ok and verbose:
-                        print(f"  voyd: client authenticated as "
-                              f"{who!r}; fan-out is off for this connection "
-                              f"(secondaries are reached as "
-                              f"{secondaries.user!r})", flush=True)
-                    conv.fan_out_ok = False
+            attempted, who = authenticating(body)
+            if attempted:
+                matched = who is not None and who == secondaries.user
+                if conv.fan_out_ok != matched and verbose and not matched:
+                    print(f"  voyd: client authenticated as {who!r}; "
+                          f"fan-out is off for this connection (secondaries "
+                          f"are reached as {secondaries.user!r})", flush=True)
+                conv.fan_out_ok = matched
 
             # ---- the routing decision -----------------------------------
             dest = "primary"
@@ -1800,6 +1941,7 @@ async def fanned_session(client_r, client_w, upstream: Upstream,
             return
 
         conv = Conversation(client_w, up_w, guards, verbose, meter)
+        conv.fan_out_ok = secondaries.user is None
         rewritten: set[int] = set()
         tasks = [
             asyncio.ensure_future(route(client_r, conv, upstream, secondaries,

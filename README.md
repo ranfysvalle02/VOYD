@@ -309,12 +309,27 @@ What it costs, stated rather than discovered:
 upstream connection this proxy makes is the client's. A secondary connection
 cannot be — authentication is per connection and SCRAM is a challenge-response
 bound to a nonce, so the client's handshake cannot be replayed onto a second
-socket without knowing the password, which this deliberately does not. Reads
-served from a secondary therefore run as the `--fan-out` URI's identity, and
-the boundary switches fan-out off for any connection whose client
-authenticated as a different user. **Authenticated fan-out is not implemented
-yet and fails closed** — reads stay on the primary. See
-[LIMITS.md](LIMITS.md) §3.
+socket without knowing the password, which this deliberately does not. The
+boundary therefore authenticates that connection itself, driving *pymongo's*
+SCRAM rather than a hand-written one: the client proof, the salting and the
+server-signature check stay in the library, and what this file supplies is a
+way to send a document and get one back.
+
+Reads served from a secondary run as the `--fan-out` URI's identity, so:
+
+- **A client authenticating as anyone else gets fan-out switched off for its
+  connection**, and its reads stay on the primary. Serving them over a
+  connection authenticated as somebody else is a privilege change wearing
+  the shape of an optimisation.
+- **It fails closed.** On a deployment whose secondaries need a credential,
+  fan-out starts *off* and is enabled only by a client proving the matching
+  identity. An authentication mechanism this boundary cannot read —
+  X.509, AWS, OIDC — is "not us", never "probably fine".
+- **A credential that does not work is not an outage.** Wrong password,
+  unreachable secondary, a mechanism other than SCRAM: reads stay on the
+  primary and the answers do not change.
+
+See [LIMITS.md](LIMITS.md) §3.
 
 ### Known gaps
 

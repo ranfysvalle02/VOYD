@@ -20,14 +20,24 @@ somebody who also wrote the claim.
 That is not a coverage problem and no amount of code fixes it. The suite is
 good at holding claims somebody thought to state; it has never once been the
 thing that caught a problem a *user* hit, because there have been no users.
-Ten defects this month, and the way they were found is the point. Seven
+Eleven defects this month, and the way they were found is the point. Seven
 came from running something new: three from exercising paths nobody had
 exercised, four more from the hostile pass in §4. One came from the
-benchmark contradicting a commit message that had already been pushed. Two
-came from *writing a test*: the scanner's two-mark finding in §4, and the
-read-preference claim in §3 — where the defect was in the prose, and three
+benchmark contradicting a commit message that had already been pushed.
+Three came from *writing a test*: the scanner's two-mark finding in §4; the
+read-preference claim in §3, where the defect was in the prose and three
 files had spent weeks talking a reader out of something the proxy could
-already do.
+already do; and fan-out's identity check, which looked for a standalone
+`saslStart`, never fired against a real driver's speculative handshake, and
+was fail-open while it did not — the most serious of the eleven, and the
+only one a user could have been harmed by rather than merely misled.
+
+That last one is worth the sentence it costs. It was written *and* reviewed
+in the same hour as the feature, by the same person, with the failure mode
+explicitly in mind, and it still shipped inverted. The test that caught it
+was written in the same hour too. Everything on this page about a suite
+being a ratchet rather than a search is true; this is the counter-example
+where writing the assertion was the search.
 
 Not one was found by the suite going red. That is the honest description of
 where an outside perspective would land: the suite is a ratchet, not a
@@ -195,21 +205,28 @@ What it gave up is stated here rather than in the README's margin:
   client's handshake cannot be replayed onto a second socket without the
   password. "Holds no credentials" was true of every version of this file
   before fan-out and is now true only when fan-out is off.
-- **Authenticated fan-out is not implemented, and fails closed.** With a
-  credential in the `--fan-out` URI the handshake refuses and reads stay on
-  the primary. That is a stub, and it is named as one in `handshake()`:
-  writing the SCRAM exchange onto a raw stream pair is the remaining work,
-  and a half-finished version of it is how a boundary ends up with an
-  upstream socket that skipped authentication. **Consider:** in practice
-  this means fan-out is usable today on deployments that do not
-  authenticate, which is a narrow set and honestly not many production
-  ones.
-- **Identity is checked, not assumed.** If a client authenticates as a
-  different user than the fan-out URI names, fan-out switches off for that
-  connection -- because serving its reads over a connection authenticated
-  as somebody else is a privilege change wearing the shape of an
-  optimisation. The username is read off the SCRAM first message, which is
-  in the clear; the proof is what is protected, not the identity.
+- **Authenticated fan-out works, and it did not at first.** The boundary
+  authenticates its own secondary connection by driving pymongo's SCRAM
+  through a shim rather than implementing the exchange. The earlier version
+  of this refused to, on the grounds that a security primitive should not
+  be written by somebody who did not have to -- right reasoning, wrong
+  conclusion: the choice was never "write SCRAM or skip authentication",
+  it was "write SCRAM or drive the implementation already installed". The
+  test rig runs with `--auth` and a keyfile for this reason, because an
+  open rig would exercise the one path that needs no SCRAM at all.
+- **Identity is checked, and the first version of that check never fired.**
+  A client authenticating as a different user than the fan-out URI names
+  has fan-out switched off for its connection. The check originally looked
+  only for a standalone `saslStart`, and every modern driver folds the
+  first round into the handshake as `speculativeAuthenticate` -- so against
+  a real driver it matched nothing and fan-out stayed on. It was fail-open
+  as well as wrong, which is the pair of mistakes that makes a privilege
+  change invisible. It now starts *off* on any deployment whose
+  secondaries need a credential and is enabled only by a client proving the
+  matching identity, so a mechanism this boundary cannot read -- X.509,
+  AWS, OIDC -- is "not us" rather than "probably fine".
+  **Consider:** the check compares *usernames*. Two identities with the
+  same name in different auth databases would pass it.
 - **One extra round trip per guarded batch**, and a whole-document fetch
   rather than a projection whenever a rule cannot be introspected.
   `verdict_fields` returns `None` for any third-party rule, which is the
