@@ -286,7 +286,13 @@ def test_an_erased_document_does_not_fail_the_page_it_is_on(sealed_wire):
         + [{"tenant_id": "carol", "label": f"no body {i}", "n": 100 + i}
            for i in range(20)])
 
-    assert notes.count_documents({"tenant_id": "carol"}) == 40
+    # The control is `find`, not `count_documents`, and that is not a style
+    # choice. A sealed collection carries a rule -- is this row still
+    # decryptable -- that `$match` cannot ask, so the boundary refuses a
+    # count here rather than pushing down a filter that is narrower than
+    # the guarantee and returning a confident, too-high number. See
+    # `test_a_derived_read_cannot_launder_a_forgotten_fact.py`. This line
+    # used to be a `count_documents` and it was measuring the leak.
     before = list(notes.find({"tenant_id": "carol"}))
     assert len(before) == 40, "the control: all forty are reachable first"
 

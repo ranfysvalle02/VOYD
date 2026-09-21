@@ -57,13 +57,19 @@ dev = [
     # to remember to run is a suggestion, which is this project's whole
     # complaint about conventions.
     "ruff>=0.5",   # rule set is pinned in [tool.ruff.lint], so the tool may float
-    # `tests/test_every_documented_command_is_real.py` reads the compose files
+    # `tests/test_every_documented_command_is_real.py` reads the compose file
     # to check that a documented `docker compose up -d --wait <service>` names
     # a service that exists. It arrives transitively today (uvicorn[standard]),
     # which is exactly how `ruff` and `mypy` were undeclared above -- a tool
     # the suite depends on, present by luck, until the day a transitive
     # dependency drops it and a test that was never about YAML fails on an
     # import. Declared, so the suite owns what it uses.
+    #
+    # And for a while that paragraph was the whole of it: the test it names
+    # did not exist, nothing in the repository imported `yaml`, and this was
+    # a dependency justified by a file nobody had written -- in the block
+    # whose own subject is tools that are present by luck. The same defect
+    # the block is about, one level up, in the prose explaining it.
     "pyyaml>=6.0",
     # The package ships `py.typed`, which tells every downstream type checker
     # that these annotations are load-bearing. That promise was made in the

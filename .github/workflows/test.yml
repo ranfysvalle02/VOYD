@@ -62,6 +62,8 @@ jobs:
             tests/test_the_server_owns_the_encoding.py \
             tests/test_the_policy_is_checked_against_the_cluster.py \
             tests/test_every_claim_names_its_evidence.py \
+            tests/test_every_documented_command_is_real.py \
+            tests/test_a_derived_read_cannot_launder_a_forgotten_fact.py \
             -m 'not needs_mongo'
 
       - name: Fan-out, against three mongods and a real election

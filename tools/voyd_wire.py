@@ -68,7 +68,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Mapping, TypedDict
+from typing import Any, Mapping, TypedDict
 
 try:
     import bson
@@ -637,6 +637,303 @@ def refuse_client_vector(raw: bytes, req_id: int, resp_to: int,
     })
 
 
+
+# ---------------------------------------------------------------------------
+# Reads whose reply is not the documents.
+#
+# `filter_batch` is a per-document check, and it had a precondition nothing
+# was checking: the reply has to be made of the *stored documents*, still
+# carrying the fields the verdict is read from. Three shapes break that and
+# were all forwarded --
+#
+#     distinct   -> {"values": [...]}   no cursor, so no batch, so no filter
+#     count      -> {"n": 2}            the same
+#     $group     -> a cursor of new documents with no marks on them
+#
+# -- and the third is the quiet one. The batch arrives, `Guard.filter` runs,
+# and `len(kept) == len(batch)` holds because a reshaped document has
+# nothing to refuse it *on*. The boundary said yes by having nothing to say
+# no about, which is the exact silence this package is named after.
+#
+# Measured through the proxy against a real `mongod`, one live row and one
+# revoked one, same connection, same second:
+#
+#     find:                              ['live']
+#     distinct("owner"):                 ['live', 'revoked-...']
+#     aggregate [{$count: "n"}]:         [{'n': 2}]
+#     aggregate [{$project: {owner:1}}]: ['live', 'revoked-...']
+#
+# It is the mirror of `$out`/`$merge`. There the client never sees the
+# documents because the server writes them elsewhere; here it never sees
+# them because the server turned them into something else first.
+#
+# But the answer is not the same answer. `$out` cannot be made safe by a
+# proxy -- the copy happens where the boundary is not. A count can: the
+# refusal is a *query*, and pushing it into the pipeline makes the server
+# reduce over admitted documents only. So these are rewritten rather than
+# refused, the same way a `delete` is rewritten into a revocation, and
+# refusing is what happens only when the rewrite would be a lie.
+#
+# It would be a lie in three cases, and they are the whole of why this is
+# not just an injection:
+#
+#   1. A rule that cannot express itself as a query clause. `_query` in
+#      `admission/core.py` already says this out loud -- a rule with no
+#      clause "is simply enforced on the way out instead", which is fine for
+#      a batch of documents and useless for a number. Unrecoverable-when-
+#      sealed is the live example: whether a row decrypts is not a thing
+#      `$match` can ask.
+#   2. A rule that compares the document against *who is asking*. This
+#      process holds no caller.
+#   3. A declared tenant the command does not pin. `Guard.filter` infers the
+#      scope from the batch it is judging; a reduction has no batch, so the
+#      scope has to be in the query or it is not known at all.
+#
+# In those three, the honest answer is the one `drop` and `$out` get.
+
+# Commands whose entire reply is computed from documents the client never
+# sees. There is no batch, so there is nothing for `filter_batch` to judge
+# and the refusal has to be in the query or nowhere.
+DERIVED_COMMANDS: dict[str, str] = {
+    "distinct": "returns field values, not documents",
+    "count": "returns a number computed from documents you are not shown",
+}
+
+# Stages that hand the stored document back, marks and all. A pipeline made
+# only of these produces a batch `filter_batch` can judge on its own, which
+# is the case that already worked and must not start paying for this.
+PRESERVING_STAGES = frozenset({
+    "$match", "$sort", "$limit", "$skip", "$sample",
+    "$vectorSearch", "$search", "$geoNear",
+})
+
+# Stages that must come first, so an injected `$match` goes after them
+# rather than before. `$vectorSearch` is the one that matters here: it is
+# the workload this package exists for.
+LEADING_STAGES = frozenset({"$vectorSearch", "$search", "$geoNear"})
+
+# Stages that read a *different* collection. Push-down cannot help: the
+# documents they bring back were never covered by this guard, and the
+# policy for where they came from was not declared. Refused, like `$out`.
+FOREIGN_STAGES = frozenset({"$lookup", "$unionWith", "$graphLookup"})
+
+
+def expressible_clauses(guard: Guard) -> list[dict] | None:
+    """This guard's refusal as query clauses, or `None` if it cannot be.
+
+    `None` is the load-bearing return. Every rule has to express itself or
+    the pushed-down filter is *narrower than the guarantee* -- and a count
+    that is too high by exactly the rows a rule would have caught is the
+    original bug with an extra step. Partial is not a thing this may be.
+    """
+    clauses: list[dict] = []
+    for rule in guard.spec.rules:
+        if getattr(rule, "needs_caller", False):
+            return None                 # this process is nobody
+        clause = rule.clause()
+        if clause is None:
+            return None                 # enforced on the way out, and there
+        clauses.append(clause)          # is no way out here
+    return clauses
+
+
+def pins_the_tenant(query: Any, tenant: str) -> bool:
+    """Does this query fix the tenant to one scalar?
+
+    `Guard.filter` takes the scope from the batch, because every document in
+    a cursor batch came from one query. A reduction has no batch to take it
+    from, so an unpinned tenant is not a narrower answer -- it is every
+    tenant's rows summarised into one number.
+    """
+    if not isinstance(query, Mapping) or tenant not in query:
+        return False
+    # Membership rather than `.get() is not None`, because
+    # `admission/core.py` is explicit that `None`, `0` and `""` are tenant
+    # ids a caller may legitimately hold -- and reading a pinned null as
+    # "unpinned" would refuse a read that was perfectly well scoped.
+    value = query[tenant]
+    # A `$in`, a `$ne`, a regex: several tenants, and one number over
+    # several tenants is the leak with an extra step.
+    return not isinstance(value, (Mapping, list))
+
+
+def _and_in(query: Any, clauses: list[dict]) -> dict:
+    """The caller's query, narrowed by the boundary's, without losing either."""
+    out = dict(query) if isinstance(query, Mapping) else {}
+    existing = out.pop("$and", [])
+    # A caller's `$and` that is not a list is their bug, and it is kept so
+    # the server says so. Dropping it would be this boundary quietly making
+    # a malformed query valid, which is a worse habit than the error.
+    out["$and"] = ([*existing, *clauses] if isinstance(existing, list)
+                   else [existing, *clauses])
+    return out
+
+
+def reducing_stage(pipeline: list) -> str | None:
+    """The first stage whose output is not the stored document."""
+    for stage in pipeline:
+        if not isinstance(stage, Mapping) or len(stage) != 1:
+            return "a stage this boundary cannot read"
+        name = next(iter(stage))
+        if name in PRESERVING_STAGES or name in EXFILTRATING_STAGES:
+            continue                    # `writes_elsewhere` owns the second
+        return name
+    return None
+
+
+def rewrite_derived_read(raw: bytes, req_id: int, resp_to: int,
+                         guards: dict[str, Guard], verbose: bool
+                         ) -> tuple[bytes | None, bytes | None]:
+    """`(rewritten_request, refusal)` -- at most one of them is not `None`.
+
+    Two returns rather than two functions because the decision is one
+    decision: this command needs the refusal in its query, and either that
+    is possible or the command is refused. Splitting them invites a caller
+    that asks the first question and forwards on a `None`, which is the
+    fail-open shape this file has been bitten by before.
+    """
+    decoded = decode_op_msg(raw)
+    if decoded is None:
+        # `decode_op_msg` returns `None` on a kind-1 document sequence, and
+        # reading that as a decision rather than an absence is the exact bug
+        # `test_the_codec_round_trips` was written for. It is safe *here*
+        # and only here: a document sequence carries `documents`, `updates`
+        # or `deletes`, and none of the commands this function judges is a
+        # write. If that ever stops being true this line is fail-open.
+        return None, None
+    flags, body = decoded
+
+    # `explain` carries the real command as a subdocument and its plan
+    # quotes the query. A boundary that handles `distinct` and forwards
+    # `explain: {distinct: ...}` has made the guarantee a spelling question,
+    # so the inner command is judged -- and only ever refused, never
+    # rewritten, because an explain of a rewritten query would describe a
+    # command the client did not send.
+    inner = body.get("explain")
+    if isinstance(inner, Mapping):
+        _unused, refusal = rewrite_derived_read(
+            encode_op_msg(req_id, resp_to, 0, dict(inner)),
+            req_id, resp_to, guards, verbose=False)
+        if refusal is not None:
+            return None, refusal
+        if _needs_pushdown(inner, guards):
+            return None, _refuse(req_id, _named(inner, guards),
+                                 "`explain` describes a plan, not documents, "
+                                 "so the refusal cannot be taken on the way "
+                                 "out and must not be hidden in the plan",
+                                 verbose)
+        return None, None
+
+    for command in DERIVED_COMMANDS:
+        guard = guard_for(guards, body, command)
+        if guard is None:
+            continue
+        clauses = expressible_clauses(guard)
+        query = body.get("query")
+        if clauses is None:
+            return None, _refuse(req_id, guard.collection,
+                                 f"`{command}` {DERIVED_COMMANDS[command]}, "
+                                 f"and this policy has a rule that cannot be "
+                                 f"asked as a query", verbose)
+        if guard.spec.tenant and not pins_the_tenant(query, guard.spec.tenant):
+            return None, _refuse(req_id, guard.collection,
+                                 f"`{command}` {DERIVED_COMMANDS[command]}, "
+                                 f"and this command does not say which "
+                                 f"{guard.spec.tenant!r} it is about", verbose)
+        patched = dict(body)
+        patched["query"] = _and_in(query, clauses)
+        if verbose:
+            print(f"  voyd: {guard.collection}: pushed the refusal into "
+                  f"`{command}`", flush=True)
+        return encode_op_msg(req_id, resp_to, flags, patched), None
+
+    guard = guard_for(guards, body, "aggregate")
+    pipeline = body.get("pipeline")
+    if guard is None or not isinstance(pipeline, list):
+        return None, None
+
+    foreign = next((next(iter(st)) for st in pipeline
+                    if isinstance(st, Mapping) and len(st) == 1
+                    and next(iter(st)) in FOREIGN_STAGES), None)
+    if foreign is not None:
+        return None, _refuse(req_id, guard.collection,
+                             f"`{foreign}` brings back documents from another "
+                             f"collection, which this guard was not declared "
+                             f"for and cannot speak for", verbose)
+
+    stage = reducing_stage(pipeline)
+    if stage is None:
+        return None, None               # ordinary retrieval: untouched bytes
+
+    clauses = expressible_clauses(guard)
+    if clauses is None:
+        return None, _refuse(req_id, guard.collection,
+                             f"`{stage}` does not hand back the stored "
+                             f"document, and this policy has a rule that "
+                             f"cannot be asked as a query", verbose)
+    lead = pipeline[0] if pipeline and isinstance(pipeline[0], Mapping) else {}
+    lead_name = next(iter(lead), None) if len(lead) == 1 else None
+    at = 1 if lead_name in LEADING_STAGES else 0
+    if guard.spec.tenant:
+        pinned = (lead_name == "$match" and pins_the_tenant(
+            lead.get("$match"), guard.spec.tenant))
+        if not pinned:
+            return None, _refuse(
+                req_id, guard.collection,
+                f"`{stage}` summarises documents you are not shown, and this "
+                f"pipeline does not open by saying which "
+                f"{guard.spec.tenant!r} it is about", verbose)
+    patched = dict(body)
+    patched["pipeline"] = [*pipeline[:at], {"$match": {"$and": clauses}},
+                           *pipeline[at:]]
+    if verbose:
+        print(f"  voyd: {guard.collection}: pushed the refusal in front of "
+              f"`{stage}`", flush=True)
+    return encode_op_msg(req_id, resp_to, flags, patched), None
+
+
+def _named(body: Mapping, guards: dict[str, Guard]) -> str:
+    for verb in (*DERIVED_COMMANDS, "aggregate"):
+        guard = guard_for(guards, body, verb)
+        if guard is not None:
+            return guard.collection
+    return "this collection"
+
+
+def _needs_pushdown(body: Mapping, guards: dict[str, Guard]) -> bool:
+    """Would this command have had the refusal pushed into it?"""
+    if any(guard_for(guards, body, c) is not None for c in DERIVED_COMMANDS):
+        return True
+    guard = guard_for(guards, body, "aggregate")
+    pipeline = body.get("pipeline")
+    return (guard is not None and isinstance(pipeline, list)
+            and reducing_stage(pipeline) is not None)
+
+
+def _refuse(req_id: int, collection: str, why: str,
+            verbose: bool) -> bytes:
+    """An error the driver raises, rather than a plausible wrong number."""
+    if verbose:
+        print(f"  voyd: REFUSED a derived read on {collection}: {why}",
+              flush=True)
+    # `responseTo` is the *request* id: this message answers the command,
+    # it does not continue a stream. Getting it from the request's own
+    # `responseTo` (which is 0) desynchronises the driver, and the failure
+    # arrives as `ProtocolError: got response id 0` -- a boundary bug
+    # wearing the costume of a network one, which is a shape LIMITS.md §1
+    # already has an entry for.
+    return encode_op_msg(req_id, req_id, 0, {
+        "ok": 0.0, "code": 8000, "codeName": "AtlasError",
+        "errmsg": (
+            f"voyd-wire refuses this read on {collection!r}: {why}. This "
+            f"boundary decides per document, so a reply it cannot trace back "
+            f"to documents is one it cannot refuse -- and a forgotten fact "
+            f"would be counted, grouped or listed as a value instead of "
+            f"being left out. Read the documents through the boundary and "
+            f"reduce them on your side."),
+    })
+
+
 def guard_for(guards: dict[str, Guard], body: Mapping,
               verb: str) -> Guard | None:
     """The guard for the collection this command names, if any.
@@ -1087,6 +1384,16 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 refusal = refuse_unrewritable(raw, req_id, req_id, guards)
                 if refusal is None and embeds:
                     refusal = refuse_client_vector(raw, req_id, req_id, embeds)
+                if refusal is None:
+                    # A reduction gets the refusal pushed into its query, or
+                    # it gets an error. Never neither: see the note above
+                    # `rewrite_derived_read` for why one call answers both.
+                    pushed, refusal = rewrite_derived_read(
+                        raw, req_id, resp_to, guards, verbose)
+                    if pushed is not None:
+                        raw = pushed
+                        head = decode_sections(raw)
+                        body = head[1] if head else body
                 if refusal is not None:
                     await send(back, refusal)
                     continue
@@ -2164,6 +2471,14 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
             refusal = refuse_unrewritable(raw, req_id, req_id, guards)
             if refusal is None and embeds:
                 refusal = refuse_client_vector(raw, req_id, req_id, embeds)
+            if refusal is None:
+                pushed, refusal = rewrite_derived_read(
+                    raw, req_id, resp_to, guards, verbose)
+                if pushed is not None:
+                    raw = pushed
+                    original = raw
+                    head = decode_sections(raw)
+                    body = head[1] if head else body
             if refusal is not None:
                 await conv.to_client(refusal)
                 continue

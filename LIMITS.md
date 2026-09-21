@@ -568,11 +568,91 @@ destructive. Any future server-side write stage is the same shape, and the
 question to ask is not "is this a delete?" but "does the client ever see the
 documents?"
 
+**And the mirror of it, found by asking that question the other way round
+-- closed, and it was open longer.** `$out` hides the documents by writing
+them somewhere else. A `distinct`, a `count`, or a `$group` hides them by
+turning them into something else first, and the reply comes back to the
+client either way. Measured against one live row and one revoked one:
+
+    find through the boundary:        ['live']
+    distinct("owner"):                ['live', 'revoked-that-should-be-gone']
+    aggregate [{$count: "n"}]:        [{'n': 2}]
+    aggregate [{$group: "$owner"}]:   ['live', 'revoked-that-should-be-gone']
+    aggregate [{$project: {owner:1}}]:['live', 'revoked-that-should-be-gone']
+    aggregate [{$match: {}}]:         ['live']
+
+An ordinary driver through the proxy against a real `mongod`, not a unit
+test: the same connection, in the same second, refused the revoked document
+to `find` and handed its owner's name to `distinct`. The last line is the
+control, and it is why this went unnoticed: ordinary retrieval was correct
+the whole time, so every path anybody actually looked at said the boundary
+was working.
+
+`filter_batch` only acts on a `cursor.firstBatch`/`nextBatch`, so `distinct`
+and `count` were never offered a batch at all. The third is the quiet one:
+the batch *arrives*, `Guard.filter` runs on it, and `len(kept) ==
+len(batch)` holds because a `$group`ed document has no marks to be refused
+on. The boundary said yes by having nothing to say no about -- a
+per-document check whose precondition, *these are still the documents*, was
+never checked.
+
+Closed by **push-down, not refusal**, and the difference is the whole of
+what makes this usable. `$out` cannot be made safe by a proxy -- the copy
+happens where the boundary is not. A count can: the refusal is a *query*,
+so the boundary puts it into the pipeline ahead of the reducing stage (or
+into `count`'s and `distinct`'s `query`) and the server reduces over
+admitted documents only. Same rewrite-rather-than-refuse instinct as
+`delete` becoming a revocation. Re-measured, same rig:
+
+    distinct("owner"):                ['live']
+    aggregate [{$count: "n"}]:        [{'n': 1}]
+    aggregate [{$group: "$owner"}]:   ['live']
+    aggregate [{$project: {owner:1}}]:['live']
+
+Ordinary retrieval is not touched at all -- `$match`, `$sort`, `$limit`,
+`$vectorSearch` and friends still return byte-identical bytes, because
+`filter_batch` already covers them and a rewrite would be cost with no
+guarantee.
+
+**Refusing is what happens when the push-down would be a lie**, and there
+are exactly three such cases. They matter more than the fix:
+
+1. *A rule that cannot express itself as a query.* `_query` in
+   `admission/core.py` already says a rule with no clause "is simply
+   enforced on the way out instead" -- fine for a batch, useless for a
+   number. A filter built from only the rules that *can* speak is narrower
+   than the guarantee, and a count too high by exactly the rows the silent
+   rule would have caught is the original bug with an extra step.
+2. *A rule that asks who is calling.* This process holds no caller.
+3. *A declared tenant the command does not pin.* `Guard.filter` takes the
+   scope from the batch it is judging. A reduction has no batch, so an
+   unpinned tenant is not a narrower answer -- it is every tenant's rows
+   summarised into one number.
+
+`explain` is refused rather than rewritten for a fourth reason: an explain
+of a rewritten query describes a command the client did not send.
+
+**What it costs, said plainly.** On a **sealed** collection, `count`,
+`distinct` and every reducing pipeline now error, because case 1 is
+permanently true there -- whether a row decrypts is not a thing `$match`
+can ask. That is a real capability removed from a real workload, and it is
+the right trade only because the alternative is a number that silently
+counts shredded rows. One test in the suite was relying on it:
+`test_an_erased_document_does_not_fail_the_page_it_is_on` opened with a
+`count_documents` control, which was measuring the leak.
+
+Held up by `tests/test_a_derived_read_cannot_launder_a_forgotten_fact.py`.
+
+**Still open in the same family:** a `$lookup` *from* an unguarded
+collection *into* a guarded one is not seen at all, because the command
+names the unguarded collection and no guard is found. The allowlist covers
+the guarded side only.
+
 ---
 
 ## 4. Coverage
 
-370 tests, ~6,761 lines, against 8,220 lines of `voyd/` and 5,922 of
+415 tests, ~7,168 lines, against 8,220 lines of `voyd/` and 6,354 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -1021,7 +1101,7 @@ wants them adds surface that has to be kept honest forever.
 
 | | what it would take | what would unfreeze it |
 |---|---|---|
-| **`$out` / `$merge` handling** | small, and it is a hole | do this one anyway |
+| **`$lookup` into a guarded collection** | reading the `from` of every pipeline on every collection | somebody joins to a guarded collection and is surprised. §3 closed the guarded-side case; this is the other direction |
 | **Revocation that propagates** | a sync protocol | `perimeter.py` says who else holds a copy is auditable and never enforceable. That is true without a protocol between you and the replica — and stops being true with one |
 | **Reverse-indexed receipts** | a storage decision | *"which answers were built on this fact?"* is already a query for anything written back; what is missing is the artefact that **left** — a Slack message, a fine-tune |
 | **A second engine** | doubles the surface | a user who is not on MongoDB |

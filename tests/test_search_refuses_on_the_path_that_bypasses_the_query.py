@@ -204,10 +204,25 @@ async def test_the_server_embeds_and_refusal_still_holds(atlas):
         # rather than sleep a constant -- and poll generously, because this
         # is a shared cluster and the budget was tight enough to flake once
         # when another index was building beside it.
-        page = []
+        #
+        # Poll for the state this test *asserts*, not for a weaker one. The
+        # previous version broke out on `if page:` and then asserted that a
+        # refusal had happened, which are different conditions: `search`
+        # refuses the expired row, so it is never in `page`, and the loop
+        # therefore finished as soon as the *live* row was indexed -- with
+        # the expired one still on mongot's queue, ranked by nothing and
+        # refused by nothing. `refused_by_reason` was empty and the failure
+        # read as a regression in refusal.
+        #
+        # It is the defect LIMITS.md section 1 already records against this
+        # suite, in its other spelling: a test that waits for one thing and
+        # claims another. Polling the refusal counter ties wait to claim.
+        page: list = []
+        refused = 0
         for _ in range(60):
             page = await notes.search(None, text="engine fault code", limit=10)
-            if page:
+            refused = notes.receipts()["refused_by_reason"].get("deadline", 0)
+            if page and refused:
                 break
             await asyncio.sleep(5)
 
@@ -216,9 +231,14 @@ async def test_the_server_embeds_and_refusal_still_holds(atlas):
             "problem rather than a refusal problem, but it is reported as a "
             "failure because a silent skip here would hide a real regression "
             "in exactly the path this file exists to check")
+        assert refused, (
+            "the live row was indexed and the expired one was not, so nothing "
+            "was ever offered to be refused. Same environment caveat as "
+            "above -- but reported, because a pass here would be this file "
+            "asserting refusal on a corpus with nothing to refuse")
         assert [d["text"] for d in page] == [
             "the fault code is P0301 on cylinder one"]
-        assert notes.receipts()["refused_by_reason"].get("deadline") == 1
+        assert refused == 1
 
         stored = [d async for d in engine.db.notes.find({})]
         assert not any("embedding" in d for d in stored), (

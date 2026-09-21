@@ -31,6 +31,7 @@ of fifty and asserted a page of one, and it passed under sabotage. See
 | Revoking a source reaches the summary, the answer and the embedding built on it | `tests/test_a_refusal_travels_and_is_gated.py` |
 | A `$vectorSearch` hit is refused on the path that never passes through a query | `tests/test_search_refuses_on_the_path_that_bypasses_the_query.py` |
 | `numCandidates` is sized from the measured refusal rate, not a constant | `tests/test_the_boundary_sizes_its_own_fetch.py` |
+| A read whose reply is not the stored documents — `distinct`, `count`, a pipeline that groups or reshapes — reduces over admitted documents only, because the refusal is pushed into its query; and it is refused outright in the three cases where that push-down would be narrower than the guarantee | `tests/test_a_derived_read_cannot_launder_a_forgotten_fact.py` |
 
 ## The wire
 
@@ -69,3 +70,4 @@ of fifty and asserted a page of one, and it passed under sabotage. See
 | Every performance number in `LIMITS.md` comes from a script that checks the boundary was still refusing while it was being fast | `tests/test_the_benchmark_measures_the_boundary.py` |
 | The suite does not leak databases, because a stale search index starves the next index build | `tests/test_the_suite_does_not_leak_databases.py` |
 | Every claim on this page names a test, and every test file is named by a claim | `tests/test_every_claim_names_its_evidence.py` |
+| Every `docker compose up` a document tells you to run names a service that exists — and every service exists in a document | `tests/test_every_documented_command_is_real.py` |

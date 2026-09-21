@@ -58,7 +58,7 @@ So this repository applies it to itself, and not as a slogan:
 - **[CLAIMS.md](CLAIMS.md)** maps every guarantee to the file that would go
   red if it stopped holding. The mapping is checked in both directions by
   `tests/test_every_claim_names_its_evidence.py` — a claim with no test, or
-  a test no claim points at, fails the suite. Currently 23 claims, 23 files,
+  a test no claim points at, fails the suite. Currently 25 claims, 25 files,
   and a bijection.
 - **[LIMITS.md](LIMITS.md)** counts this project's own defects, names its
   own bad numbers, and opens with the one that matters: nobody has used this
