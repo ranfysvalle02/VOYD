@@ -26,6 +26,7 @@ from __future__ import annotations
 import pytest
 
 import voyd.engine as engine_module
+from voyd.engine import Deadline, revoked
 from examples.portfolio import AtMostPerSource, ProvenanceQuota, TieredCost
 
 CORPUS = [
@@ -130,3 +131,66 @@ def test_none_of_this_needed_a_line_added_to_the_package(rule):
     assert rule.__module__.startswith("examples."), (
         "these must stay third-party, or they stop being evidence that a "
         "stranger can write one")
+
+
+# --------------------------------------------------------------------------
+# Everything above runs through `reachable()`, which is the search path's
+# entry point and an in-memory function. That proved the rules work; it did
+# not prove they work where people read. `find()` issues a collection query
+# first, and a set-relative rule has no query half to contribute to it, so the
+# whole of its effect has to land in the per-document pass afterwards -- and
+# then the page is short, and the handle's promise is that it refills rather
+# than handing back a short page.
+#
+# None of that was exercised. A category claim resting on the one code path
+# that does not touch the database is a weaker claim than it looks.
+# --------------------------------------------------------------------------
+
+async def test_a_set_relative_rule_works_on_the_path_people_actually_read(core):
+    """`find()`, not `reachable()`.
+
+    The rule contributes nothing to the collection query -- `clause()` is
+    `None` and must be -- so every document arrives and the ceiling is applied
+    on the way out. That is step 5's whole argument, executed rather than
+    described.
+    """
+    engine, db = core
+    await db.pf.insert_many(
+        [{"text": f"d{i}", "publisher": "acme" if i < 3 else "vendor", "n": i}
+         for i in range(5)])
+    pf = engine.model("pf").admitting(Deadline(), revoked(), AtMostPerSource(cap=2))
+    await engine.ensure(search_wait_s=0)
+
+    page = await pf.find({}, sort=[("n", 1)])
+    assert [d["text"] for d in page] == ["d0", "d1", "d3", "d4"]
+    assert pf.receipts()["refused_by_reason"] == {"source_over_represented": 1}
+
+
+async def test_refill_terminates_when_a_ceiling_caps_the_page_below_the_limit(core):
+    """The failure this would have had if nobody checked: a loop.
+
+    Twenty documents, ten from each of two publishers, a cap of two. Exactly
+    four can ever be admitted no matter how many are fetched. A refill that
+    keeps going until it satisfies `limit` would spin forever on a corpus that
+    can never satisfy it, and one that gives up at the first refusal would
+    return one document and call it a page.
+
+    It does neither: it refills past the refused ones to fill a reachable
+    limit, and stops with a short page when the limit is not reachable at all.
+    """
+    engine, db = core
+    await db.pf.insert_many(
+        [{"text": f"a{i}", "publisher": "acme", "n": i} for i in range(10)]
+        + [{"text": f"v{i}", "publisher": "vendor", "n": 10 + i} for i in range(10)])
+    pf = engine.model("pf").admitting(Deadline(), revoked(), AtMostPerSource(cap=2))
+    await engine.ensure(search_wait_s=0)
+
+    # Reachable limit: it must look past eight refused `acme` rows to find v0.
+    assert [d["text"] for d in await pf.find({}, sort=[("n", 1)], limit=3)] == [
+        "a0", "a1", "v0"], "refill has to cross a run of refusals"
+
+    # Unreachable limit: a short page is the honest answer, and it terminates.
+    page = await pf.find({}, sort=[("n", 1)], limit=8)
+    assert len(page) == 4, (
+        "only four documents can satisfy a cap of two across two publishers; "
+        "asking for eight must end, not spin")

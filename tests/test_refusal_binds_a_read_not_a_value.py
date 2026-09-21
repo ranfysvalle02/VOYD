@@ -121,3 +121,71 @@ async def test_the_documented_workaround_actually_works(core):
     turn_41 = await notes.find({"_id": {"$in": [d["_id"] for d in carried]}})
     assert [d["text"] for d in turn_41] == ["P0301"], (
         "re-reading the carried ids through the handle drops the revoked one")
+
+
+async def test_which_answers_were_built_on_this_fact_is_already_one_query(core):
+    """The consequence question, which `STATE.md` calls the most valuable
+    feature on its list -- and it is an indexed find, today.
+
+    `derive()` closes lineage transitively at write time, so a grandchild
+    already names the grandparent. That was built so a revocation could reach
+    a whole subtree in one update. The same field, read instead of written,
+    answers the question from the other end: *which answers were built on this
+    fact?*
+
+    This narrows a gap the roadmap states more broadly than it is. The reverse
+    index is still missing for an artefact that **left** -- a Slack message, a
+    fine-tune, an answer you served and kept only a receipt for. For anything
+    written back into the collection, which is what a RAG cache is, the
+    archaeology project is a query and has been all along.
+    """
+    engine, db = core
+    notes = engine.model("notes").admitting(
+        Deadline(), revoked(), lineage_field="lineage")
+    await engine.ensure(search_wait_s=0)
+
+    source = (await db.notes.insert_one({"text": LEAK})).inserted_id
+    unrelated = (await db.notes.insert_one({"text": "P0301"})).inserted_id
+
+    summary, = await notes.derive({"kind": "summary"}, parents=[source])
+    answer, = await notes.derive({"kind": "answer"}, parents=[summary])
+    embedding, = await notes.derive({"kind": "embedding"}, parents=[answer])
+    innocent, = await notes.derive({"kind": "answer"}, parents=[unrelated])
+
+    fallout = [d async for d in db.notes.find({"lineage": source})]
+    ids = {d["_id"] for d in fallout}
+
+    assert ids == {summary, answer, embedding}, (
+        "every consequence of the fact, at any depth, from one query")
+    assert innocent not in ids, (
+        "and nothing built from something else -- a rule that returned the "
+        "collection would answer this question uselessly")
+
+    # The three artefacts named in the pitch, and the third is the one people
+    # forget: a vector is a lossy copy of the text that made it.
+    assert sorted(d["kind"] for d in fallout) == ["answer", "embedding", "summary"]
+
+
+async def test_the_consequences_go_unreachable_together(core):
+    """And the other direction closes the loop.
+
+    Asking *which answers were built on this* is only half a product. The half
+    that matters is that honouring the erasure reaches all of them without the
+    person honouring it having to read that list first.
+    """
+    engine, db = core
+    notes = engine.model("notes").admitting(
+        Deadline(), revoked(), lineage_field="lineage")
+    await engine.ensure(search_wait_s=0)
+
+    source = (await db.notes.insert_one({"text": LEAK})).inserted_id
+    summary, = await notes.derive({"kind": "summary"}, parents=[source])
+    answer, = await notes.derive({"kind": "answer"}, parents=[summary])
+    embedding, = await notes.derive({"kind": "embedding"}, parents=[answer])
+
+    marked = await notes.revoke({"_id": source}, reason="credential leaked")
+    assert marked == 4, "the fact and the three things made out of it"
+    assert await notes.find({}) == [], "none of them reachable on the next read"
+
+    # Unreachable first, erased second: the rows are all still there.
+    assert await db.notes.count_documents({}) == 4

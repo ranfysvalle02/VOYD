@@ -179,15 +179,25 @@ natural to run right after a shred, so a deployment could be told "your mirror
 claims to hold ciphertext and caches plaintext" at the moment the claim
 matters rather than never.
 
-**Context receipts, reverse-indexed.** Receipts recompute without a secret and
-compose with `as_of`, so *"was this context legitimate when it was built?"* is
-two calls. The question people actually have is *"which answers were built on
-this fact?"*, and today you can only check a receipt you already hold. Storing
-receipts keyed by admitted id turns an archaeology project into a query, and
-it is the only thing that helps with a consequence — the Slack message, the
-fine-tune — at all. The cost is a retention decision worth making
-deliberately: a receipt names ids and not text, but it is a record of who saw
-what, and that has its own sensitivity and its own deadline.
+**Context receipts, reverse-indexed — and the half of it that already works.**
+Receipts recompute without a secret and compose with `as_of`, so *"was this
+context legitimate when it was built?"* is two calls.
+
+The question people actually have is *"which answers were built on this
+fact?"*, and this entry used to say you could only check a receipt you already
+hold. That is too broad. `derive()` closes lineage transitively at write time,
+so `find({"lineage": source_id})` returns every summary, answer and embedding
+built on a fact, at any depth, in one indexed query — today, for anything
+written back into the collection, which is what a RAG cache *is*. Pinned in
+`tests/test_refusal_binds_a_read_not_a_value.py`.
+
+What is genuinely missing is narrower: the artefact that **left**. A Slack
+message, a fine-tune, an answer served and not written back. For those, all
+you have is a receipt you already hold, and storing receipts keyed by admitted
+id is what turns that archaeology project into a query. The cost is a
+retention decision worth making deliberately: a receipt names ids and not
+text, but it is a record of who saw what, and that has its own sensitivity and
+its own deadline.
 
 ### Sharp and cheap
 
