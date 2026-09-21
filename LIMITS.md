@@ -20,13 +20,14 @@ somebody who also wrote the claim.
 That is not a coverage problem and no amount of code fixes it. The suite is
 good at holding claims somebody thought to state; it has never once been the
 thing that caught a problem a *user* hit, because there have been no users.
-Nine defects this month, and the way they were found is the point. Seven
+Ten defects this month, and the way they were found is the point. Seven
 came from running something new: three from exercising paths nobody had
 exercised, four more from the hostile pass in §4. One came from the
-benchmark contradicting a commit message that had already been pushed. One
-came from *writing a test* — the scanner's two-mark finding, in §4 — which
-is the first time this month the act of testing found something rather than
-recording something already known.
+benchmark contradicting a commit message that had already been pushed. Two
+came from *writing a test*: the scanner's two-mark finding in §4, and the
+read-preference claim in §3 — where the defect was in the prose, and three
+files had spent weeks talking a reader out of something the proxy could
+already do.
 
 Not one was found by the suite going red. That is the honest description of
 where an outside perspective would land: the suite is a ratchet, not a
