@@ -1,0 +1,99 @@
+name: test
+
+# Small on purpose. The suite is the foundation the rewrite stands on, not a
+# census: three of its four files need no database at all, because the
+# per-document check and the wire codec are pure. The fourth drives a real
+# `mongod` through a real proxy with a real driver, because the claim is
+# about bytes on a wire and a mock would only prove the mock was filtered.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Atlas Local (mongod + mongot)
+        run: docker compose up -d --wait mongo
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      - name: Sync
+        run: uv sync --all-extras
+
+      - name: Lint
+        run: uv run --no-sync ruff check voyd/ tools/ tests/ examples/ scanner/
+
+      - name: Types, because the wheel ships py.typed
+        # `voyd/py.typed` tells every downstream checker that these
+        # annotations are load-bearing. That is a promise made in the
+        # artifact, so it is checked here rather than trusted.
+        run: uv run --no-sync mypy
+
+      - name: The core needs no database
+        # If this step ever needs `services:`, the boundary has stopped being
+        # pure -- and a per-document check that cannot run without a database
+        # is one that cannot move to a wire, a browser, or anywhere else.
+        run: |
+          uv run --no-sync pytest -q \
+            tests/test_the_codec_round_trips.py \
+            tests/test_the_boundary_refuses.py \
+            tests/test_the_policy_file_is_the_configuration.py
+
+      - name: Importing voyd is the policy vocabulary and one driver
+        run: |
+          uv run --no-sync python -c "
+          import sys, voyd
+          assert 'Engine' in voyd.__all__ and 'guard' in voyd.__all__
+          third = {m.split('.')[0] for m in sys.modules
+                   if not m.startswith(('_', 'voyd'))} - sys.stdlib_module_names
+          unexpected = third - {'pymongo', 'bson', 'gridfs', 'dns',
+                                'pymongocrypt', 'cryptography'}
+          assert not unexpected, f'importing voyd pulled {sorted(unexpected)}'
+          print('clean:', sorted(voyd.__all__))"
+
+      - name: The wheel builds and the cut surfaces stayed cut
+        run: |
+          uv build
+          uv venv /tmp/wheelcheck
+          VIRTUAL_ENV=/tmp/wheelcheck uv pip install dist/*.whl
+          /tmp/wheelcheck/bin/python -c "
+          import voyd
+          from voyd import Engine, guard, deadline, revocable
+          for gone in ('voyd.app', 'voyd.web', 'voyd.mcp', 'voyd.store',
+                       'voyd.engine.ledger', 'voyd.engine.perimeter'):
+              try:
+                  __import__(gone)
+              except ImportError:
+                  continue
+              raise AssertionError(f'{gone} is back in the wheel')
+          print('wheel: the policy vocabulary imports, the cut stayed cut')"
+
+      - name: End to end, real driver through a real boundary
+        env:
+          VOYD_TEST_MONGO_URI: mongodb://localhost:27018/?directConnection=true
+        run: uv run --no-sync pytest -q tests/
+
+      - name: The examples are the documentation, so they have to run
+        env:
+          VOYD_MONGO_URI: mongodb://localhost:27018/?directConnection=true
+        run: |
+          for f in examples/*.py; do
+            echo "--- $f"
+            uv run --no-sync python "$f" > /dev/null || exit 1
+          done
+
+      - name: Mongo logs on failure
+        if: failure()
+        run: docker compose logs mongo | tail -100

@@ -14,15 +14,20 @@ COPY pyproject.toml uv.lock* README.md ./
 # the wheel it then installs.
 COPY voyd/ voyd/
 
-# The container boots the HTTP service (`python -m voyd`), which needs the
-# `app` extra; `all` adds embeddings and the MCP server. `Engine` alone would
-# be pymongo and nothing else -- that is the library install, not this one.
+# The boundary needs the engine and a MongoDB driver. `all` adds embeddings
+# and cryptographic erasure, which are library-only today -- see the README --
+# and are here so a container can also be used as the in-process runtime.
 RUN uv sync --extra all --frozen --no-dev || uv sync --extra all --no-dev
 
-# Examples, tests and the exhibit. Last, because they change most often and
-# nothing above depends on them.
+# The policy file, the proxy and the examples. Last, because they change most
+# often and nothing above depends on them.
 COPY . .
 
-EXPOSE 8000
+# The wire boundary, not an HTTP service: this container is a front door for
+# a database, and what comes out of it is the MongoDB protocol. Mount your own
+# `voydfile.py` over the example one and point `--target` at your cluster.
+EXPOSE 27099
 
-CMD ["uv", "run", "python", "-m", "voyd"]
+CMD ["uv", "run", "python", "tools/voyd_wire.py", \
+     "--config", "voydfile.py", "--listen", "27099", \
+     "--target", "host.docker.internal:27017"]

@@ -561,8 +561,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         serve(args.listen, args.target, guards, not args.quiet)
     except KeyboardInterrupt:
-        total = sum(g.refused for g in guards.values())
-        print(f"\nvoyd-wire: refused {total} document(s) this run")
+        refused = sum(g.refused for g in guards.values())
+        revoked = sum(g.revoked for g in guards.values())
+        served = sum(g.admitted for g in guards.values())
+        print(f"\nvoyd-wire: {served} document(s) served, {refused} refused, "
+              f"{revoked} delete(s) turned into revocations.")
+        print("voyd-wire: documents deleted by this process: 0")
     return 0
 
 

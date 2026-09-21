@@ -145,6 +145,13 @@ ignore_missing_imports = true
 module = ["voyageai.*", "numpy.*"]
 follow_imports = "skip"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `scanner` is a second distribution with no dependencies and no import of
+# `voyd`; putting it on the path is what lets a test reach it without the
+# two packages depending on each other.
+pythonpath = [".", "scanner", "tools"]
+
 [dependency-groups]
 dev = [
     "pytest-xdist>=3.6",

@@ -147,15 +147,28 @@ vector and a client-side embedder cannot drift from it).
 
 **Mid-rewrite, and honest about it.** This repository was just cut hard: the
 HTTP service, the MCP server, the store layer, the job queue, the perimeter,
-the hash-chain ledger and the context index are gone, along with the tests and
-documentation that described them. What is left is the boundary, the policy
-file, and the wire.
+the hash-chain ledger and the context index are gone, along with ~817 tests
+and ~35,000 words of documentation that described them. What is left is the
+boundary, the policy file, and the wire.
 
-So: **there are no tests right now.** The previous suite ran 817 checks
-against a real MongoDB with no mock tier, and it is in `git log` — it was used
-to verify this cut before it was deleted, which is the only reason the cut can
-be called clean. A new suite belongs to the new shape and has not been
-written.
+The suite is now **27 tests in under two seconds**, and it is the foundation
+rather than a census — the smallest set of claims that, if any one broke,
+would make everything above it a lie:
+
+| | |
+|---|---|
+| the wire codec round-trips | including the document sequence that carries a write, which is where the one silent bug lived |
+| the boundary refuses | expired, revoked, unreadable-deadline, off-tenant — **with no database anywhere near it** |
+| a policy file compiles, or fails at *load* | five ways to be wrong, each refused by name |
+| a plain driver gets all of it | against a real `mongod`, through a real proxy |
+
+Three of the four files need no MongoDB, and that is not a convenience. A
+per-document check that cannot run without a database is one that cannot move
+to a wire — so if that ever stops being true, the architecture has quietly
+changed.
+
+The suite is checked against sabotage rather than trusted: disabling the
+delete rewrite, the tenant egress check, or refusal itself each turn it red.
 
 Known gaps, stated rather than discovered:
 
