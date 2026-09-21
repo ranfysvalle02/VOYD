@@ -1,8 +1,8 @@
 """Imposing a reason, and taking one back where the reason allows it.
 
 One engine, two verbs. ``impose`` applies a mark, ``lift`` removes one, and
-every named front door -- ``revoke``, ``witness``, ``quarantine``,
-``release`` -- is one of those two with a reason already filled in. Whether a
+every named verb -- ``revoke``, ``quarantine``, ``release`` -- is one of
+those two with a reason already filled in. Whether a
 write erases the bytes, whether it stamps a deadline, and whether it has an
 inverse at all are read off the *rule*, never passed in by the caller.
 
@@ -14,14 +14,14 @@ hypothesis and must be.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, TYPE_CHECKING
 
 from ..authority import QUARANTINE, RELEASE, REVOKE
 from ..errors import (BlastRadius, Irreversible, UnboundedForgetting,
                       UnknownReason)
 from ..time import now
-from .reasons import LIFTED, LIFT_BATCH, QUARANTINED, REVOKED
+from .reasons import LIFT_BATCH, QUARANTINED, REVOKED
 
 log = logging.getLogger("engine.admission")
 
@@ -44,9 +44,9 @@ else:
 class MarkWrites(_Composed):
     """Imposing a reason, and lifting one where the reason has an inverse.
 
-    ``impose`` and ``lift`` are the engine; ``revoke``, ``witness``,
-    ``quarantine`` and ``release`` are named front doors onto them. No
-    front door has a privilege the general form lacks.
+    ``impose`` and ``lift`` are the engine; ``revoke``, ``quarantine``
+    and ``release`` are named verbs onto them. No named verb has a
+    privilege the general form lacks.
     """
 
     # ---- forgetting, and the one reason that can be taken back ---------
@@ -207,18 +207,17 @@ class MarkWrites(_Composed):
         hour would keep it on disk for a week, and retention that *grows*
         because somebody asked for erasure is the opposite of the request.
         When the row goes sooner than you wanted the proof to last, the
-        proof was in the wrong place: the ledger has no TTL index, on
-        purpose, and that is the tombstone that outlives everything.
+        proof was in the wrong place: an audit record that has to outlive
+        the fact does not belong beside it, under its deadline.
 
         Note also what ``erase_after`` is not: the window in which a
         revocation could be reversed. Reversal is out of contract in it, and
         a reader who assumed otherwise would be building on the sweeper's
         schedule.
         """
-        n, _ = await self.impose(REVOKED, filters, reason=reason,
+        return await self.impose(REVOKED, filters, reason=reason,
                                  erase_after=erase_after, expect=expect,
                                  everything=everything)
-        return n
 
     async def revoke_subject(self, filters: dict | None = None, *,
                              key, reason: str,
@@ -283,10 +282,6 @@ class MarkWrites(_Composed):
         if n:
             log.info("revoked subject %r in %d %s document(s) (%s)",
                      key, n, self.collection, reason)
-        await self._witness(
-            filters or {}, event=REVOKED, reason=reason, count=n, at=stamp,
-            detail={"subject": {"path": self.spec.subjects,
-                                "key": str(key)}})
         return n
 
     def _subject_field(self, verb: str) -> str:
@@ -308,26 +303,6 @@ class MarkWrites(_Composed):
                  "one they can be refused but never addressed",))
         return self.spec.subject_key
 
-    async def witness(self, filters: dict | None = None, *, reason: str,
-                      erase_after: timedelta | None = None,
-                      expect: int | None = None,
-                      everything: bool = False) -> dict:
-        """``revoke()``, returning the chain entry instead of the count.
-
-        The entry is the receipt, and handing it to whoever asked for the
-        erasure is the point: their copy of the hash was taken before any
-        dispute existed, so a chain that later does not contain it is
-        falsified by a record this database's operator never held. Without
-        that, a hash chain is only evidence against people who cannot edit
-        it.
-        """
-        n, receipt = await self.impose(REVOKED, filters, reason=reason,
-                                       erase_after=erase_after, expect=expect,
-                                       everything=everything)
-        out = dict(receipt or {})
-        out.setdefault("count", n)
-        return out
-
     async def quarantine(self, filters: dict | None = None, *,
                          reason: str = "quarantined",
                          expect: int | None = None,
@@ -344,9 +319,8 @@ class MarkWrites(_Composed):
         evidence; a hold that schedules its own subject for deletion is an
         investigation with a countdown on it. Lift it with ``release()``.
         """
-        n, _ = await self.impose(QUARANTINED, filters, reason=reason,
+        return await self.impose(QUARANTINED, filters, reason=reason,
                                  expect=expect, everything=everything)
-        return n
 
     async def release(self, filters: dict | None = None, *,
                       reason: str, expect: int | None = None,
@@ -359,9 +333,8 @@ class MarkWrites(_Composed):
         indistinguishable on the chain from a mistake -- which is precisely
         what an auditor reading this entry is trying to tell apart.
         """
-        n, _ = await self.lift(QUARANTINED, filters, reason=reason,
+        return await self.lift(QUARANTINED, filters, reason=reason,
                                expect=expect, everything=everything)
-        return n
 
     # ---- the general forms ---------------------------------------------
 
@@ -398,7 +371,7 @@ class MarkWrites(_Composed):
                      reason: str | None = None,
                      erase_after: timedelta | None = None,
                      expect: int | None = None,
-                     everything: bool = False) -> tuple[int, dict | None]:
+                     everything: bool = False) -> int:
         """Apply one reason's mark to matching documents.
 
         Returns ``(count, receipt)`` -- both of the things callers want from
@@ -491,24 +464,11 @@ class MarkWrites(_Composed):
         # `lift` resolves its own ids; `impose` only resolves them when
         # something downstream needs them, so the extra round trip is paid
         # by the deployments that use it and by nobody else.
-        if self.perimeter is not None and not rule.reversible:
-            # Told after the rows are marked, never before: the fact is
-            # already unreachable here, and an erasure must not wait on --
-            # or be failed by -- a cache. See ``perimeter.py``.
-            acks = await self.perimeter.forget(ids, reason=why)
-            detail["perimeter"] = [a.as_dict() for a in acks]
-            if self.perimeter_log is not None:
-                # Only the ones that did not answer. An acknowledged sink
-                # is already recorded on the chain and needs no queue row.
-                await self.perimeter_log.record(acks, ids=ids, reason=why)
-        receipt = await self._witness(
-            filters or {}, event=rule.reason, reason=why, count=n, at=stamp,
-            detail=detail or None)
-        return n, receipt
+        return n
 
     async def lift(self, off: str, filters: dict | None = None, *,
                    reason: str, expect: int | None = None,
-                   everything: bool = False) -> tuple[int, dict | None]:
+                   everything: bool = False) -> int:
         """Remove one reason's mark, if that reason has an inverse.
 
         Raises ``Irreversible`` when it does not, and the check is on the
@@ -557,7 +517,6 @@ class MarkWrites(_Composed):
         await self._guard("release", filters, query, expect=expect,
                           everything=everything)
 
-        stamp = now()
         audit = self._unfiltered()
         # Released with the thing they were held with. A review that clears
         # a document and leaves its summaries withheld has not finished.
@@ -580,16 +539,7 @@ class MarkWrites(_Composed):
         if n:
             log.info("lifted %s from %d fact(s) in %s (%s)",
                      rule.reason, n, self.collection, reason)
-        # The chain has to record this or it is a record of one direction of
-        # a two-direction transition -- intact, verifiable, and wrong about
-        # whether the fact is reachable. See ledger.py.
-        detail: dict = {"lifted": rule.reason}
-        if inherited:
-            detail |= {"direct": len(ids), "inherited": inherited}
-        receipt = await self._witness(filters or {}, event=LIFTED,
-                                      reason=reason, count=n, at=stamp,
-                                      detail=detail)
-        return n, receipt
+        return n
 
     def _caller_aware_fields(self) -> tuple:
         """The document fields the unbypassable rules compare against.
@@ -606,38 +556,6 @@ class MarkWrites(_Composed):
         result = await self.db[self.collection].update_many(
             {"_id": {"$in": ids}}, {"$unset": {field_name: ""}})
         return result.modified_count
-
-    async def _witness(self, filters: dict, *, event: str, reason: str,
-                       count: int, at: datetime,
-                       detail: dict | None = None) -> dict | None:
-        """Append to the chain, and never fail the write over it.
-
-        Order matters and this is the unintuitive half: the rows are already
-        unreachable before this runs. If appending fails, the *safe* outcome
-        is the one that already happened -- the fact is refused -- and the
-        loud thing to do is log it, not raise and let a caller conclude the
-        revocation did not take and retry it. An unrecorded refusal is an
-        audit gap; an un-refused fact is a breach. They are not the same
-        size, so they do not get the same handling.
-
-        The subject is the filter, canonicalised -- ids and a reason, never
-        document text. An audit record that quotes the secret it was asked to
-        forget is a fresh copy of it, exempt from every deadline here.
-        """
-        if self.ledger is None:
-            return None
-        try:
-            return await self.ledger.append(
-                event, tenant=self.tenant and filters.get(self.tenant),
-                reason=reason, subject=filters, count=count, at=at,
-                detail=detail, actor=self._actor())
-        except Exception:  # noqa: BLE001 - see docstring: the write already
-            # happened, and this must not undo it.
-            log.exception(
-                "%s %d fact(s) in %s but could not record it on the chain -- "
-                "the write DID happen; the audit trail has a gap at %s",
-                event, count, self.collection, at.isoformat())
-            return None
 
     async def pin(self, filters: dict) -> int:
         """Remove a deadline. Pinning is the absence of one, not a flag."""

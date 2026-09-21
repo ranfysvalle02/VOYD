@@ -10,7 +10,7 @@ Two modes, and the difference matters:
   document with no deadline field, or a null one, is kept **forever**. That is
   the property that lets one collection hold both expiring and permanent
   records -- scratch notes next to a user's name, a session next to a
-  ledger. Pinning is the absence of a deadline, not a second collection.
+  collection. Pinning is the absence of a deadline, not a second field.
 - **fixed age** (``after``): everything expires a fixed duration after its
   timestamp. The right shape for logs and metrics.
 

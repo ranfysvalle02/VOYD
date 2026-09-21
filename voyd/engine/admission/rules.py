@@ -319,13 +319,11 @@ class Marked:
     def refuses(self, doc: dict, *, when: datetime | None = None) -> bool:
         """Present means no -- *as of* ``when``, not unconditionally.
 
-        The mark has always carried an ``at``, and this always ignored it,
-        which was invisible until ``as_of()`` existed and then wrong in
-        the one direction that matters: a document revoked at 14:05 would
-        have reported as unreachable at 14:02, so a system reconstructing
-        what a model was allowed to see would place the erasure *before*
-        the answer that quoted the fact. That is an exoneration built out
-        of a bug.
+        The mark carries an ``at``, and ignoring it is wrong in the one
+        direction that matters: a document revoked at 14:05 would report
+        as unreachable at 14:02, so anything reconstructing what a model
+        was allowed to see would place the erasure *before* the answer
+        that quoted the fact. That is an exoneration built out of a bug.
 
         Read defensively, because a mark is operator-written and this runs
         inside a filter: a mark with no readable ``at`` refuses at every

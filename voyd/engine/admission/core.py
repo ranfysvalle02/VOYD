@@ -12,10 +12,9 @@ queries it needs, but it gets its documents past the boundary by calling
 the invariant in the package docstring: a rule that can express itself in a
 query but not per document is not a slower rule, it is a silent hole.
 
-Also here: the attachments (``authorised_by``, ``bounded_by``,
-``witnessed_by``, ``sealed_by`` in sealing.py), which are claims about a
-deployment typed out where somebody can read them, and ``_clone``, which is
-load-bearing for concurrency rather than stylistic.
+Also here: ``authorised_by`` (and ``sealed_by`` in sealing.py), which are
+claims about a deployment typed out where somebody can read them, and
+``_clone``, which is load-bearing for concurrency rather than stylistic.
 """
 
 from __future__ import annotations
@@ -27,7 +26,6 @@ from typing import Any, Iterable, Self
 from ..errors import (CallerRequired, ScopeInvalid, ScopeRequired,
                       require_tenant)
 from ..authority import AUDIT, AuthorityRequired, NotAuthorised
-from ..time import aware
 from .reasons import OFF_SCOPE, UNNAMED
 from .receipts import Receipts
 from .rules import Rule, Tabs
@@ -79,19 +77,14 @@ class AdmissionCore:
         # read. Internal ``_unfiltered()`` clones set ``_include`` without this
         # bit because their enclosing verb already has its own authority.
         self._break_glass = False
-        self.ledger = None
         # Which consequences were made out of these facts. ``None`` means
         # nothing is recording them, and ``record_use`` says so rather than
         # succeeding quietly -- see context.py.
-        self.context = None
-        self.perimeter = None
-        self.perimeter_log = None
         # Who may *do* things here. ``None`` means this handle is not
         # serving anybody but its own application; see ``authorised_by``.
         self.authority = None
         # The instant reads are answered at. ``None`` is now, which is the
         # ordinary case and costs a single comparison.
-        self._as_of: datetime | None = None
         self._caller: dict | None = None
         # The tenant *value* this handle is bound to, as opposed to
         # ``self.tenant``, which is the field name. ``_UNSET`` rather than
@@ -155,66 +148,6 @@ class AdmissionCore:
             return None
         naming = getattr(self.authority, "actor", None)
         return naming(self._caller) if naming else None
-
-    def bounded_by(self, perimeter, *, log_to=None) -> Self:
-        """Register who else holds copies. Returns ``self``.
-
-        Attached rather than built in, for the same reason the ledger is:
-        it is a claim about a deployment's architecture, and a claim about
-        architecture should be typed out where somebody can read it.
-
-        Nothing here can fail a revocation -- see ``perimeter.py``. The
-        acknowledgements ride along on the receipt, so "who was told, and
-        who did not answer" is part of the audit trail rather than a log
-        line somebody greps for afterwards.
-
-        ``log_to`` is a ``PerimeterLog``, and it is optional because it is
-        a retention decision: keeping a queue of unconfirmed erasures is
-        obviously right for some deployments and obviously unwanted for
-        others, and this package does not get to pick. Without it, a sink
-        that was down is recorded on the chain and never retried.
-        """
-        self.perimeter = perimeter
-        self.perimeter_log = log_to
-        return self
-
-    def witnessed_by(self, ledger) -> Self:
-        """Record every revocation on a hash chain. Returns ``self``.
-
-        Counters answer "how much has this process refused"; a chain answers
-        "show me that this fact stopped being reachable at 14:02, and that
-        the record has not been edited since". Only the second one survives
-        contact with an auditor, and only revocations go on it -- see
-        ``ledger.py`` for why ledgering reads is the wrong trade.
-
-        Attached rather than built in, because a chain that never expires is
-        a retention decision and retention decisions should be typed out.
-        """
-        self.ledger = ledger
-        return self
-
-    def contextualized_by(self, index) -> Self:
-        """Record which consequences were made out of these facts. Returns ``self``.
-
-        Attached rather than built in, for the third time in this class and
-        the same reason each time: it is a retention decision. A use index
-        outlives the documents it points at -- that is what makes it useful
-        after an erasure and what makes keeping it a choice somebody has to
-        type out.
-
-        What it buys is the question ``lineage`` cannot answer. Lineage
-        carries a refusal to the rows made out of a fact *here*. This names
-        what was made out of it **out there** -- the summary that was sent,
-        the ticket that was filed -- so an erasure request produces a
-        worklist instead of ending at the collection boundary.
-
-        It does not extend the guarantee, and saying so is the point:
-        ``affected_by()`` returns things this package cannot unsend. An
-        index that implied otherwise would be the most dangerous object in
-        the repository.
-        """
-        self.context = index
-        return self
 
     # ---- schema --------------------------------------------------------
 
@@ -353,44 +286,13 @@ class AdmissionCore:
         # handle saw it, and a per-request clone with its own counters would
         # report nothing on /healthz.
         clone.receipts_log = self.receipts_log
-        clone.ledger = self.ledger
-        clone.context = self.context
-        clone.perimeter = self.perimeter
-        clone.perimeter_log = self.perimeter_log
         clone.authority = self.authority
-        clone._as_of = self._as_of
         clone._include = self._include
         clone._break_glass = self._break_glass
         clone._caller = self._caller
         clone._bound = self._bound
         clone._scope = self._scope
         clone.sealing = self.sealing
-        return clone
-
-    # ---- what was reachable then ---------------------------------------
-
-    def as_of(self, when: datetime) -> Self:
-        """A handle that answers as the scope stood at ``when``.
-
-        *"What did the model see when it said that?"* is the question after
-        every AI incident, and until now the only honest answer was a log
-        line held by the party being asked.
-
-        Every rule already takes ``when``; what was missing was a handle
-        that threads one instant through a whole read, and a ``Marked``
-        that actually compared the mark's ``at`` instead of treating any
-        mark as eternal.
-
-        **Read this as a lower bound, not a reconstruction.** It answers
-        from the rows that are still here. A row the reaper has taken is
-        gone, and its absence is indistinguishable from never having
-        existed -- so ``as_of`` under-reports, always in the direction of
-        saying less was reachable. ``reachability_at()`` is the version
-        that will say ``unknown`` rather than let that silence read as a
-        denial.
-        """
-        clone = self._clone()
-        clone._as_of = aware(when)
         return clone
 
     # ---- the escape hatch, deliberately named --------------------------
@@ -531,27 +433,19 @@ class AdmissionCore:
         return q
 
     def _clause_of(self, rule) -> dict | None:
-        """A rule's query fragment, at the instant this handle answers for.
+        """A rule's query fragment, or ``None`` if it has no query half.
 
-        The two halves have to agree, and under ``as_of()`` the naive
-        version does not: the per-document check compares the mark's
-        ``at`` against the instant while the *query* drops every marked
-        row unconditionally, server-side, before anything is examined. So
-        ``as_of`` would return an empty page and look like a scope where
-        nothing was ever reachable -- a confident, wrong, and flattering
-        answer.
-
-        A rule that cannot express itself at an instant contributes no
-        clause under ``as_of`` rather than a wrong one. Losing the
-        optimisation is free; disagreeing with the guarantee is not.
+        A caller-aware rule builds its clause from the claims bound to
+        this handle; a rule with no ``clause()`` at all contributes
+        nothing and is enforced per document only. Losing a push-down is
+        free; disagreeing with the per-document check is not, which is
+        why a rule that cannot express itself exactly contributes no
+        clause rather than an approximate one.
         """
         if getattr(rule, "needs_caller", False):
             for_caller = getattr(rule, "clause_for", None)
             return for_caller(self._caller) if for_caller else None
-        if self._as_of is None:
-            return rule.clause()
-        at_instant = getattr(rule, "clause_at", None)
-        return at_instant(self._as_of) if at_instant else None
+        return rule.clause()
 
     def _open_tab(self) -> Tabs | None:
         """A fresh budget for one read, or ``None`` if no cumulative rule.
@@ -605,7 +499,7 @@ class AdmissionCore:
                 tally[OFF_SCOPE] = tally.get(OFF_SCOPE, 0) + 1
             log.debug("refused an off-scope document from %s", self.collection)
             return None
-        reason = why_refused(doc, self.spec, when=when or self._as_of,
+        reason = why_refused(doc, self.spec, when=when,
                              caller=self._caller, tab=tab,
                              only_unbypassable=self._include)
         if reason is None:
@@ -674,7 +568,7 @@ class AdmissionCore:
                 kept.append(element)
                 continue
             reason = self._unnamed(element) or why_refused(
-                element, self.spec, when=when or self._as_of,
+                element, self.spec, when=when,
                 caller=self._caller, tab=None,
                 only_unbypassable=self._include)
             if reason is None:

@@ -187,19 +187,13 @@ class Irreversible(ValueError):
     document with a new id and a new consent record, not the resurrection of
     a row that still carries the mark saying it was erased.
 
-    Two harder reasons, either of which would be sufficient on its own:
-
-    - **An undo would be a lie about its own availability.** Imposing an
-      irreversible reason also stamps the erase deadline, so the reaper takes
-      the row on its next sweep. A lift would therefore work, and work, and
-      then silently stop working, according to ``ttlMonitorSleepSecs`` -- an
-      API whose window is a storage event, in the one codebase written to
-      argue that retrieval guarantees must not depend on sweepers.
-    - **It would make the chain intact and false.** The ledger would attest
-      that a fact stopped being reachable at 14:02, the fact would be
-      reachable, and ``verify()`` would still pass. A tamper-evident record
-      of one direction of a two-direction transition is not evidence; it is
-      a document that is wrong in a way its own checksum cannot see.
+    The harder reason: **an undo would be a lie about its own
+    availability.** Imposing an irreversible reason also stamps the erase
+    deadline, so the reaper takes the row on its next sweep. A lift would
+    therefore work, and work, and then silently stop working, according to
+    ``ttlMonitorSleepSecs`` -- an API whose window is a storage event, in
+    the one codebase written to argue that retrieval guarantees must not
+    depend on sweepers.
     """
 
     def __init__(self, collection: str, reason: str, reversible: tuple):

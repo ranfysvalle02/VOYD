@@ -89,7 +89,7 @@ class ReadPath(_Composed):
         # page so a use recorded from this find commits to one instant. It is
         # a ``Page`` (a ``list`` subclass) for that reason -- callers that
         # treat it as a list are unaffected.
-        evaluated_at = self._as_of or now()
+        evaluated_at = now()
         tab = self._open_tab()
         if tab is not None and sort is None:
             raise ValueError(

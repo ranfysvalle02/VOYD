@@ -40,12 +40,11 @@ authority from a script would be theatre. But once one is attached, an
 ``CallerRequired``, where returning everything is the breach and returning
 nothing is a silent no-op on a write.
 
-**And the record learns who.** The chain could say what was revoked, when,
-and why, and could not say by whom -- so "somebody released the document
-the detector flagged" was the strongest sentence available to an auditor.
-``actor()`` is what an authority contributes to the ledger, and it is a
-separate method from ``permits()`` on purpose: identity is worth recording
-even where every caller is permitted everything.
+**And the record learns who.** ``actor()`` names the caller behind a
+write, and it is a separate method from ``permits()`` on purpose:
+identity is worth recording even where every caller is permitted
+everything, because "somebody released the document the detector
+flagged" is the weakest sentence an auditor can be given.
 """
 
 from __future__ import annotations

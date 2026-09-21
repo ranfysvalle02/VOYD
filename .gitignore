@@ -237,3 +237,7 @@ __marimo__/
 # Written by `voyd-bench` when no --policy is given, so it appears
 # after any suite run that exercises the benchmark. Generated, never edited.
 .voyd_bench_policy.py
+
+# Dropped in the working directory by mongocryptd when the crypto extra
+# is installed and a test or example seals a field.
+mongocryptd.pid

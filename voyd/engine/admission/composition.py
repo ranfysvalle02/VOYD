@@ -55,16 +55,11 @@ class CoreState(Protocol):
     collection: str
     tenant: Any
     receipts_log: Receipts
-    ledger: Any
-    context: Any
-    perimeter: Any
-    perimeter_log: Any
     sealing: Any
     authority: Any
     _include: bool
     _break_glass: bool
     _bound: bool
-    _as_of: datetime | None
     _caller: dict | None
 
     # ---- authority -----------------------------------------------------

@@ -203,13 +203,7 @@ class Lineage(_Composed):
         the sentence an auditor needs, and a single total cannot say it.
         """
         field = self.spec.lineage_field
-        # The ids are needed by two callers for two reasons, and the first
-        # version resolved them only for the second -- so on the default
-        # collection, which tracks no lineage, the perimeter was handed an
-        # empty list and every sink was told that *something* had been
-        # erased without being told what. A propagation that names nothing
-        # is worse than none: it produces acknowledgements.
-        if not (field or self.perimeter):
+        if not field:
             return [], 0
         ids = [d["_id"] async for d in
                self.db[self.collection].find(query, {"_id": 1})]
