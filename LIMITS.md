@@ -1183,6 +1183,29 @@ is about. Both now share one `Backchannel` and one `CallerIdentity`, and
 `test_the_fan_out_path_learns_the_same_identity` is what keeps them
 sharing it.
 
+**Still open, and bigger than it looks: lineage.** `derive()` and the
+cascade behind it -- revoking a source and having the refusal reach the
+summary, the answer and the embedding built out of it -- exist only in
+`admission/lineage.py`, reachable only through the handle. The wire does
+not cascade at all: its one mention of `lineage_field` is in
+`deciding_fields`, which reads the name so a projection cannot hide it,
+and nothing anywhere follows a parent to its children.
+
+That matters more than a missing feature, because `CLAIMS.md` carries it
+as a headline -- "revoking a source reaches the summary, the answer and
+the embedding built on it" -- held up by a test that drives the library.
+**A reader of the README has no way to know that claim does not hold
+through the connection string the README tells them to use.** The claim
+is true; the artifact it is true of is not the one being recommended.
+
+So the front door is *not* cuttable yet, and saying otherwise in a
+summary was wrong. Two things would have to move first: this, and the
+clearance mapping below. Lineage is the harder of the two -- a cascade is
+a multi-document write derived from a read, which is a different shape
+from anything the proxy does today, and doing it on the wire means
+deciding what happens when the second write fails after the first
+succeeded.
+
 **Still open: `Clearance`.** It declares `claim="clearance"` and wants an
 ordered level, and nothing in a MongoDB role says which level a role
 corresponds to. The wire supplies `user`, `db`, `groups` and `roles`; a

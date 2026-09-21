@@ -28,7 +28,7 @@ of fifty and asserted a page of one, and it passed under sabotage. See
 |---|---|
 | A forgotten fact cannot reach a prompt — expired, revoked, unreadable-deadline, off-tenant — decided **with no database anywhere near it** | `tests/test_the_boundary_refuses.py` |
 | A `delete` becomes a revocation: unreachable on the next read, row still on disk, deadline pulled in. The deadline moves *earlier only*; a quarantine stays pinned; a revocation cannot be lifted | `tests/test_the_write_path_forgets_without_deleting.py` |
-| Revoking a source reaches the summary, the answer and the embedding built on it | `tests/test_a_refusal_travels_and_is_gated.py` |
+| Revoking a source reaches the summary, the answer and the embedding built on it — **through the library handle; the wire does not cascade, see LIMITS §6b** | `tests/test_a_refusal_travels_and_is_gated.py` |
 | A `$vectorSearch` hit is refused on the path that never passes through a query | `tests/test_search_refuses_on_the_path_that_bypasses_the_query.py` |
 | `numCandidates` is sized from the measured refusal rate, not a constant | `tests/test_the_boundary_sizes_its_own_fetch.py` |
 | A read the boundary cannot judge per document — `distinct`, `count`, a pipeline that groups or reshapes, **or a `find` whose projection hides the marks** — has the refusal pushed into its query instead, and is refused outright in the cases where that push-down would be narrower than the guarantee | `tests/test_a_derived_read_cannot_launder_a_forgotten_fact.py` |
