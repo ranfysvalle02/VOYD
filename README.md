@@ -308,24 +308,24 @@ pushed to PyPI. Until it is, install from a clone with `uv`:
 git clone https://github.com/ranfysvalle02/VOYD && cd VOYD
 uv sync                       # Engine + a MongoDB driver. That is the base.
 
-# Later surfaces, not the on-ramp. The handle is the product; these are ways to
-# reach it. Add one only when a pilot has kept the handle (see PILOT.md).
-uv sync --extra app           # the HTTP service
-uv sync --extra crypto        # cryptographic erasure
-uv sync --extra mcp           # the same guarantee, as tools a model can call
+uv sync --extra crypto        # cryptographic erasure, when refusal is not enough
+uv sync --extra voyage        # computing embeddings, if you do not already
 ```
 
 Or build and install the wheel the way a stranger eventually will —
 `uv build`, then `pip install dist/voyd-0.1.0-py3-none-any.whl` — which is
 exactly what CI does before asserting the engine-only contract holds.
 
-Running the HTTP service needs its settings file — `cp .env.example .env`,
-then `docker compose up -d`. Every key in it is checked against the real
-settings by a test, because a Quickstart that cannot be followed is the
-entire first impression and it rots silently.
+**There used to be more.** An HTTP service, an MCP server, a store layer, a
+control plane: about 2,100 lines of *second front door*. They were cut when
+the wire boundary landed, because a connection string that refuses is a
+better front door than a REST API that refuses, and two front doors is one
+more than the argument needs. The history is in `git log`; the reasoning is in
+the commit that removed them.
 
-`import voyd` is seven names and one dependency. Importing `Engine` does not
-load FastAPI, and CI asserts it — in the built wheel, not just the source tree.
+`import voyd` is three names and one dependency, and there is nothing
+behind it to accidentally pull in. CI asserts that against the built wheel,
+not just the source tree.
 
 ```python
 from voyd import Engine
@@ -402,7 +402,7 @@ front door, the on-ramp and the pilot; everything else is reference material in
 | [`policy-engines.md`](docs/policy-engines.md) | the converse of the one idea: a retrieval rule no index filter and no policy engine can express, checked against a live Casbin enforcer |
 | [`PORTABILITY.md`](docs/PORTABILITY.md) | the guarantee is portable; its *enforcement* is not. Three engines measured, and the rung most vector databases cannot reach |
 | [`drift/`](drift/README.md) | the counter-argument, executable — including the whole thesis ported to pgvector with no MongoDB in the file |
-| [`examples/`](examples/) | sixteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction and [`tenancy.py`](examples/tenancy.py) for the incident most teams already have |
+| [`examples/`](examples/) | fourteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction and [`tenancy.py`](examples/tenancy.py) for the incident most teams already have |
 | [`tools/voyd_wire.py`](tools/voyd_wire.py) | the boundary on the wire: any driver, any language, a connection that cannot serve a forgotten fact |
 | [`scanner/`](scanner/README.md) | `voyd-scan`: one stdlib file, zero dependencies, pointed at *your* repository — the count this whole argument is about |
 

@@ -120,8 +120,12 @@ Neither is a way to go quiet:
 is the ratchet: the unjudged column can be driven to zero and then *held*
 there by CI, which is something a number nobody can act on cannot do.
 
-VOYD's own repository passes `voyd-scan --strict voyd/`, and the one claim
-that gets it there is in `voyd/store/mongo.py`.
+VOYD's own repository passes `voyd-scan --strict voyd/`. It used to need one
+`# voyd: filtered` claim to get there, on an aggregate in the store layer
+where the handle's own `match()` was the deadline. That layer was cut in the
+pivot to the wire, so the claim went with it and the package now has none —
+which is the honest reading of a zero here: the code a scanner can see got
+smaller, not safer.
 
 ## Exit codes
 

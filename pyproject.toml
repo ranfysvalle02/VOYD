@@ -27,25 +27,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The HTTP service: FastAPI runtime and the guard's passcode hashing.
-# `python -m voyd` needs this. No jinja2 or python-multipart: there is no HTML
-# surface to render and no form to parse -- the API is JSON, and argon2 is
-# here for void passcodes, not for owner passwords, which no longer exist.
-app = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "argon2-cffi>=23.1",
-    "pydantic>=2.7",
-    "pydantic-settings>=2.3",
-]
 # Embeddings. `remember()` takes floats; this is only for computing them.
 voyage = [
     "voyageai>=0.3.2",
-]
-# The MCP server: five tools, so a model runtime is a channel not a rival.
-mcp = [
-    "mcp>=2.0",           # 2.x: FastMCP was renamed MCPServer
-    "httpx>=0.27",
 ]
 # Cryptographic erasure. The deadline destroys the key, so the ciphertext is
 # unreadable in every copy -- replicas, snapshots, the backup nobody has
@@ -58,9 +42,9 @@ mcp = [
 crypto = [
     "pymongo[encryption]>=4.9",
 ]
-# Everything: the HTTP service + embeddings + the MCP server + crypto.
+# Everything optional: embeddings + cryptographic erasure.
 all = [
-    "voyd[app,voyage,mcp,crypto]",
+    "voyd[voyage,crypto]",
 ]
 # The drift exhibit only: the four-owners stack it argues against. Not
 # needed to run VOYD, and deliberately not in `all` -- nothing VOYD ships
@@ -114,10 +98,6 @@ dev = [
 Homepage = "https://github.com/ranfysvalle02/VOYD"
 Source = "https://github.com/ranfysvalle02/VOYD"
 Issues = "https://github.com/ranfysvalle02/VOYD/issues"
-
-[project.scripts]
-voyd = "voyd.__main__:main"
-voyd-mcp = "voyd.mcp:main"
 
 [build-system]
 requires = ["hatchling"]

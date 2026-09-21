@@ -1,69 +1,69 @@
-"""The principle said "tool or endpoint". Only the tool half was enforced.
+"""No verb anywhere here hands a caller a cleanup obligation.
 
-`docs/STATE.md` has said this since the beginning, under *Deliberately not
-doing*:
+`docs/STATE.md`, under *Deliberately not doing*:
 
     **A delete tool or endpoint.** A delete hands the caller a cleanup
-    obligation, and an agent that has to remember to clean up is the
-    failure this exists to remove. CI asserts no tool is named for
-    reclaiming anything.
+    obligation, and an agent that has to remember to clean up is the failure
+    this exists to remove.
 
-CI did assert that -- for MCP tools. Meanwhile `DELETE /v1/voyds/{slug}`
-had been on the HTTP surface the whole time: untested, undocumented,
-referenced by nothing, and cascading through a **hardcoded** list of two
-collections written before `refusals`, `__keys` and `perimeter` existed.
-So the destructive path nobody exercised was also the one guaranteed to
-rot.
+That sentence has outlived two surfaces. It was first enforced against the
+MCP tool list, then against the HTTP endpoints after a purge found
+`DELETE /v1/voyds/{slug}` sitting there untested and cascading through a
+hardcoded list of collections written before three more existed. Both
+surfaces are gone now, cut in the pivot to the wire.
 
-It is gone. This is the other half of the assertion, so the sentence in
-`docs/STATE.md` is now true rather than aspirational -- and so that the next
-person to add one has to argue with a test instead of with a paragraph.
+So it is asserted against what remains, which is the only thing a stranger
+can reach: the engine's public surface, and the wire boundary. The principle
+is not about a protocol -- it is about never handing anybody a mess to tidy.
 """
 
 from __future__ import annotations
 
-import pytest
+import inspect
+from pathlib import Path
 
-fastapi = pytest.importorskip("fastapi")
+import voyd.engine as engine_module
+from voyd.engine.admission import Admission
 
-from voyd.web import owner, vault  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
 
-RECLAIMING = {"DELETE"}
 NAMED_FOR_RECLAIMING = {"delete", "remove", "destroy", "purge", "drop",
                         "cleanup", "expire", "gc", "collect", "reclaim"}
 
 
-def routes():
-    for router in (owner.router, vault.router):
-        for route in router.routes:
-            for method in getattr(route, "methods", set()):
-                yield method, route.path, getattr(route, "name", "")
+def _looks_reclaiming(name: str) -> bool:
+    parts = set(name.lower().replace("-", "_").split("_"))
+    return bool(parts & NAMED_FOR_RECLAIMING)
 
 
-def test_no_endpoint_reclaims_anything():
-    """A scope collects itself. An owner who has to remember to clean up is
-    the failure this package exists to remove, and an HTTP verb is not a
-    smaller version of that failure than an agent tool."""
-    offenders = [(m, p) for m, p, _ in routes() if m in RECLAIMING]
+def test_no_exported_name_is_named_for_reclaiming():
+    """`__all__` is the promise. A verb in it named for taking things away
+    would be the obligation this package exists to remove, offered."""
+    offenders = sorted(n for n in engine_module.__all__ if _looks_reclaiming(n))
     assert not offenders, (
-        f"reclaiming endpoint(s) {offenders}. The deadline is the mechanism: "
-        f"a scope expires and its rows go with it. If something genuinely "
-        f"needs removing out of band, say why here -- and test the cascade, "
-        f"because the last one hardcoded two collection names and three more "
-        f"appeared after it was written")
+        f"{offenders} reached the public surface. Forgetting is a *reachability*"
+        " change; reclaiming the bytes belongs to the deadline, which nobody"
+        " has to remember.")
 
 
-def test_no_endpoint_is_named_for_reclaiming():
-    """``POST /purge`` is a delete with better manners."""
-    offenders = [(p, n) for _, p, n in routes()
-                 if any(w in n.lower() or w in p.lower()
-                        for w in NAMED_FOR_RECLAIMING)]
-    assert not offenders, f"named for reclaiming: {offenders}"
+def test_no_public_method_on_the_handle_is_named_for_reclaiming():
+    """The handle is what a caller holds, so it is where the temptation is."""
+    offenders = sorted(
+        name for name, _ in inspect.getmembers(Admission, callable)
+        if not name.startswith("_") and _looks_reclaiming(name))
+    assert not offenders, f"{offenders} on the admission handle"
 
 
-def test_forgetting_is_still_reachable():
-    """The point is not that nothing can be forgotten -- it is that
-    forgetting hands back no obligation. ``forget`` moves a deadline into
-    the past; nothing is scheduled and nothing needs a follow-up call."""
-    paths = {p for _, p, _ in routes()}
-    assert "/v1/voids/{token}/forget" in paths
+def test_the_wire_boundary_has_no_write_path_at_all():
+    """The strongest form of the principle, and it came free with the pivot.
+
+    `tools/voyd_wire.py` rewrites replies and never requests anything. It
+    cannot delete because it has no way to ask a database for anything --
+    which is also why it needs no credentials of its own.
+    """
+    source = (ROOT / "tools" / "voyd_wire.py").read_text()
+    for verb in ("delete_one", "delete_many", "drop", "insert_one",
+                 "update_one", "find_one_and_delete"):
+        assert verb not in source, (
+            f"{verb} appeared in the wire boundary, which is supposed to be a "
+            f"read path that rewrites replies and asks for nothing")

@@ -279,20 +279,3 @@ async def test_a_parked_job_can_carry_why_it_was_parked(core):
 
 # ---- the first command a stranger runs --------------------------------
 
-def test_booting_without_the_app_extra_is_an_instruction_not_a_traceback():
-    """``voyd`` is the first command anybody types, and on a bare
-    ``pip install voyd`` it cannot work -- the HTTP service lives behind an
-    extra. What it must not do is fail with a ``ModuleNotFoundError`` three
-    imports deep, because that reads as "broken package" rather than
-    "install one more thing".
-
-    Untested until now, which is the usual shape: the people who would
-    notice have already got it working.
-    """
-    from voyd.__main__ import missing_extra
-
-    message = str(missing_extra(ModuleNotFoundError("no fastapi",
-                                                    name="fastapi")))
-    assert "fastapi" in message, "say which module is missing"
-    assert "voyd[app]" in message, "and say the command that fixes it"
-    assert "Traceback" not in message

@@ -246,7 +246,7 @@ checks links, anchors, source paths named in prose, and any "N tests" claim —
 the last one-directionally, since `@parametrize` means the real number is
 always at least the count of `def test_` functions.
 
-Counted nouns in prose — *"sixteen runnable programs"*, *"six steps"* — are
+Counted nouns in prose — *"fourteen runnable programs"*, *"six steps"* — are
 checked **exactly**, against the directory and the headings they describe.
 That guard exists because this paragraph used to say those two were "on you,
 and both were stale within one commit of being written." They then went stale
@@ -272,7 +272,6 @@ Each one exists because the thing it checks went wrong at least once.
 | [`every_documented_command_is_real`](../tests/test_every_documented_command_is_real.py) | a renamed extra, a dropped compose service, a moved script or a rejected flag in any fenced command |
 | [`an_outward_tool_cannot_report_clean_about_nothing`](../tests/test_an_outward_tool_cannot_report_clean_about_nothing.py) | an outward CLI that blesses a path it never read, or whose exit code wraps to success |
 | [`engine_standalone`](../tests/test_engine_standalone.py) | app vocabulary appearing in `voyd/engine/`, including in a comment |
-| [`the_documented_first_run_works`](../tests/test_the_documented_first_run_works.py) | the quickstart's commands drifting from what exists |
 | [`the_engine_pins_its_own_settings`](../tests/test_the_engine_pins_its_own_settings.py) | the engine inheriting the caller's environment or codecs |
 | [`what_this_believes_about_the_world`](../tests/test_what_this_believes_about_the_world.py) | an assumption about external software with no recorded check |
 | `ruff` + `mypy`, both in CI | lint, and the `py.typed` promise the wheel ships |

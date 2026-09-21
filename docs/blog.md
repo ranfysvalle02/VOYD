@@ -935,7 +935,6 @@ code it describes.
 | Asking for it is safe where it is unavailable | Atlas Local refuses, the engine falls back to a client vector index, loudly |
 | Admission survives the server owning the vector | `revoke()` still refuses a row this process never embedded |
 | A cold index cannot look empty | unready indexes route to cosine, logged and counted |
-| A 500 is not input validation | an unrepresentable `ttl_seconds` and an oversized `metadata` are 422s |
 | A 429 is not a bad document | failed embeds retry; a later valid key backfills |
 | There is no way to leak a cleanup chore | no tool is named for reclaiming anything, and `forget` reclaims nothing |
 | Admission is reachable from the product | `POST /v1/voids/{token}/forget` and a `forget` tool, not engine-only |

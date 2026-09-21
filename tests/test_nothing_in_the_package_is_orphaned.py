@@ -31,15 +31,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 # Invoked by a framework, never by name. Each entry names what calls it.
-FRAMEWORK_INVOKED = {
-    # FastAPI route handlers: called by the router via the decorator.
-    "add_documents", "search_void", "search_voyd",
-    # Starlette middleware: called by the ASGI stack, not by us.
-    "dispatch",
-    # Pydantic validators: called by the model during construction.
-    "_text_must_say_something", "_strip_name", "_metadata_or_nothing",
-    "_query_is_required", "_accept_the_single_document_shorthand",
-}
+#
+# Empty since the pivot, and worth leaving here rather than deleting: every
+# entry it held was a FastAPI route handler, a Starlette middleware or a
+# Pydantic validator, and all three frameworks left with the HTTP surface.
+# An allowlist that empties itself when a subsystem is cut is the allowlist
+# working -- the test below fails on an entry that no longer names anything,
+# which is how these nine were found rather than remembered.
+FRAMEWORK_INVOKED: set[str] = set()
 
 # Called by mypy, not by Python. The three functions in handle.py exist so
 # that the protocols in composition.py are checked against the classes they

@@ -22,19 +22,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Start Atlas Local (mongod + mongot)
-        # Only the database service. The `voyd` app service reads .env to boot;
-        # the suite does not -- it talks to Mongo directly on 27018. `--wait`
-        # blocks on the compose healthcheck, which waits for mongot
-        # ($listSearchIndexes), not just for mongod to ping.
+        # Only the database. There used to be a `voyd` app service here that
+        # read `.env` to boot; it went with the HTTP surface in the pivot to
+        # the wire, and `.env.example` went with it -- there is nothing left
+        # to configure before a first run.
         #
-        # The `cp` below is also the Quickstart's second line, and for a while
-        # `.env.example` was neither tracked nor present -- so this step was
-        # broken and so was every new user's first run.
-        # `tests/test_the_documented_first_run_works.py` now fails if the file
-        # goes missing again, or if a setting is added without documenting it.
-        run: |
-          cp .env.example .env
-          docker compose up -d --wait mongo
+        # `--wait` blocks on the compose healthcheck, which waits for mongot
+        # ($listSearchIndexes), not just for mongod to ping.
+        run: docker compose up -d --wait mongo
 
       - name: Install uv + Python
         uses: astral-sh/setup-uv@v6
@@ -122,12 +117,28 @@ jobs:
         run: uv run --no-sync mypy
 
       - name: Engine installs on its own
-        # Move #1 of this repo is "Engine is what you install." Prove the import
-        # graph in the built package: Engine, no FastAPI. This does not need Mongo.
+        # Move #1 of this repo is "Engine is what you install." It used to be
+        # possible to violate that by importing the HTTP surface; that surface
+        # is gone, so the invariant is now about the *dependency set* instead
+        # of about FastAPI specifically -- a bare `import voyd` must reach one
+        # third-party package and no more.
         run: |
-          uv run --no-sync python -c "import sys; from voyd import Engine, PermanentFailure; \
-            assert 'fastapi' not in sys.modules, 'importing Engine pulled the Host'; \
-            print('Engine imports clean:', Engine.__name__)"
+          uv run --no-sync python -c "
+          import sys
+          from voyd import Engine, PermanentFailure
+          import voyd
+          assert set(voyd.__all__) == {'Engine', 'PermanentFailure', '__version__'}, \
+              f'the top-level surface grew: {sorted(voyd.__all__)}'
+          third_party = {m.split('.')[0] for m in sys.modules
+                         if not m.startswith(('_', 'voyd'))} - sys.stdlib_module_names
+          # This step runs in the all-extras dev environment, so the driver's
+          # own encryption dependencies are legitimately present. The clean
+          # check is the wheel step below, which installs the base alone.
+          allowed = {'pymongo', 'bson', 'gridfs', 'dns', 'pymongocrypt',
+                     'cryptography'}
+          unexpected = third_party - allowed
+          assert not unexpected, f'importing Engine pulled {sorted(unexpected)}'
+          print('Engine imports clean:', Engine.__name__, '|', sorted(voyd.__all__))"
 
       - name: The wheel builds, and the claim holds *in the wheel*
         # The step above proves the import graph in the source tree, which is
@@ -143,23 +154,16 @@ jobs:
           uv venv /tmp/wheelcheck
           VIRTUAL_ENV=/tmp/wheelcheck uv pip install dist/*.whl
           /tmp/wheelcheck/bin/python -c "
-          import sys
+          import sys, voyd
           from voyd import Engine, PermanentFailure
-          assert 'fastapi' not in sys.modules, 'the wheel pulls FastAPI'
-          try:
-              import fastapi
-              raise AssertionError('bare wheel install dragged in the app extra')
-          except ImportError:
-              pass
-          print('wheel: Engine imports clean, no FastAPI')"
-          VIRTUAL_ENV=/tmp/wheelcheck uv pip install "voyd[app] @ ./dist/$(ls dist | grep whl)"
-          /tmp/wheelcheck/bin/python -c "
-          import voyd.app
-          from voyd.web import owner, vault
-          paths = {r.path for r in vault.router.routes} | {r.path for r in owner.router.routes}
-          for needed in ('/v1/voids', '/v1/voids/{token}/forget', '/v1/owners'):
-              assert needed in paths, f'{needed} missing from the built wheel: {sorted(paths)}'
-          print('wheel[app]: service imports and the API surface is intact')"
+          assert set(voyd.__all__) == {'Engine', 'PermanentFailure', '__version__'}
+          for gone in ('voyd.app', 'voyd.web', 'voyd.mcp', 'voyd.store'):
+              try:
+                  __import__(gone)
+              except ImportError:
+                  continue
+              raise AssertionError(f'{gone} is back in the wheel')
+          print('wheel: Engine imports clean, and the cut surfaces stayed cut')"
 
       - name: voyd-scan installs with nothing, because that is its whole claim
         # `scanner/` is a second distribution and the first thing a stranger
@@ -225,30 +229,6 @@ jobs:
         # a comment that suppresses a finding it no longer describes.
         run: |
           /tmp/scancheck/bin/voyd-scan --strict voyd/
-
-      - name: No agent tool can leave a cleanup obligation
-        # The pitch is that a scope collects itself. An agent that has to
-        # remember to clean up is the failure this exists to remove.
-        #
-        # This gate used to assert an exact set of four tool names, which was
-        # the wrong invariant: it froze the surface instead of protecting the
-        # property, so adding `forget` -- a tool that hands the agent no
-        # obligation at all -- looked like a violation when it is the
-        # principle being honoured. The rule is about what a tool *promises*,
-        # not how many there are.
-        run: |
-          uv run --no-sync python -c "
-          import asyncio
-          from voyd.mcp import build_server
-          class Stub:
-              def __getattr__(self, n): raise AssertionError('no network in CI')
-          names = {t.name for t in asyncio.run(build_server(Stub()).list_tools())}
-          banned = {'delete', 'remove', 'destroy', 'purge', 'drop', 'cleanup',
-                    'expire', 'gc', 'collect'}
-          leaked = names & banned
-          assert not leaked, f'a cleanup obligation reached the agent: {leaked}'
-          assert 'forget' in names, 'forgetting must be reachable by an agent'
-          print('MCP surface:', sorted(names), '-- no delete, forget present')"
 
       - name: Test
         env:

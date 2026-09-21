@@ -34,9 +34,6 @@ EXAMPLES = sorted(ROOT.glob("examples/*.py"))
 # something this suite does not stand up, or cannot safely share a server with
 # a test run.
 EXEMPT = {
-    "scope.py":
-        "needs a running HTTP service (VOYD_URL / VOYD_API_KEY); it is the "
-        "one example about the surface rather than the engine",
     "quickstart.py":
         "waits on a real mongot index build -- over 100s measured -- and is "
         "covered by tests/test_the_quickstart_refuses.py against the same path",
@@ -48,8 +45,6 @@ EXEMPT = {
         "beside the suite makes it and test_the_deadline_is_enforced_twice.py "
         "restore each other's value. See the footgun note in conftest.py. "
         "Covered by tests/test_engine_expiry.py",
-    "why_this_belongs_in_the_database.py":
-        "same server global, same reason",
 }
 
 RUNNABLE = [p for p in EXAMPLES if p.name not in EXEMPT]

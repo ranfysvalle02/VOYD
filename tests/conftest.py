@@ -1,23 +1,21 @@
 """Shared fixtures.
 
-Two audiences, two fixtures:
+One fixture does nearly all of the work. ``core`` is a bare ``Engine`` on a
+throwaway database, built from a *vanilla* ``AsyncMongoClient`` -- no
+``tz_aware`` handed in, nothing pre-configured. That is the caller an agent
+actually is, so the boundary is honest at the harness and not only in the
+import graph.
 
-- ``core`` -- a bare ``Engine`` on a throwaway database, built from a *vanilla*
-  ``AsyncMongoClient``. That is the caller an agent actually is: no
-  FastAPI, no ``tz_aware`` handed in, no app extra. Engine tests take this, so the
-  boundary is honest at the harness and not only in the import graph. Nothing in
-  this fixture imports the HTTP service.
-- ``app`` / ``client`` -- the VOYD HTTP service (FastAPI) on its own database.
-  Only the service tests need these; those modules
-  ``pytest.importorskip('fastapi')`` so a ``pip install voyd[dev]`` without the
-  ``app`` extra still runs the engine suite. The service is imported lazily
-  *inside* the fixture for the same reason.
+There used to be a second pair, ``app`` / ``client``, for the HTTP service.
+That surface was cut when the wire boundary replaced it: a connection string
+that refuses is a better front door than a REST API that refuses, and two
+front doors is one more than the argument needs.
 
-The integration tests need a real MongoDB, because the properties worth proving
--- tenant isolation, ownership checks, forgetting on a deadline -- are properties
-of the *queries*; a fake store would prove only that the fake is filtered. They
-skip cleanly when no MongoDB is reachable. Point them elsewhere with
-``VOYD_TEST_MONGO_URI``.
+The integration tests need a real MongoDB, because the properties worth
+proving -- tenant isolation, forgetting on a deadline, a search hit refused on
+the way out -- are properties of the *queries*; a fake store would prove only
+that the fake is filtered. They skip cleanly when no MongoDB is reachable.
+Point them elsewhere with ``VOYD_TEST_MONGO_URI``.
 """
 
 from __future__ import annotations
@@ -246,54 +244,3 @@ async def core():
         await client.close()
 
 
-@pytest.fixture
-async def app():
-    """The VOYD HTTP service on a throwaway database, dropped afterwards.
-
-    This is the full service: FastAPI, the store, embeddings. Imported
-    lazily so ``conftest`` itself does not pull the ``app`` extra -- an engine-only
-    install can still collect and run the engine tests.
-
-    The Ops background workers are left off: these tests exercise request
-    handling, not the embed loop. The vault's passcode limiter is
-    process-global, so it is cleared here (not autouse, so engine tests never
-    import the service to do it) -- otherwise one test's wrong guesses would
-    429 the next test's good ones.
-    """
-    if not await _mongo_available(TEST_MONGO_URI):
-        pytest.skip(f"no MongoDB at {TEST_MONGO_URI}")
-
-    from voyd import Intelligence, Store, Voyd
-    from voyd.web.vault import _passcode_limiter
-
-    _passcode_limiter.clear()
-    db_name = throwaway_db_name("voyd_test_")
-    voyd = Voyd(
-        domain="voyd.test",
-        store=Store.Mongo(TEST_MONGO_URI, db_name=db_name),
-        intelligence=Intelligence.Voyage(api_key="vy-test"),
-    )
-    await voyd.store.connect()
-    await voyd.store.ensure_schema(
-        vector_dimensions=voyd.intelligence.config.dimensions)
-    try:
-        yield voyd
-    finally:
-        await voyd.store.client.drop_database(db_name)
-        await voyd.store.close()
-        _passcode_limiter.clear()
-
-
-@pytest.fixture
-async def client(app):
-    """An HTTP client speaking to the service in-process.
-
-    Requests carry ``X-Voyd`` to choose a namespace (see ``voyd.host``), which is
-    the documented escape hatch for exactly this: no wildcard DNS needed.
-    """
-    import httpx
-
-    transport = httpx.ASGITransport(app=app.api)
-    async with httpx.AsyncClient(transport=transport,
-                                 base_url="http://voyd.test") as c:
-        yield c

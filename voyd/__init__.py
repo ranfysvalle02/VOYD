@@ -4,33 +4,34 @@ Ranking is not permission. A vector index ranks by relevance and is never
 asked the other question -- may this fact reach a prompt? -- so a retrieval
 answers with a confident score and no idea whether the hit was allowed to be
 there: an expired row the sweeper has not reached, a fact somebody revoked, a
-vector from a model that was swapped. VOYD answers that question at the one
-place every read passes through on the way out: a handle with no unfiltered
-read on it.
+vector from a model that was swapped.
+
+VOYD answers that question at the one place every read passes through on the
+way out.
+
+**In your process**, a handle with no unfiltered read on it::
 
     from voyd import Engine
 
     engine = Engine(client, db)
     await engine.connect()
     docs = engine.model("notes").forgettable()
-    await engine.ensure(search_wait_s=0)      # 0: skip the search-index wait
+    await engine.ensure(search_wait_s=0)
 
     await docs.find({})                       # cannot return a forgotten fact
     await docs.including_refused().find({})   # break-glass: gated, and counted
     await docs.revoke({"_id": x}, reason="credential leaked")
 
-    # Multi-tenant threads a field through: ``model("notes", tenant="t")``
-    # then makes it required, so a read is ``find({"t": tenant})`` -- a
-    # forgotten ``{}`` raises rather than crossing the boundary.
+**Or on the wire**, where it binds the connection instead of the import::
 
-The deadline underneath the handle is trustworthy because one thing owns it.
-Split across Postgres for metadata, Pinecone for vectors, S3 for blobs and a
-cron for cleanup, and you have four clocks and four ways to drift -- the
-vector outliving the document is the bug class, and nothing is ever wrong
-enough to page you. Here it is one ``expire_at``, inherited by every row in the
-scope, collected by one TTL index. There is no fourth clock and no second
-store: the text is a field on the document, so a collected row leaves nothing
-behind to reclaim.
+    python tools/voyd_wire.py --listen 27099 --target localhost:27017 \\
+        --guard notes
+
+Same check, no code. Any driver in any language pointed at that port cannot
+read a forgotten fact, because the boundary is not something a caller can
+forget to use -- there is nothing to reach past. The proxy holds no database
+connection of its own: ``reachable()`` is pure, which is what makes it
+movable at all.
 
 The pieces, and everything else is mechanics:
 
@@ -38,84 +39,36 @@ The pieces, and everything else is mechanics:
 collected by one TTL index. Enforced in the *read path* as well as by the
 reaper: MongoDB's TTL monitor runs about once a minute (measured: 60.0s), so
 an expired document lives on disk for a window afterwards, and serving it
-during that window is the whole bug class. See ``examples/forget.py``, which
-watches it happen.
+during that window is the whole bug class. See ``examples/forget.py``.
 
-**Refusal** -- the read-path half of that deadline is not a convention each
-call site remembers, because a rule you have to remember to apply is not
-enforced. ``engine.model(...).forgettable()`` returns a handle with no
-unfiltered read on it: expired, revoked and unreadable facts are refused on
-the way out, and seeing everything requires saying ``including_refused()``
-where a reviewer can grep for it. ``revoke()`` makes a fact unreachable on the
-next read while its row is still on disk -- deletion is a storage event,
-refusal is a retrieval guarantee, and only the second one can be immediate.
-See ``examples/refuse.py``.
+**Refusal** -- not a convention each call site remembers, because a rule you
+have to remember to apply is not enforced. ``revoke()`` makes a fact
+unreachable on the next read while its row is still on disk: deletion is a
+storage event, refusal is a retrieval guarantee, and only the second can be
+immediate. Not every refusal is an erasure, and the difference is declared on
+the reason rather than decided by the verb -- one word, ``reversible``, says
+whether ``lift()`` works and whether imposing it schedules the reaper. See
+``examples/refuse.py`` and ``examples/hold.py``.
 
-Not every refusal is an erasure, and the difference is declared on the reason
-rather than decided by the verb. ``revoked()`` is an instruction about the
-world and cannot be taken back; ``quarantined()`` is a hypothesis, so
-``quarantine()`` holds a document without giving its row a deadline -- the row
-is the evidence -- and ``release()`` lifts it. One word on the rule,
-``reversible``, decides whether ``lift()`` works, whether imposing it schedules
-the reaper, and what the chain records on the way back out. See
-``examples/hold.py``.
+**A rule is a protocol, not a list.** ``reason`` + ``refuses(doc)`` +
+``clause()``, and a stranger's rule is a first-class one. That is what makes
+the set-relative reasons possible -- a token budget, a de-duplicator, a
+provenance quota -- which refuse a document because of the *other* documents
+on the page, and which no index filter and no policy engine can express. See
+``examples/rosetta.py`` and ``examples/portfolio.py``.
 
-**Guard** -- an access policy on the *scope*: a passcode, enforced on the
-read path. ``Guard`` asks whether this caller may read the
-scope and ``Admission`` asks whether this document may reach a prompt; the
-pair of them is a third question, and ``for_caller(claims)`` is where it is
-answered -- a ``Clearance`` rule compares what a document is classified
-against what its reader is cleared for, per hit; ``Restricted`` is the
-complement, admitting only callers whose groups overlap the document's named
-audience. There is one door: gating queries and leaving another way in would
-make search the way around the lock.
+**Refusal travels.** ``derive()`` records what a document was made out of, so
+revoking a source reaches the summary, the answer and the embedding built on
+it -- and ``find({"lineage": id})`` answers the question from the other end.
+See ``examples/lineage.py``.
 
-Refusal answers *may this reach a prompt*, which is not the same question as
-*and your backups?* -- refusal binds this application's read path, and a
-restored snapshot does not run it. ``engine.keyring`` closes that: a key per
-scope, ciphertext at rest, and the scope's deadline destroying the key, so
-every copy becomes unreadable at once. The key vault is a collection, so the
-key expires by the same TTL index the documents do. Neither mechanism is
-sufficient alone -- the key cache is a window refusal has already closed, and
-refusal is local in a way the missing key is not. See ``examples/shred.py``,
-which measures both.
-
-**Who may do it** is the third question, and it had no answer for a long
-time: ``Guard`` asks may this caller read the scope, ``Admission`` asks may
-this document reach a prompt, and every verb that *changed* reachability was
-available to anybody holding a handle. ``authorised_by(Grants(...))`` gates
-them, asymmetrically -- withholding a fact and granting one back are not
-equally dangerous -- and the chain records the actor, hashed with the rest
-of the entry so attribution cannot be attached afterwards.
-
-Refusal is **answerable after the fact**, too. ``as_of(t)`` replays the scope
-as it stood at an instant and ``reachability_at()`` answers for one document
-with three verdicts, not two -- a row the reaper took is ``unknown``, because
-reporting it as "not reachable" would let a deployment clear itself by
-pointing at the absence of the evidence. ``receipt_for(page)`` hashes what
-reached a prompt, the reasons in force and the ledger head, so *what did the
-model see when it said that* is a value anybody can recompute.
-
-And the reasons themselves can be **data**: ``compile_policy()`` turns a
-``deny`` clause stored on a scope into a rule indistinguishable from a
-hand-written one, refusing at boot anything it cannot express as both a
-per-document check and a query clause -- half of that pair is a hole
-``$vectorSearch`` walks through. What lies outside this process is
-enumerated rather than claimed: see ``engine.perimeter``.
-
-Refusal is also **provable**. Every revocation is a link in an append-only
-hash chain, so "this fact stopped being reachable at 14:02" is a claim
-somebody can check rather than one they have to take -- and the receipt handed
-back is the half that holds against whoever owns the database. See
-``engine.ledger``.
-
-``Engine`` is the core -- the base install (``uv sync`` from a clone; not on
-an index yet) is Engine and a MongoDB driver, and importing it does not load
-FastAPI or Voyage. The HTTP service (``Voyd``,
-the ``app`` extra) and the MCP tools (:mod:`voyd.mcp`) are later surfaces onto
-the same admission path, not the thesis -- none of the five MCP tools is a
-delete, because ``forget`` changes reachability and hands the caller no cleanup
-obligation, which is why it costs nothing to offer.
+**And it is provable.** Every revocation is a link in an append-only hash
+chain, ``as_of(t)`` replays the scope as it stood, and ``receipt_for(page)``
+hashes what reached a prompt. What lies outside this process is enumerated
+rather than claimed: see ``engine.perimeter``. Refusal binds a read path and a
+restored snapshot does not run it, which is what ``engine.keyring`` is for --
+a key per scope, destroyed on the same deadline, so every copy becomes
+unreadable at once. See ``examples/shred.py``.
 
 Every claim above is asserted by the test suite against a real MongoDB --
 no mock tier, on purpose, because these properties are only true if the
@@ -124,37 +77,8 @@ no mock tier, on purpose, because these properties are only true if the
 
 from __future__ import annotations
 
-from importlib import import_module
-
 from .engine import Engine, PermanentFailure
 
 __version__ = "0.1.0"
 
-# Everything above Engine is an optional extra, imported on first attribute
-# access so that `from voyd import Engine` never pulls in FastAPI.
-_LAZY_EXPORTS = {
-    "Voyd": (".app", "Voyd"),
-    "Guard": (".guards", "Guard"),
-    "Intelligence": (".intelligence", "Intelligence"),
-    "Store": (".store", "Store"),
-}
-
-
-def __getattr__(name: str):
-    spec = _LAZY_EXPORTS.get(name)
-    if spec is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module(spec[0], __name__), spec[1])
-    globals()[name] = value
-    return value
-
-
-def __dir__():
-    return sorted({*globals(), *_LAZY_EXPORTS, "__all__", "__version__"})
-
-
-__all__ = [
-    "Engine", "PermanentFailure",
-    "Voyd", "Store", "Intelligence", "Guard",
-    "__version__",
-]
+__all__ = ["Engine", "PermanentFailure", "__version__"]

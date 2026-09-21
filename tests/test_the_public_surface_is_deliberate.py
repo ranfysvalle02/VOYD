@@ -145,6 +145,5 @@ def test_the_top_level_package_stays_small():
     The engine namespace is the advanced one; the front door is not."""
     import voyd
 
-    assert set(voyd.__all__) == {"Engine", "PermanentFailure", "Voyd",
-                                 "Store", "Intelligence", "Guard",
+    assert set(voyd.__all__) == {"Engine", "PermanentFailure",
                                  "__version__"}
