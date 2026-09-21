@@ -88,12 +88,12 @@ from __future__ import annotations
 
 from .declare import (budget, deadline, distinct, embedded_with, guard,
                       holdable, restricted_to, revocable, tenant)
-from .engine import Engine, PermanentFailure
+from .engine import Engine
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "Engine", "PermanentFailure",
+    "Engine",
     # The declarative policy surface -- everything `voydfile.py` needs.
     "guard", "deadline", "revocable", "holdable", "tenant",
     "restricted_to", "embedded_with", "budget", "distinct",

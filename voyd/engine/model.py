@@ -24,8 +24,6 @@ from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 from .expiry import ExpirySpec
 from .admission import Admission
-from .jobs import JobQueue
-from .memory import Memory, MemorySpec
 from .search import SearchSpec
 
 if TYPE_CHECKING:
@@ -183,19 +181,6 @@ class Model:
         handle = self.admitting(*kw.pop("rules", ()), **kw) if kw.get("rules") \
             else self.forgettable()
         return handle.sealed_by(Sealing(keyring, tuple(fields), at))
-
-    def memory(self, **kw) -> Memory:
-        """Recall with decay: search plus TTL, one collection."""
-        spec_kw = dict(kw)
-        spec_kw.setdefault("collection", self.collection)
-        if self.tenant:
-            spec_kw.setdefault("scope_field", self.tenant)
-            spec_kw.setdefault("scope_type", self.tenant_type)
-        return self.engine.memory(MemorySpec(**spec_kw))
-
-    def queue(self, *, when: dict, **kw) -> JobQueue:
-        """The document is the job. Safe across replicas; retry is a policy."""
-        return self.engine.queue(self.collection, when=when, **kw)
 
     def use(self, make: Callable[..., T] | T, /, **kw) -> T:
         """Install any trait on this collection.

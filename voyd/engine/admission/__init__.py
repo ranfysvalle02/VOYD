@@ -95,7 +95,6 @@ from __future__ import annotations
 # ``__all__``: see test_the_extension_point_protocols_are_documentation
 # _not_imports -- advertising a protocol suggests a base class to
 # inherit, and there is none.
-from .attestation import _digest_of  # noqa: F401
 from .core import AdmissionCore  # noqa: F401
 from .handle import Admission
 from .reasons import (DEADLINE, KEY_UNAVAILABLE, LIFTED, LIFT_BATCH,

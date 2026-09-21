@@ -326,6 +326,27 @@ class AdmissionCore:
             return False
         return doc.get(self.tenant) != self._scope
 
+    def receipts(self) -> dict:
+        """What this handle has refused, and why.
+
+        Two numbers with different strengths, and the difference is the
+        honest part. ``revoked_total`` is exact. ``refused_at_boundary`` is a
+        lower bound -- the same rule runs inside the query, so most forgotten
+        facts are dropped by MongoDB and never counted here. Counting them
+        would mean issuing every read twice.
+
+        The wire boundary inverts that, which is worth knowing when reading
+        the number: a batch handed to ``reachable()`` never went through a
+        query, so every document reaches the boundary and the count is exact.
+
+        Read them as signals: a climbing ``unreadable`` means something is
+        writing deadlines it should not; a climbing ``off_scope`` means an
+        index filter and a per-document check have disagreed.
+        """
+        return {"collection": self.collection,
+                "policy": self.spec.describe(),
+                **self.receipts_log.as_dict()}
+
     def _clone(self) -> Self:
         clone = type(self)(self.db, self.spec, engine=self.engine)
         # Receipts are shared: a refusal is a refusal whichever derived

@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .attestation import Attestation
 from .core import AdmissionCore
 from .lineage import Lineage
 from .marks import MarkWrites
@@ -37,8 +36,7 @@ from .reads import ReadPath
 from .sealing import Sealing
 
 
-class Admission(AdmissionCore, ReadPath, MarkWrites, Lineage, Sealing,
-                Attestation):
+class Admission(AdmissionCore, ReadPath, MarkWrites, Lineage, Sealing):
     """A read handle that cannot return a forgotten fact.
 
     Install it on a model (``.forgettable()``) or build it directly. It is a

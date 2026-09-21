@@ -46,14 +46,6 @@ crypto = [
 all = [
     "voyd[voyage,crypto]",
 ]
-# The drift exhibit only: the four-owners stack it argues against. Not
-# needed to run VOYD, and deliberately not in `all` -- nothing VOYD ships
-# imports a Postgres driver or a vector database client.
-drift = [
-    "asyncpg>=0.29",
-    "qdrant-client>=1.9",
-    "aioboto3>=13.0",
-]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -64,20 +56,6 @@ dev = [
     # to remember to run is a suggestion, which is this project's whole
     # complaint about conventions.
     "ruff>=0.5",   # rule set is pinned in [tool.ruff.lint], so the tool may float
-    # A conformant KMIP server, so the custody ladder's *external* rung is
-    # checked against real infrastructure rather than asserted as a shape.
-    # Enterprise key custody is not a synonym for one cloud vendor's
-    # managed service -- KMIP is the open standard the category runs on,
-    # and unlike any hosted KMS it can be started in a subprocess.
-    "pykmip>=0.10",
-    # A real policy engine, so `docs/policy-engines.md` argues against the
-    # thing rather than against a description of it. The claim there is a
-    # pair -- that a compiled policy decides what Casbin decides, and that a
-    # cumulative rule is something Casbin structurally cannot express -- and
-    # both halves are the kind that rot silently. Declared here, not in
-    # `[project.optional-dependencies]`: `voyd` must not import it, because
-    # "these are two layers" is the argument.
-    "casbin>=1.17",
     # `tests/test_every_documented_command_is_real.py` reads the compose files
     # to check that a documented `docker compose up -d --wait <service>` names
     # a service that exists. It arrives transitively today (uvicorn[standard]),
@@ -155,11 +133,7 @@ check_untyped_defs = true
 # `ignore_missing_imports = true`, so adding a dependency that *does* ship
 # types cannot quietly land untyped.
 [[tool.mypy.overrides]]
-# `kmip`/`pykmip` are not here: they are a *test* dependency (a real KMIP
-# server in a subprocess), `voyd` never imports them, and `warn_unused_configs`
-# above reports an override that matches nothing rather than letting the list
-# accumulate entries nobody can justify.
-module = ["voyageai.*", "mcp.*", "argon2.*", "pymongocrypt.*"]
+module = ["voyageai.*", "pymongocrypt.*"]
 ignore_missing_imports = true
 
 # `voyd` imports no numpy; it arrives because `voyageai` ships `py.typed`, so
@@ -170,15 +144,6 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["voyageai.*", "numpy.*"]
 follow_imports = "skip"
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-# ``scanner`` is a second distribution (zero dependencies, no import of
-# ``voyd``) and is not installed into this venv. Putting it on the path
-# here is what lets ``tests/test_leak_scan.py`` pin its classifier without
-# the two packages depending on each other.
-pythonpath = [".", "scanner"]
 
 [dependency-groups]
 dev = [

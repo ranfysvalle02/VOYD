@@ -69,7 +69,6 @@ from .authority import AuthorityRequired, Anyone, Grants, NotAuthorised
 # ``tests/test_the_public_surface_is_deliberate.py`` a name that is not a
 # promise should be imported from the module that owns it
 # (``.assumptions``), which is what every caller already does.
-from .assumptions import report_assumptions
 from .capabilities import Capabilities, detect
 from .errors import (
     BlastRadius,
@@ -84,8 +83,6 @@ from .errors import (
     UnboundedForgetting,
     UnknownReason,
 )
-from .context import (DIRECT, SOURCE, ContextIndex,
-                      ContextIndexSpec, ContextUse)
 from .expiry import Expiry, ExpirySpec
 from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED,
                         OFF_SCOPE, UNNAMED,
@@ -97,15 +94,8 @@ from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED,
                          Restricted,
                          Admission, AdmissionSpec, Marked, Unrecoverable,
                          quarantined, revoked, why_refused)
-from .jobs import JobQueue, PermanentFailure
 from .custody import Aws, Azure, Ephemeral, Gcp, Kmip, LocalFile
 from .keyring import Keyring, KeyringSpec, Queryable, Sealed
-from .ledger import GENESIS, Ledger, LedgerSpec, canonical, digest
-from .memory import Memory, MemorySpec
-from .policy import PolicyInvalid, compile_policy
-from .perimeter import (DERIVED, INTERNAL, OWNED, SEALED, Perimeter,
-                        PerimeterLog, derived_index,
-                        sink)
 from .model import Model
 from .search import SearchEngine, SearchSpec, cosine
 from .time import UTC, aware, bind, deadline, live, living, now
@@ -140,7 +130,6 @@ class Engine:
         # while proving nothing at the point of write. The type is re-
         # established by the accessor that knows which kind it asked for.
         self._installed: dict[str, dict[str, Any]] = {}
-        self._memory: dict[str, Memory] = {}
         self._models: dict[str, Model] = {}
 
     async def connect(self) -> Capabilities:
@@ -182,20 +171,6 @@ class Engine:
 
     def expiring(self, spec: ExpirySpec) -> None:
         self.expiry.register(spec)
-
-    def memory(self, spec: MemorySpec | None = None) -> Memory:
-        """Declare a memory store: hybrid recall plus decay.
-
-        A composition of two primitives already declared above, not a new
-        subsystem -- which is the point.
-        """
-        spec = spec or MemorySpec()
-        self.searchable(spec.search_spec())
-        self.expiring(spec.expiry_spec())
-        m = self._memory[spec.collection] = Memory(self, spec)
-        return m
-
-    # ---- one call builds everything declared ---------------------------
 
     async def ensure(self, *, search_wait_s: float = 90.0) -> dict:
         """Build every declared schema. Safe to call on every boot.
@@ -275,9 +250,6 @@ class Engine:
             return existing
         return self.use(Keyring(self.db, spec, custody=custody, **kw))
 
-    def queue(self, collection: str, *, when: dict, **kw) -> JobQueue:
-        return self.use(JobQueue(db=self.db, collection=collection, when=when, **kw))
-
     def admission(self, collection: str, *, at_field: str = "expire_at",
                    mark_field: str = "forgotten",
                    tenant: str | None = None,
@@ -318,52 +290,6 @@ class Engine:
                     f"decide whether the boundary is enforced at all")
             return existing
         return self.use(Admission(self.db, spec, engine=self))
-
-    def context_index(self, spec: ContextIndexSpec, *,
-                      best_effort: bool = False) -> ContextIndex:
-        """An index of which consequences were made out of which facts.
-
-        Idempotent per collection, for the reason ``admission()`` and
-        ``ledger()`` are: two handles on one index is two sets of counters,
-        and the one that stops being read is the one reporting how many
-        uses were dropped.
-
-        Attach it to a handle with ``Admission.contextualized_by()``. It is
-        not installed automatically and ``ContextIndexSpec`` has no default
-        retention -- keeping a record of every use is a retention decision
-        and this package does not make it quietly.
-        """
-        existing = self._installed.get("context", {}).get(spec.collection)
-        if existing is not None:
-            if existing.spec != spec:
-                raise ValueError(
-                    f"{spec.collection} is already indexing uses as "
-                    f"{existing.spec.describe()}; refusing to redeclare it "
-                    f"as {spec.describe()}. Two retentions for one "
-                    f"collection is how the shorter one silently stops "
-                    f"being the policy")
-            return existing
-        return self.use(ContextIndex(self.db, spec, best_effort=best_effort))
-
-    def ledger(self, collection: str = "refusals", *,
-               tenant: str | None = None,
-               key: bytes | str | None = None) -> Ledger:
-        """An append-only hash chain of refusal events.
-
-        Idempotent per collection, for the same reason ``admission()`` is: two
-        handles on one chain is two writers who each believe they know where
-        the head is.
-
-        Attach it to a handle with ``Admission.witnessed_by()``. It is not
-        installed automatically, because a ledger is a retention decision --
-        this collection is the one thing here that deliberately never
-        expires, and that is not a default anybody should get by accident.
-        """
-        existing = self._installed.get("ledger", {}).get(collection)
-        if existing is not None:
-            return existing
-        return self.use(Ledger(self.db, LedgerSpec(collection, tenant=tenant),
-                               key=key))
 
     def _refuse_ungoverned_nesting(self) -> None:
         """A nested vector index on a collection that never named its subjects.
@@ -521,13 +447,11 @@ class Engine:
             # stale: a deployment whose assumptions are fresh and one whose
             # assumptions have never been looked at are indistinguishable
             # unless the absence is printed.
-            "assumptions": report_assumptions(),
             "time": {"tz": "UTC", "aware": True},
             "declared": {
                 "models": sorted(self._models),
                 "searchable": sorted(self.search_engine.specs),
                 "expiring": sorted(s.collection for s in self.expiry.specs),
-                "memory": sorted(self._memory),
                 **{kind: sorted(items) for kind, items in self._installed.items()},
             },
         }
@@ -548,19 +472,16 @@ class Engine:
 # thing that happens.
 __all__ = [
     # ---- the engine, and the clock it pins ----
-    "Engine", "PermanentFailure",
-    "now", "deadline", "live", "living", "aware", "UTC", "cosine",
+    "Engine", "now", "deadline", "live", "living", "aware", "UTC", "cosine",
 
     # ---- declaring a collection ----
     "Admission", "AdmissionSpec", "Page", "why_refused",
-    "Memory", "MemorySpec", "JobQueue", "SearchSpec", "ExpirySpec",
+    "SearchSpec", "ExpirySpec",
 
     # ---- reasons a fact may not reach a prompt: the rules you construct ----
     "Deadline", "Marked", "revoked", "quarantined",
     "Clearance", "Restricted", "EmbeddedWith", "Unrecoverable", "Budget",
     "Distinct",
-    "compile_policy",
-
     # ---- and the reasons you read back out of receipts() ----
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
     "NOT_CLEARED", "OFF_SCOPE", "UNRECOVERABLE", "KEY_UNAVAILABLE", "LIFTED",
@@ -568,11 +489,7 @@ __all__ = [
     "REDUNDANT",
 
     # ---- proof ----
-    "Ledger", "LedgerSpec", "GENESIS", "canonical", "digest",
-
     # ---- what was said because of a fact ----
-    "ContextIndex", "ContextIndexSpec", "ContextUse", "DIRECT", "SOURCE",
-
     # ---- encryption, and who holds the key that wraps the keys ----
     "Keyring", "KeyringSpec", "Sealed", "Queryable",
     "Ephemeral", "LocalFile", "Aws", "Azure", "Gcp", "Kmip",
@@ -581,13 +498,9 @@ __all__ = [
     "Grants", "Anyone",
 
     # ---- who else holds a copy ----
-    "Perimeter", "PerimeterLog", "sink", "derived_index",
-    "SEALED", "OWNED", "DERIVED", "INTERNAL",
-
     # ---- what you catch ----
     "ScopeError", "ScopeRequired", "ScopeInvalid", "FilterInvalid",
     "CallerRequired", "Irreversible", "UnknownReason", "BlastRadius",
     "ContextIncomplete",
-    "UnboundedForgetting", "DerivationBroken", "PolicyInvalid",
-    "NotAuthorised", "AuthorityRequired",
+    "UnboundedForgetting", "DerivationBroken", "NotAuthorised", "AuthorityRequired",
 ]
