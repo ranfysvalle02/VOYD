@@ -269,6 +269,8 @@ Each one exists because the thing it checks went wrong at least once.
 | [`nothing_in_the_package_is_orphaned`](../tests/test_nothing_in_the_package_is_orphaned.py) | a definition in `voyd/` with no caller and no allowlist entry giving a reason |
 | [`the_docs_are_not_stale`](../tests/test_the_docs_are_not_stale.py) | a dead link, a renamed anchor, a source path that moved, a stale count of tests or of anything in `COUNTED` |
 | [`every_example_still_runs`](../tests/test_every_example_still_runs.py) | an example that stopped running, or a new one nobody listed as exempt |
+| [`every_documented_command_is_real`](../tests/test_every_documented_command_is_real.py) | a renamed extra, a dropped compose service, a moved script or a rejected flag in any fenced command |
+| [`an_outward_tool_cannot_report_clean_about_nothing`](../tests/test_an_outward_tool_cannot_report_clean_about_nothing.py) | an outward CLI that blesses a path it never read, or whose exit code wraps to success |
 | [`engine_standalone`](../tests/test_engine_standalone.py) | app vocabulary appearing in `voyd/engine/`, including in a comment |
 | [`the_documented_first_run_works`](../tests/test_the_documented_first_run_works.py) | the quickstart's commands drifting from what exists |
 | [`the_engine_pins_its_own_settings`](../tests/test_the_engine_pins_its_own_settings.py) | the engine inheriting the caller's environment or codecs |

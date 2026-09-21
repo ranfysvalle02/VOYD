@@ -94,6 +94,14 @@ dev = [
     # `[project.optional-dependencies]`: `voyd` must not import it, because
     # "these are two layers" is the argument.
     "casbin>=1.17",
+    # `tests/test_every_documented_command_is_real.py` reads the compose files
+    # to check that a documented `docker compose up -d --wait <service>` names
+    # a service that exists. It arrives transitively today (uvicorn[standard]),
+    # which is exactly how `ruff` and `mypy` were undeclared above -- a tool
+    # the suite depends on, present by luck, until the day a transitive
+    # dependency drops it and a test that was never about YAML fails on an
+    # import. Declared, so the suite owns what it uses.
+    "pyyaml>=6.0",
     # The package ships `py.typed`, which tells every downstream type checker
     # that these annotations are load-bearing. That promise was made in the
     # wheel and checked nowhere -- the same failure the ruff comment above

@@ -19,7 +19,17 @@ on prose is a guard somebody deletes. A read through the handle
 `db.<collection>` or `db["<collection>"]`. Reaching past the handle to the raw
 collection is the whole failure this looks for.
 
-Exit code is the number of offenders (0 = clean), so it drops into CI.
+Exit code is the number of offenders -- clamped to 254, because an exit
+status is one byte and 256 offenders exiting 0 would be this guard committing
+the defect it looks for. 255 means the scan could not run at all.
+
+Both of those are corrections, and both arrived late. ``voyd-scan`` learned
+them first -- a missing path must not print a clean bill of health, and a
+count that wraps must not read as success -- and this file, which `PILOT.md`
+tells a piloting team to put in CI, had neither for as long as it existed.
+Two tools, one lesson, learned in one of them. See
+`tests/test_an_outward_tool_cannot_report_clean_about_nothing.py`, which now
+states the property once for both rather than per tool.
 """
 
 from __future__ import annotations
@@ -72,7 +82,28 @@ def raw_reads(source: str, collection: str) -> list[int]:
     return hits
 
 
+# The exit status is one byte. See the module docstring.
+EXIT_MAX = 254
+EXIT_ERROR = 255
+
+
+class ScanError(Exception):
+    """The check could not be performed, as opposed to finding nothing."""
+
+
 def _iter_py(paths: list[Path], allow: list[Path]):
+    """Yield every ``*.py`` under ``paths``, skipping ``allow``.
+
+    Raises ``ScanError`` for a path that does not exist. ``Path.rglob`` on a
+    missing directory yields nothing rather than raising, so without this
+    check ``--collection notes ./ap`` (for ``./app``) printed *clean: no raw
+    reads* and exited 0 -- confidently, and about nothing. In a pilot that is
+    a CI job that goes green forever while the collection it was installed to
+    protect is read raw in a file nobody scanned.
+    """
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        raise ScanError(f"no such path: {', '.join(missing)}")
     allow_resolved = [a.resolve() for a in allow]
     for p in paths:
         files = [p] if p.is_file() else sorted(p.rglob("*.py"))
@@ -96,7 +127,12 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     offenders: list[tuple[Path, int]] = []
-    for f in _iter_py(args.paths, args.allow):
+    try:
+        files = list(_iter_py(args.paths, args.allow))
+    except ScanError as exc:
+        print(f"raw_read_guard: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    for f in files:
         try:
             lines = raw_reads(f.read_text(), args.collection)
         except SyntaxError as exc:
@@ -114,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {f}:{ln}")
     print("\nRoute these through the forgettable() handle, or pass --allow for a "
           "designated audit module. A raw read cannot refuse a forgotten fact.")
-    return len(offenders)
+    return min(len(offenders), EXIT_MAX)
 
 
 if __name__ == "__main__":
