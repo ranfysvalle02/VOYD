@@ -132,17 +132,34 @@ def distinct() -> _Field:
     return _Field("rule", lambda f: Distinct(on=f))
 
 
-# Every collection declared in a loaded policy file, by name.
+# Every collection declared in a loaded policy file, by name, with the
+# policy choices that are not rules -- today that is only what a `delete`
+# on the wire should mean.
 REGISTRY: dict[str, AdmissionSpec] = {}
+OPTIONS: dict[str, dict] = {}
+
+ON_DELETE = ("forward", "revoke")
 
 
-def guard(collection: str, *, lineage_field: str | None = None):
+def guard(collection: str, *, lineage_field: str | None = None,
+          on_delete: str = "forward"):
     """Declare the rules for one collection. Returns the class unchanged.
+
+    ``on_delete="revoke"`` gives a client's ``delete`` the better meaning:
+    the row is marked, unreachable on the next read, still on disk, its
+    deadline pulled in so the reaper collects it. Opt-in, because silently
+    redefining `delete` for an operator who did not ask for it is exactly the
+    surprise this project exists to remove -- and because somebody, somewhere,
+    means it.
 
     Raises at *load* time for a body it cannot compile -- an unknown value, a
     second deadline, no rule at all. A policy file is the one place an error
     must not wait for a query to surface it.
     """
+    if on_delete not in ON_DELETE:
+        raise ValueError(
+            f"{collection}: on_delete={on_delete!r}; expected one of "
+            f"{ON_DELETE}. 'forward' lets a delete really delete")
     def decorate(cls):
         rules, tenant_field, seen = [], None, set()
         for name, value in vars(cls).items():
@@ -169,9 +186,18 @@ def guard(collection: str, *, lineage_field: str | None = None):
                 f"nothing is a slower read, and naming it a guard is worse "
                 f"than not having one")
 
+        if on_delete == "revoke" and not any(
+                getattr(r, "reversible", None) is False for r in rules):
+            raise ValueError(
+                f"{collection}: on_delete='revoke' needs a revocable() field "
+                f"to write the mark into. Without one there is nowhere to "
+                f"record that the fact was forgotten, and the delete would "
+                f"silently do nothing at all")
+
         REGISTRY[collection] = AdmissionSpec(
             collection, rules=tuple(rules), tenant=tenant_field,
             lineage_field=lineage_field)
+        OPTIONS[collection] = {"on_delete": on_delete}
         return cls
     return decorate
 
@@ -185,6 +211,7 @@ def load(path: str) -> dict[str, AdmissionSpec]:
     """
     import runpy
     REGISTRY.clear()
+    OPTIONS.clear()
     runpy.run_path(path, run_name="voydfile")
     if not REGISTRY:
         raise ValueError(

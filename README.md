@@ -26,7 +26,7 @@ Declare the rules once, in a file that is not your application:
 # voydfile.py
 from voyd import guard, deadline, revocable, tenant
 
-@guard("notes")
+@guard("notes", on_delete="revoke")
 class Notes:
     expire_at = deadline()
     forgotten = revocable()
@@ -41,17 +41,56 @@ python tools/voyd_wire.py --config voydfile.py --target localhost:27017
 
 Then change one connection string. **That is the whole integration.** No
 import is added to your application, no handle replaces a collection, no read
-path is rewritten, and nobody has to remember anything:
+path is rewritten, and nobody has to remember anything.
+
+### Reads refuse
 
 ```
-direct  (27017): ['acme expired', 'acme live', 'acme revoked', 'globex secret']
-proxied (27099): ['acme live']
-        voyd: notes: refused 2 of 3  {'deadline': 1, 'revoked': 1}
+direct, no boundary   5 documents
+through the boundary  ['a note somebody will delete', 'the fault code is P0301']
+                      the expired and the revoked are refused, and
+                      globex was never in scope
 ```
 
 That is a plain `pymongo` client with no VOYD import in it. It would be the
 Node driver, or Compass, or a notebook — they all send the same bytes. The
 boundary binds the *connection*, so there is nothing to reach past.
+
+### Writes forget
+
+And the verb already in everybody's code gets the better meaning:
+
+```
+  db.notes.delete_one({'text': 'a note somebody will delete'})
+    -> deleted_count=1   (the driver is satisfied)
+
+  reachable now         ['the fault code is P0301']
+  rows on disk          5   <- nothing was destroyed
+  the mark              'deleted via voyd-wire' at 2026-09-21T05:59:17
+  the deadline          set, so the reaper collects the bytes
+                        on the schedule they already had
+```
+
+Delete is a wish — eventually, best effort, unprovable. Refuse is a contract.
+They asked for the wish and got the contract, and the bytes still go, on the
+deadline they already had. A credential you need out of prompts *now* and on
+disk *for the investigation* are contradictory requirements for `DELETE` and
+the same requirement for this.
+
+`on_delete="revoke"` is opt-in, because silently redefining `delete` for an
+operator who did not ask is the kind of surprise this project exists to
+remove — and because somebody, somewhere, means it. Left alone, a delete
+really deletes. Declaring it without a `revocable()` field to write the mark
+into is refused at load: there would be nowhere to record that the fact was
+forgotten, and the delete would quietly do nothing.
+
+The update it emits is the same pipeline `Admission.revoke()` writes — the
+literal mark, the deadline moved *earlier only*, the derived encodings nulled
+— so a fact forgotten through the wire and one forgotten through the library
+are the same document afterwards. Two spellings producing different rows would
+be the drift this whole package is about.
+
+Run it: `uv run python examples/wire.py`.
 
 The proxy holds no database connection of its own. The per-document check is
 pure — handed documents, returns the ones a prompt may see — which is what
@@ -120,9 +159,13 @@ written.
 
 Known gaps, stated rather than discovered:
 
-- **`revoke()` is still Python.** The read path is reachable from any driver
-  in any language; the write verb that changes reachability is not.
 - The proxy is a demonstration: no TLS termination, no pooling, one thread per
-  direction, compression negotiated away in the handshake.
+  direction, compression negotiated away in the handshake so replies arrive
+  readable.
+- `on_delete="revoke"` covers `delete`. An `update` that overwrites a fact is
+  still an ordinary update, and a `findAndModify` delete is not intercepted.
+- **Automatic encryption and server-side embedding are library-only.** Both
+  survive the trim and neither is reachable through the wire: decryption needs
+  the application's key context, which a proxy deliberately does not hold.
 
 MIT.

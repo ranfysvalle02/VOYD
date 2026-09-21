@@ -50,8 +50,9 @@ try:
 except ImportError:  # pragma: no cover - the one dependency, and it is pymongo's
     sys.exit("pip install pymongo   (for the bson library)")
 
-from voyd.declare import load
+from voyd.declare import OPTIONS, load
 from voyd.engine import Deadline, revoked
+from voyd.engine.time import now
 from voyd.engine.admission import Admission, AdmissionSpec
 
 OP_MSG = 2013
@@ -73,12 +74,14 @@ class Guard:
     that makes it movable to a wire in the first place.
     """
 
-    def __init__(self, spec: AdmissionSpec):
+    def __init__(self, spec: AdmissionSpec, *, on_delete: str = "forward"):
         self.collection = spec.collection
         self.spec = spec
+        self.on_delete = on_delete
         self.handle = Admission(None, spec)
         self.refused = 0
         self.admitted = 0
+        self.revoked = 0
 
     @classmethod
     def defaults(cls, collection: str, *, at_field: str, mark_field: str):
@@ -166,6 +169,58 @@ def uncompress_message(raw: bytes) -> bytes | None:
                        original_op) + body
 
 
+def decode_sections(raw: bytes) -> tuple[int, dict, str | None, list] | None:
+    """Flags, the body document, and the document sequence beside it.
+
+    Write commands put their payload in a **kind-1 section**: the body says
+    ``{"delete": "notes", ...}`` and a separate section identified as
+    ``deletes`` carries ``[{"q": ..., "limit": 1}]``. Reads do not, which is
+    why the read path above only ever needed kind 0 -- and why rewriting a
+    write needs this.
+    """
+    payload = raw[16:]
+    if len(payload) < 5:
+        return None
+    flags = struct.unpack("<I", payload[:4])[0]
+    end = len(payload) - (4 if flags & FLAG_CHECKSUM else 0)
+    i, body, ident, docs = 4, None, None, []
+    try:
+        while i < end:
+            kind = payload[i]
+            i += 1
+            size = struct.unpack("<i", payload[i:i + 4])[0]
+            if kind == 0:
+                body = bson.decode(payload[i:i + size])
+                i += size
+            elif kind == 1:
+                seg = payload[i + 4:i + size]
+                nul = seg.index(b"\x00")
+                ident = seg[:nul].decode()
+                rest, j = seg[nul + 1:], 0
+                while j < len(rest):
+                    n = struct.unpack("<i", rest[j:j + 4])[0]
+                    docs.append(bson.decode(rest[j:j + n]))
+                    j += n
+                i += size
+            else:
+                return None
+    except Exception:
+        return None
+    return (flags, body, ident, docs) if body is not None else None
+
+
+def encode_sections(req_id: int, resp_to: int, flags: int, body: dict,
+                    ident: str | None = None,
+                    docs: list | None = None) -> bytes:
+    payload = struct.pack("<I", flags & ~FLAG_CHECKSUM)
+    payload += b"\x00" + bson.encode(body)
+    if ident is not None:
+        blob = ident.encode() + b"\x00" + b"".join(bson.encode(d) for d in (docs or []))
+        payload += b"\x01" + struct.pack("<i", 4 + len(blob)) + blob
+    return struct.pack("<iiiI", 16 + len(payload), req_id, resp_to,
+                       OP_MSG) + payload
+
+
 def decode_op_msg(raw: bytes) -> tuple[int, dict] | None:
     """The flags and the body document of a kind-0 OP_MSG.
 
@@ -208,6 +263,96 @@ def _collection_of(reply: dict) -> str | None:
     if not isinstance(ns, str) or "." not in ns:
         return None
     return ns.split(".", 1)[1]
+
+
+def revoke_instead_of_delete(raw: bytes, req_id: int, resp_to: int,
+                             guard: Guard, verbose: bool) -> bytes | None:
+    """Turn a client's ``delete`` into the revocation it should have been.
+
+    This is the half of the story the read path could not tell. A boundary
+    that refuses forgotten facts is worth little if the only way to forget
+    one is to import a library -- so the verb a caller already has is given
+    the better meaning:
+
+        db.notes.deleteOne({"_id": x})   # what they wrote
+        -> the row is marked, unreachable on the next read, still on disk,
+           and its deadline is pulled in so the reaper collects it
+
+    Which is the whole thesis applied to somebody else's code without
+    editing it. Delete is a wish -- eventually, best effort, unprovable.
+    Refuse is a contract. They asked for the wish and got the contract, and
+    the bytes still go, on the deadline they already had.
+
+    **Only when the policy file says so.** `@guard(..., on_delete="revoke")`
+    is opt-in because silently redefining `delete` for an operator who did
+    not ask is precisely the kind of surprise this project exists to remove.
+    Left alone, a delete is forwarded and really deletes.
+
+    The update emitted here is the same pipeline ``Admission.revoke()``
+    writes -- the literal mark, the deadline moved *earlier only*, and the
+    derived encodings nulled -- so a fact forgotten through the wire and one
+    forgotten through the library are the same document afterwards. Two
+    spellings that produced different rows would be the drift this whole
+    package is about.
+    """
+    decoded = decode_sections(raw)
+    if decoded is None:
+        return None
+    flags, body, ident, docs = decoded
+    if body.get("delete") != guard.collection or ident != "deletes":
+        return None
+
+    spec = guard.spec
+    mark_field = next((r.field for r in spec.rules
+                       if getattr(r, "reversible", None) is False), None)
+    if mark_field is None:
+        return None          # nothing to mark with; forward the real delete
+
+    stamp = now()
+    at = spec.at_field
+    updates = []
+    for d in docs:
+        updates.append({
+            "q": d.get("q", {}),
+            # `limit: 1` means deleteOne; anything else is deleteMany.
+            "multi": d.get("limit", 0) == 0,
+            "u": [{"$set": {
+                mark_field: {"$literal": {"at": stamp,
+                                          "reason": "deleted via voyd-wire"}},
+                # A missing deadline is a *pinned* row, not an early one, so
+                # the two cases are separated rather than folded together --
+                # `$min` against null would pin an erased fact forever.
+                at: {"$cond": [{"$eq": [{"$type": f"${at}"}, "date"]},
+                               {"$min": [f"${at}", stamp]}, stamp]},
+                **{name: None for name in spec.derived_fields},
+            }}],
+        })
+
+    new_body = {("update" if k == "delete" else k): v for k, v in body.items()}
+    if verbose:
+        print(f"  voyd: {guard.collection}: delete -> revoke "
+              f"({len(updates)} clause(s)); the rows stay on disk",
+              flush=True)
+    guard.revoked += len(updates)
+    return encode_sections(req_id, resp_to, flags, new_body, "updates", updates)
+
+
+def delete_reply(raw: bytes, req_id: int, resp_to: int) -> bytes:
+    """Make an ``update`` reply look like the ``delete`` reply it answers.
+
+    The driver issued a delete and is entitled to a delete's shape. An
+    update reply carries ``nModified`` beside ``n``; a delete's does not, and
+    a client that sees a field its command never produces is being told
+    something true about the proxy and confusing about its own call.
+    """
+    decoded = decode_op_msg(raw)
+    if decoded is None:
+        return raw
+    flags, reply = decoded
+    if "nModified" not in reply:
+        return raw
+    reply = {k: v for k, v in reply.items() if k != "nModified"}
+    return encode_op_msg(req_id, resp_to, flags, reply)
 
 
 def strip_compression(raw: bytes, req_id: int, resp_to: int) -> bytes:
@@ -272,7 +417,15 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
 
 
 def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
-         guards: dict[str, Guard], verbose: bool) -> None:
+         guards: dict[str, Guard], verbose: bool,
+         rewritten: set[int], lock: threading.Lock) -> None:
+    """One direction of one connection.
+
+    ``rewritten`` is shared between the two directions and is the only state
+    they share: a request id whose ``delete`` was turned into an ``update``
+    has to be recognised again when its reply comes back the other way. It is
+    per-connection, because request ids are.
+    """
     try:
         while True:
             raw, _len, req_id, resp_to, opcode = read_message(src)
@@ -288,8 +441,28 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                     dst.sendall(raw)
                     continue
                 raw, opcode = expanded, OP_MSG
-            if opcode == OP_MSG:
-                raw = (strip_compression(raw, req_id, resp_to) if to_server
+            if opcode == OP_MSG and to_server:
+                raw = strip_compression(raw, req_id, resp_to)
+                # `decode_sections`, not `decode_op_msg`: a write command
+                # carries a kind-1 document sequence after its body, and the
+                # kind-0-only reader treats those trailing bytes as part of
+                # the body's BSON and fails. It failed silently, which meant
+                # every delete was forwarded and the rewrite below looked
+                # like it was not implemented.
+                head = decode_sections(raw)
+                target = guards.get(head[1].get("delete")) if head else None
+                if target is not None and target.on_delete == "revoke":
+                    swapped = revoke_instead_of_delete(
+                        raw, req_id, resp_to, target, verbose)
+                    if swapped is not None:
+                        raw = swapped
+                        with lock:
+                            rewritten.add(req_id)
+            elif opcode == OP_MSG:
+                with lock:
+                    was_delete = resp_to in rewritten
+                    rewritten.discard(resp_to)
+                raw = (delete_reply(raw, req_id, resp_to) if was_delete
                        else enforce(raw, req_id, resp_to, guards, verbose))
             dst.sendall(raw)
     except (ConnectionError, OSError):
@@ -333,11 +506,14 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
             print(f"voyd-wire: cannot reach {target}: {exc}")
             client.close()
             continue
+        rewritten: set[int] = set()
+        lock = threading.Lock()
         for src, dst, to_server in ((client, upstream, True),
                                     (upstream, client, False)):
             threading.Thread(target=pump, args=(src, dst),
                              kwargs={"to_server": to_server, "guards": guards,
-                                     "verbose": verbose},
+                                     "verbose": verbose,
+                                     "rewritten": rewritten, "lock": lock},
                              daemon=True).start()
 
 
@@ -371,7 +547,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.config:
         try:
             for collection, spec in load(args.config).items():
-                guards[collection] = Guard(spec)
+                guards[collection] = Guard(
+                    spec, **OPTIONS.get(collection, {}))
         except Exception as exc:
             # A policy file that is wrong must fail here, loudly, rather than
             # at the first query. Starting a boundary from a broken
