@@ -98,44 +98,51 @@ def test_a_collection_with_no_derived_fields_is_left_alone():
     assert set(stage) == {"forgotten", "expire_at"}
 
 
-# --- through the library, against a real mongod ----------------------------
+# --- through the admission handle, against a real mongod -------------------
 
 @pytest.fixture
-async def engine():
+async def adb():
+    """A throwaway database, async. No handle -- the write path never
+    needed one. Named apart from the sync `db` the wire tests above use,
+    because this module drives both doors and one name for two clients is
+    how a coroutine ends up never awaited."""
     import uuid
 
     from pymongo import AsyncMongoClient
-
-    from voyd import Engine
 
     from .conftest import MONGO_URI
 
     client = AsyncMongoClient(MONGO_URI)
     name = f"voyd_test_derived_{uuid.uuid4().hex[:8]}"
-    eng = Engine(client, client[name])
-    await eng.connect()
     try:
-        yield eng
+        yield client[name]
     finally:
         await client.drop_database(name)
         await client.close()
 
 
-async def test_revoke_through_the_library_destroys_the_vector(engine):
+def _notes(adb):
+    from voyd.engine import Deadline, revoked
+    from voyd.engine.admission import Admission, AdmissionSpec
+
+    return Admission(adb, AdmissionSpec(
+        "notes", rules=(Deadline(), revoked())).with_defaults())
+
+
+async def test_revoke_through_the_library_destroys_the_vector(adb):
     """The other door, and the one whose comment points at a function that
     does not exist (`marks.py` says "see `_destroy_derived`"; there is no
     such name in the package). The behaviour is real even though the
     signpost is not, and this is what pins it."""
-    notes = engine.model("notes").forgettable()
-    await engine.ensure(search_wait_s=0)
-    await engine.db.notes.insert_many([
+    notes = _notes(adb)
+    await adb.notes.insert_many([
         {"text": "keep", "embedding": VEC},
         {"text": "forget", "embedding": VEC},
     ])
 
     await notes.revoke({"text": "forget"}, reason="erasure request")
 
-    rows = {d["text"]: d async for d in engine.db.notes.find({})}
+    rows = {d["text"]: d async for d in adb.notes.find({})}
     assert rows["forget"]["embedding"] is None, (
         "revoked through the library and the vector survived -- the same "
         "erasure through the wire destroys it, which is drift between two "
@@ -143,23 +150,22 @@ async def test_revoke_through_the_library_destroys_the_vector(engine):
     assert rows["keep"]["embedding"] == VEC
 
 
-async def test_both_doors_leave_the_same_row(engine):
+async def test_both_doors_leave_the_same_row(adb):
     """The drift check with teeth. The wire builds its own update and the
     library builds another; this asserts the row they leave is the same
     shape, which is what the wire's docstring already promises."""
     import voyd_wire as w
 
-    notes = engine.model("notes").forgettable()
-    await engine.ensure(search_wait_s=0)
-    await engine.db.notes.insert_one({"_id": 1, "text": "x", "embedding": VEC})
+    notes = _notes(adb)
+    await adb.notes.insert_one({"_id": 1, "text": "x", "embedding": VEC})
     await notes.revoke({"_id": 1}, reason="erasure request")
-    by_library = await engine.db.notes.find_one({"_id": 1})
+    by_library = await adb.notes.find_one({"_id": 1})
 
-    await engine.db.notes.insert_one({"_id": 2, "text": "x", "embedding": VEC})
+    await adb.notes.insert_one({"_id": 2, "text": "x", "embedding": VEC})
     spec = notes.spec
-    await engine.db.notes.update_one(
+    await adb.notes.update_one(
         {"_id": 2}, w._forget_pipeline(spec, "erasure request"))
-    by_wire = await engine.db.notes.find_one({"_id": 2})
+    by_wire = await adb.notes.find_one({"_id": 2})
 
     assert set(by_library) == set(by_wire), (
         f"the two erasure paths write different fields: "

@@ -2,7 +2,7 @@
 
 Refusal answers *may this fact reach a prompt* on this read path. It does not
 answer *and your backups?* -- a restored snapshot does not run it, and neither
-does a DBA with a shell. `engine.keyring` is the answer to that one: a key per
+does a DBA with a shell. `keyring.py` is the answer to that one: a key per
 scope, ciphertext at rest, and the scope's deadline destroying the key so
 every copy becomes unreadable at once.
 
@@ -46,20 +46,32 @@ async def sealed():
     """A sealed, tenant-scoped collection with two patients' rows."""
     from pymongo import AsyncMongoClient
 
-    from voyd import Engine
+    from voyd.engine import Deadline, revoked
+    from voyd.engine.admission import Admission, AdmissionSpec
     from voyd.engine.custody import Ephemeral
+    from voyd.engine.keyring import Keyring, KeyringSpec, Sealed, Sealing
 
     client = AsyncMongoClient(MONGO_URI)
     name = f"voyd_test_seal_{uuid.uuid4().hex[:8]}"
-    engine = Engine(client, client[name])
-    await engine.connect()
+    db = client[name]
     try:
-        notes = engine.model("notes", tenant="patient").sealed(
-            "text", custody=Ephemeral())
-        await engine.ensure(search_wait_s=0)
+        # Assembled from the parts rather than through `Engine`. Sealing is
+        # a keyring plus a spec plus a trait installed on the admission
+        # handle, and `model(...).sealed(...)` was three lines of sugar over
+        # exactly this. The sugar is the front door being removed; the
+        # guarantee underneath it is what these tests are about.
+        keyring = Keyring(db, KeyringSpec(
+            pointer_field="patient",
+            protect={"notes": Sealed(("text",))}),
+            custody=Ephemeral(), uri=MONGO_URI)
+        await keyring.ensure()
+        notes = Admission(db, AdmissionSpec(
+            "notes", tenant="patient",
+            rules=(Deadline(), revoked())).with_defaults()).sealed_by(
+                Sealing(keyring, ("text",), "patient"))
         await notes.seal([{"patient": "alice", "text": SECRET},
                           {"patient": "bob", "text": KEPT}])
-        yield engine, notes
+        yield db, notes
     finally:
         await client.drop_database(name)
         await client.close()
@@ -67,8 +79,8 @@ async def sealed():
 
 async def test_the_plaintext_is_not_on_disk(sealed):
     """Read the way a DBA, a replica and a backup all read: without us."""
-    engine, _ = sealed
-    raw = await engine.db.notes.find_one({"patient": "alice"})
+    db, _ = sealed
+    raw = await db.notes.find_one({"patient": "alice"})
     assert raw is not None
     assert not isinstance(raw["text"], str), "the field is still a string"
     assert SECRET.encode() not in bytes(raw["text"]), (
@@ -110,10 +122,10 @@ async def test_the_row_survives_the_shred(sealed):
     """Unreachable first, erased second. The ciphertext stays until the
     deadline collects it -- destroying the key is what makes the bytes
     worthless everywhere at once, including where this process cannot reach."""
-    engine, notes = sealed
+    db, notes = sealed
     await notes.shred("alice")
 
-    assert await engine.db.notes.count_documents({"patient": "alice"}) == 1
+    assert await db.notes.count_documents({"patient": "alice"}) == 1
 
 
 async def test_custody_says_what_it_is_rather_than_implying_it(sealed):
