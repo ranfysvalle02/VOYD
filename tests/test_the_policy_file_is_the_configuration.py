@@ -39,7 +39,8 @@ def test_a_policy_file_compiles_to_the_same_objects_the_library_uses(tmp_path):
     assert spec.rules[1].field == "forgotten"
     assert spec.rules[1].reversible is False, "a revocation is not a hypothesis"
     assert OPTIONS["notes"] == {"on_delete": "revoke", "sealed": (),
-                                "scope_field": "tenant_id"}, (
+                                "scope_field": "tenant_id",
+                                "auto_embed": {}}, (
         "OPTIONS carries the policy choices that are not rules; asserting "
         "the whole dict rather than one key is deliberate, so a new one "
         "cannot be added without a reader of this file finding out")
@@ -50,7 +51,8 @@ def test_the_whole_vocabulary_compiles(tmp_path):
     declaration that raises is worse than an undocumented one."""
     spec = load(write(tmp_path, """
 from voyd import (guard, deadline, revocable, holdable, tenant,
-                  restricted_to, embedded_with, budget, distinct, sealed)
+                  restricted_to, embedded_with, budget, distinct, sealed,
+                  auto_embed)
 
 @guard("everything")
 class E:
@@ -63,15 +65,19 @@ class E:
     tokens     = budget(8000)
     chunk      = distinct()
     secret     = sealed()
+    body       = auto_embed("voyage-3")
 """))["everything"]
     assert spec.tenant == "tenant_id"
     assert [type(r).__name__ for r in spec.rules] == [
         "Deadline", "Marked", "Marked", "Restricted", "EmbeddedWith",
         "Budget", "Distinct", "Unrecoverable"], (
-        "eight rules; tenant is a scope, not a rule. sealed() contributes "
-        "an Unrecoverable so a ciphertext field that reaches a read path "
-        "which never decrypted it is refused by name rather than "
-        "serialised into a prompt as a Binary pretending to be text")
+        "eight rules; tenant is a scope, not a rule, and auto_embed() is a "
+        "statement about the index rather than a per-document verdict. "
+        "sealed() contributes an Unrecoverable so a ciphertext field that "
+        "reaches a read path which never decrypted it is refused by name "
+        "rather than serialised into a prompt as a Binary pretending to "
+        "be text")
+    assert OPTIONS["everything"]["auto_embed"] == {"body": "voyage-3"}
 
 
 @pytest.mark.parametrize("body,why", [

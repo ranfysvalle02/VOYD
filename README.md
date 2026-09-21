@@ -171,6 +171,7 @@ one place: [`--key-vault`](#the-erasure-refusal-cannot-perform).
 | `budget(n)` | refuse once the prompt has no room left |
 | `distinct()` | refuse a repeat of content already on the page |
 | `sealed()` | ciphertext at rest, under a key scoped to the tenant |
+| `auto_embed(model)` | the *server* embeds this text; refuse a client's own vector |
 
 `budget(n)` and `distinct()` are **set-relative**: they refuse a document
 because of the *other* documents on the page, so the same document is
@@ -223,10 +224,93 @@ await docs.revoke({"_id": x}, reason="credential leaked")
 `revoke()` makes a fact unreachable on the next read while its row is still on
 disk. Unreachable first, erased second — the reverse order is the bug.
 
-One thing is still library-only: **server-side embedding** (`auto_embed`, so
-the index owns the vector and a client-side embedder cannot drift from it).
-Encryption used to be on that list and is not any more — it is
-[the next section](#the-erasure-refusal-cannot-perform).
+Encryption used to be library-only and is not any more — it is
+[two sections down](#the-erasure-refusal-cannot-perform). What is still
+library-only is **creating** the search index; declaring who owns the
+encoding, and refusing the query that goes around it, is on the wire and is
+[the next section](#the-server-owns-the-encoding).
+
+## The server owns the encoding
+
+`embedded_with(model)` refuses a **document** whose stored vector came from
+the wrong model, and the measurement behind it is the reason this matters at
+all — two generations of one vendor's model, same width, same text:
+
+```
+  identical text, old model vs new       cosine -0.053
+  unrelated text, both on the new one    cosine +0.301
+```
+
+A model swap does not degrade ranking, it **inverts** it: unrelated text
+scores five times higher than the document you were looking for. No error,
+no log, a healthy-looking `describe()`.
+
+Nothing refused the **query**, and that is the same failure one level up.
+`auto_embed` takes the embedder out of the application entirely — the index
+holds the text, `mongot` embeds it on write, and embeds the query with the
+same model at read time. Nothing in your process computes a vector, so
+nothing in your process can drift:
+
+```python
+@guard("notes", on_delete="revoke")
+class Notes:
+    expire_at = deadline()
+    forgotten = revocable()
+    tenant_id = tenant()
+    body      = auto_embed("voyage-3")     # mongot embeds this, both ways
+```
+
+A client that still sends its own `queryVector` has put the embedder back,
+through a driver that never read that file — which is precisely the caller
+this boundary exists for. So it is refused by name rather than ranked:
+
+```
+  db.notes.aggregate([{"$vectorSearch": {"queryVector": [...]}}])
+
+  -> voyd-wire refuses a client-supplied queryVector on 'notes': this
+     collection declares auto_embed='voyage-3', so the index holds text
+     the server embedded and a vector computed anywhere else is a hit in
+     a different space. Comparing them does not fail, it returns a
+     confident score for the wrong documents. Send $vectorSearch.query
+     with the query text instead.
+```
+
+**An error, because the alternative is a full page of plausible nonsense.**
+A refusal is recoverable and names the form that works; a silently wrong
+ranking hands the caller ten well-scored documents that have nothing to do
+with the question, and nothing anywhere says so.
+
+This one is **pure** — a `$vectorSearch` body and a dict decide it, with no
+database, no Atlas and no index. Which is why almost all of
+`tests/test_the_server_owns_the_encoding.py` runs in CI's no-database step,
+beside the codec and the boundary itself. Run it:
+`uv run python examples/embed.py`.
+
+What is *not* on the wire is **creating** the index. A policy file is enough
+to refuse the wrong query; it is not enough to make the `autoEmbed` index
+exist, which is still the library's job and needs a real cluster. So the
+declaration and the index can disagree, and nothing here reads Atlas back to
+check — [LIMITS.md](LIMITS.md) §5.
+
+### Two declarations of one thing have to agree
+
+`embedded_with("voyage-3")` beside `auto_embed("voyage-3.5")` is refused when
+the file is **loaded**. One says *refuse any vector not from voyage-3*; the
+other says *the server will produce them with voyage-3.5*. Every document the
+index embedded would be refused by the rule sitting next to it, and the
+collection would read as empty — which is the kind of wrong that looks like a
+data problem for a week.
+
+And a field cannot be both `sealed()` and `auto_embed()`, because the server
+cannot be denied a field and also asked to embed it: it would either embed
+the ciphertext (vectors of noise, and a relevance failure nobody attributes)
+or be handed the plaintext you sealed it against. `Engine` checks that at
+connect time, comparing a keyring against a search spec. **In a policy file
+it cannot be written at all** — the path *is* the attribute name, so Python
+binds it once and the second declaration wins. That is one more answer to
+"why a class body rather than a dict": a shape where a contradiction has
+nowhere to live beats a shape that detects it. Sealing one field and
+embedding a *different* one is fine, and is allowed.
 
 ## The erasure refusal cannot perform
 
@@ -586,7 +670,7 @@ of them was caught by the suite going red — they came from running it. One
 team, two weeks, their own corpus is worth more than anything else that
 could be built next.
 
-The suite is **272 tests**, and it is the foundation rather than a census —
+The suite is **287 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie:
 
@@ -604,6 +688,7 @@ above it a lie:
 | it is operable | TLS termination, a capped message size, keepalive, a draining `SIGTERM` |
 | the suite does not leak databases | a stale search index starves the next index build |
 | a client cannot walk past it | `hello` is rewritten, so the guarantee is not a connection-string option somebody remembers |
+| **the server owns the encoding** | a client's own `queryVector` is refused by name, with no database anywhere near the decision |
 | **the server embeds and refusal still holds** | against a **live Atlas cluster**, because this one cannot run anywhere else |
 
 That last row is worth its ninety seconds. Atlas Local registers no embedding
@@ -615,7 +700,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 272 tests, 96 seconds -- the inner loop
+pytest              # 287 tests, 96 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 
@@ -627,5 +712,5 @@ obvious.
 
 The suite is checked against sabotage rather than trusted: disabling the
 delete rewrite, the tenant egress check, the tenant *shape* check, cascade,
-refusal itself, wire-side encryption, or the revocation that must precede a
-shred each turns it red.
+refusal itself, wire-side encryption, the revocation that must precede a
+shred, or the refusal of a client-supplied query vector each turns it red.

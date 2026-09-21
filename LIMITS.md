@@ -13,7 +13,7 @@ yet. They are marked.
 
 ## 1. The one that actually matters
 
-**Nobody has used this but its author.** 99 commits, one contributor, zero
+**Nobody has used this but its author.** 100 commits, one contributor, zero
 external users, zero pilots. Every claim in this repository is verified by
 somebody who also wrote the claim.
 
@@ -553,7 +553,7 @@ documents?"
 
 ## 4. Coverage
 
-276 tests, ~5,700 lines, against 8,152 lines of `voyd/` and 5,304 of
+291 tests, ~6,043 lines, against 8,152 lines of `voyd/` and 5,304 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -613,7 +613,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (272 tests, ~95 seconds) with
+**Consider:** the suite is fast by default (287 tests, ~96 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
@@ -780,6 +780,28 @@ so the key still dies, and the revocation that should have preceded it is
 skipped. **Consider:** that is fail-open on the *window*, not on the erasure.
 A regex or `$nin` delete against the vault would erase correctly and leave
 the minute-long window open, and nothing currently refuses it.
+
+**The boundary declares who embeds; it does not create the index.** A
+policy file naming `auto_embed("voyage-3")` is enough for the wire to refuse
+a client-supplied `queryVector` on that collection -- a decision taken from
+the request, with no connection and no round trip. It is *not* enough to
+make the Atlas Vector Search index exist with `type: autoEmbed`; that is
+still `SearchEngine.ensure_indexes`, which means the library, which means
+somebody's Python process. **Consider:** the boundary could create it at
+startup, and `--key-vault` has already established that a flag may buy a
+connection of its own if it says so. The reason it does not yet is that
+index creation is a schema change against a cluster the proxy does not own,
+and getting it wrong is slower to notice than a refused query -- a wrong
+index definition is a relevance problem, which `LIMITS.md` already calls
+the hardest kind to attribute. Undecided.
+
+What follows from that gap is worth stating plainly: **the declaration and
+the index can disagree.** A voydfile saying `auto_embed("voyage-3")` against
+an index actually built with `voyage-3.5`, or with no `autoEmbed` field at
+all, is not detected. The wire would refuse client vectors -- correctly, by
+its own declaration -- for an index that needed one. Two declarations *in
+the policy file* must agree and are checked at load; the third party is
+Atlas, and nothing here reads it back.
 
 **Queryable Encryption is library-only and stays that way for now.** The
 wire seals with CSFLE, which is the mode whose `keyId` may be a JSON pointer

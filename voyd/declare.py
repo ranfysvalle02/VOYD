@@ -133,6 +133,34 @@ def distinct() -> _Field:
     return _Field("rule", lambda f: Distinct(on=f))
 
 
+def auto_embed(model: str) -> _Field:
+    """This field is text the *server* embeds, with the model named here.
+
+    The other half of `embedded_with`. That one refuses a **document** whose
+    vector came from the wrong model; this one removes the way a vector
+    comes to be wrong in the first place, by taking the embedder out of the
+    application entirely. The index holds the text, mongot embeds it on
+    write, and mongot embeds the query with the same model at read time.
+    Nothing in your process ever computes a vector, so nothing in your
+    process can drift from the index.
+
+    **Declaring it here also refuses the query that would defeat it.** A
+    client sending its own ``queryVector`` against a collection the
+    deployment declared server-embedded is the exact drift this prevents,
+    arriving through a driver that never heard of the declaration -- and
+    comparing a vector to an index built by a different model does not
+    fail, it returns a number between -1 and 1, which is the whole problem.
+    The boundary refuses it by name. See ``tools/voyd_wire.py``.
+
+    Declared, not probed. A deployment that cannot do server-side embedding
+    says so at index creation and the library falls back to a client-supplied
+    vector, loudly -- so adopting this is safe before every deployment
+    supports it. What is *not* safe is adopting it and then quietly sending
+    client vectors anyway, which is what the wire-side refusal is for.
+    """
+    return _Field("auto_embed", args=(model,))
+
+
 def sealed() -> _Field:
     """This field is ciphertext at rest, under a key scoped to the tenant.
 
@@ -199,6 +227,7 @@ def guard(collection: str, *, lineage_field: str | None = None,
     def decorate(cls):
         rules, tenant_field, seen = [], None, set()
         sealed_fields: list[str] = []
+        embedded: dict[str, str] = {}
         for name, value in vars(cls).items():
             if name.startswith("__") or not isinstance(value, _Field):
                 continue
@@ -215,9 +244,50 @@ def guard(collection: str, *, lineage_field: str | None = None,
                     f"drift this exists to remove")
             if value.kind == "sealed":
                 sealed_fields.append(name)
+            if value.kind == "auto_embed":
+                embedded[name] = value.args[0]
+                continue        # a declaration about the index, not a rule
             seen.add(value.kind)
             assert value.build is not None
             rules.append(value.build(name))
+
+        # A field cannot be both hidden from the server and embedded by
+        # it -- and in this form that contradiction cannot be *written*,
+        # which is worth a note because the library needs a runtime check
+        # for exactly the same thing.
+        #
+        # `Engine._refuse_sealed_autoembed` compares a keyring's sealed
+        # fields against a search spec's `text_paths`. Those are two
+        # objects naming one path, so they can disagree, and it raises at
+        # connect time when they do. Here both come from one class body and
+        # the path *is* the attribute name, so `text = sealed()` followed
+        # by `text = auto_embed(...)` is not a conflict a reader can
+        # express -- Python binds the name once and the second wins.
+        #
+        # A guard here would therefore be code that can never run, which
+        # this file has no business shipping. It is instead one more answer
+        # to "why a class body rather than a dict", up in the module
+        # docstring: a shape in which a whole class of contradiction has
+        # nowhere to live beats a shape that detects it.
+        #
+        # What is *not* closed: sealing `text` here while an Atlas index
+        # declared somewhere else auto-embeds `text`. No policy file can
+        # see that, and the wire boundary does not create indexes. See
+        # LIMITS.md section 5.
+
+        # Two declarations naming the same thing have to agree about it.
+        for field, rule in ((r.field, r) for r in rules
+                            if type(r).__name__ == "EmbeddedWith"):
+            for path, model in embedded.items():
+                if rule.model != model:
+                    raise ValueError(
+                        f"{collection}: embedded_with({rule.model!r}) on "
+                        f"{field!r} and auto_embed({model!r}) on {path!r}. "
+                        f"One says refuse any vector not from "
+                        f"{rule.model!r}; the other says the server will "
+                        f"produce them with {model!r}. Every document the "
+                        f"index embeds would be refused by the rule beside "
+                        f"it, and the collection would read as empty")
 
         if sealed_fields and tenant_field is None:
             raise ValueError(
@@ -248,7 +318,8 @@ def guard(collection: str, *, lineage_field: str | None = None,
             lineage_field=lineage_field)
         OPTIONS[collection] = {"on_delete": on_delete,
                                "sealed": tuple(sealed_fields),
-                               "scope_field": tenant_field}
+                               "scope_field": tenant_field,
+                               "auto_embed": dict(embedded)}
         return cls
     return decorate
 

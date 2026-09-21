@@ -564,6 +564,78 @@ def writes_elsewhere(body: dict) -> str | None:
     return None
 
 
+def client_vector_on_server_index(body: Mapping, embeds: Mapping) -> str | None:
+    """A query carrying its own vector for an index the server embeds.
+
+    The other half of `EmbeddedWith`, and the half nothing else in this
+    system had. That rule refuses a **document** whose stored vector came
+    from the wrong model. Nothing refused the **query**.
+
+    It is the same failure and it is worse, because it is one message
+    rather than one row: comparing a client-computed vector against an
+    index mongot built with a different model does not error. It returns a
+    number between -1 and 1 for every candidate, so the page comes back
+    full, ranked, plausible and meaningless. Measured in `rules.py` against
+    two generations of one vendor's model at the same width -- identical
+    text scored -0.053, unrelated text scored +0.301. Unrelated text beat
+    the right answer by five times, with no log and no error.
+
+    `auto_embed` exists to remove the client-side embedder that makes this
+    possible. A client still sending `queryVector` has put it back, from a
+    driver that never read the policy file -- which is precisely the
+    caller the wire boundary exists for. So it is refused by name rather
+    than ranked.
+
+    Returns the collection, or `None`. Pure: a body and a dict.
+    """
+    if not embeds:
+        return None
+    collection = body.get("aggregate")
+    if not isinstance(collection, str) or collection not in embeds:
+        return None
+    pipeline = body.get("pipeline")
+    if not isinstance(pipeline, list):
+        return None
+    for stage in pipeline:
+        if not isinstance(stage, Mapping):
+            continue
+        search = stage.get("$vectorSearch")
+        if isinstance(search, Mapping) and "queryVector" in search:
+            return collection
+    return None
+
+
+def refuse_client_vector(raw: bytes, req_id: int, resp_to: int,
+                         embeds: Mapping) -> bytes | None:
+    """Answer that query with an error instead of a plausible page.
+
+    An error is recoverable and a silently wrong ranking is not: the
+    caller reads ten well-scored documents that have nothing to do with
+    the question, and nothing anywhere says so.
+    """
+    decoded = decode_op_msg(raw, LAZY)
+    if decoded is None:
+        return None
+    collection = client_vector_on_server_index(dict(decoded[1]), embeds)
+    if collection is None:
+        return None
+    model = embeds[collection]
+    print(f"  voyd: REFUSED a client-supplied queryVector on {collection}: "
+          f"the server owns this encoding (auto_embed={model!r})", flush=True)
+    return encode_op_msg(req_id, resp_to, 0, {
+        "ok": 0.0, "code": 8000, "codeName": "AtlasError",
+        "errmsg": (
+            f"voyd-wire refuses a client-supplied queryVector on "
+            f"{collection!r}: this collection declares "
+            f"auto_embed={model!r}, so the index holds text the server "
+            f"embedded and a vector computed anywhere else is a hit in a "
+            f"different space. Comparing them does not fail, it returns a "
+            f"confident score for the wrong documents. Send "
+            f"$vectorSearch.query with the query text instead and let the "
+            f"index embed it with the model it was built from."),
+    })
+
+
 def refuse_unrewritable(raw: bytes, req_id: int, resp_to: int,
                         guards: dict[str, Guard]) -> bytes | None:
     """Answer the client with an error rather than let the fact be destroyed.
@@ -906,6 +978,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                upstream: Upstream | None = None,
                advertise: str | None = None,
                vault: "voyd_seal.Vault | None" = None,
+               embeds: Mapping | None = None,
                meter: "voyd_metrics.Meter | None" = None) -> str:
     """One direction of one connection.
 
@@ -969,6 +1042,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # revocation is answered here rather than forwarded: the
                 # reply goes straight back and the server never sees it.
                 refusal = refuse_unrewritable(raw, req_id, req_id, guards)
+                if refusal is None and embeds:
+                    refusal = refuse_client_vector(raw, req_id, req_id, embeds)
                 if refusal is not None:
                     await send(back, refusal)
                     continue
@@ -1605,6 +1680,7 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                   upstream: Upstream, guards: dict[str, Guard], verbose: bool,
                   live: Live, advertise: str | None = None,
                   vault: "voyd_seal.Vault | None" = None,
+                  embeds: Mapping | None = None,
                   meter: "voyd_metrics.Meter | None" = None,
                   half_close_seconds: float = 10.0) -> None:
     """One client connection, start to finish, as one coroutine pair.
@@ -1636,7 +1712,8 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
         rewritten: set[int] = set()
         common = {"guards": guards, "verbose": verbose,
                   "rewritten": rewritten, "upstream": upstream,
-                  "advertise": advertise, "vault": vault, "meter": meter}
+                  "advertise": advertise, "vault": vault,
+                  "embeds": embeds, "meter": meter}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
         back = asyncio.ensure_future(pump(up_r, client_w, up_w,
@@ -1966,6 +2043,7 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 upstream: Upstream, secondaries: Secondaries,
                 guards: dict[str, Guard], verbose: bool,
                 rewritten: set[int], vault: "voyd_seal.Vault | None",
+                embeds: Mapping | None,
                 meter: "voyd_metrics.Meter | None") -> str:
     """client -> upstream, choosing which upstream each message goes to.
 
@@ -2003,6 +2081,8 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
             original = raw
 
             refusal = refuse_unrewritable(raw, req_id, req_id, guards)
+            if refusal is None and embeds:
+                refusal = refuse_client_vector(raw, req_id, req_id, embeds)
             if refusal is not None:
                 await conv.to_client(refusal)
                 continue
@@ -2228,7 +2308,7 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
 
 async def fanned_session(client_r, client_w, upstream: Upstream,
                          secondaries: Secondaries, guards, verbose: bool,
-                         live: Live, advertise, vault, meter) -> None:
+                         live: Live, advertise, vault, embeds, meter) -> None:
     """One client connection when `--fan-out` is on.
 
     Deliberately a sibling of `session` rather than a mode inside it. The
@@ -2252,7 +2332,7 @@ async def fanned_session(client_r, client_w, upstream: Upstream,
         tasks = [
             asyncio.ensure_future(route(client_r, conv, upstream, secondaries,
                                         guards, verbose, rewritten, vault,
-                                        meter)),
+                                        embeds, meter)),
             asyncio.ensure_future(replies(up_r, conv, source="primary",
                                           guards=guards, verbose=verbose,
                                           rewritten=rewritten,
@@ -2374,7 +2454,8 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           drain_seconds: float = 20.0, advertise: str | None = None,
           workers: int = 1, metrics_port: int | None = None,
           fan_out: str | None = None, give_up: float = 1.0,
-          vault_spec: dict | None = None) -> None:
+          vault_spec: dict | None = None,
+          auto_embed: dict | None = None) -> None:
     """Bind, announce, then run the boundary -- in this process or N of them.
 
     The listening socket is bound *here*, once, before any fork. That is
@@ -2408,6 +2489,15 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
     if vault_spec:
         for line in voyd_seal.announce(vault_spec):
             print(line, flush=True)
+    for name, model in sorted((auto_embed or {}).items()):
+        # Worth a line of its own: this is the only declaration that makes
+        # the boundary refuse a *query* rather than a document, and an
+        # operator debugging "why is my $vectorSearch an error" should find
+        # the answer in the startup output.
+        print(f"voyd-wire: {name} is embedded by the server "
+              f"(auto_embed={model!r}); a client-supplied queryVector on it "
+              f"is refused, because a vector from anywhere else is a hit in "
+              f"a different space", flush=True)
     print("voyd-wire: connect any driver to "
           f"mongodb{'+tls' if certfile else ''}://localhost:{listen_port}/"
           "?directConnection=true\n", flush=True)
@@ -2428,7 +2518,8 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                   ssl_ctx=ssl_ctx, max_connections=max_connections,
                   drain_seconds=drain_seconds, advertise=advertise,
                   slab=slab, meters=meters, metrics_port=metrics_port,
-                  fan_out=fan_out, give_up=give_up, vault_spec=vault_spec)
+                  fan_out=fan_out, give_up=give_up, vault_spec=vault_spec,
+                  auto_embed=auto_embed)
         return
 
     if slab is not None and metrics_port is not None:
@@ -2438,6 +2529,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                               drain_seconds=drain_seconds,
                               advertise=advertise, fan_out=fan_out,
                               give_up=give_up, vault_spec=vault_spec,
+                              auto_embed=auto_embed,
                               meter=meters[0] if meters else None))
     summarise(counts)
 
@@ -2447,6 +2539,7 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
                max_connections: int, drain_seconds: float,
                advertise: str | None, fan_out: str | None = None,
                give_up: float = 1.0, vault_spec: dict | None = None,
+               auto_embed: dict | None = None,
                meter: "voyd_metrics.Meter | None" = None) -> dict:
     """One worker: accept, serve, drain, and report what it counted."""
     upstream = Upstream(target, verbose=verbose, meter=meter)
@@ -2456,6 +2549,7 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
     # shared: an `Ephemeral` master key minted per worker would give each
     # of them a different key for the same tenant, and a document written
     # through one worker would be unreadable through the next.
+    embeds = dict(auto_embed or {})
     vault = voyd_seal.Vault(**vault_spec) if vault_spec else None
     if vault is not None:
         await vault.open()
@@ -2507,10 +2601,10 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         if secondaries is not None:
             await fanned_session(reader, writer, upstream, secondaries,
                                  guards, verbose, live, advertise, vault,
-                                 meter)
+                                 embeds, meter)
         else:
             await session(reader, writer, upstream, guards, verbose, live,
-                          advertise, vault, meter)
+                          advertise, vault, embeds, meter)
 
     # A failed TLS handshake, a port scan, a plain-TCP probe against a TLS
     # listener: one client's problem, never the listener's. An earlier
@@ -2591,7 +2685,8 @@ def supervise(sock: socket.socket, workers: int, target: str,
               meters: "list[voyd_metrics.Meter] | None" = None,
               metrics_port: int | None = None,
               fan_out: str | None = None, give_up: float = 1.0,
-              vault_spec: dict | None = None) -> None:
+              vault_spec: dict | None = None,
+              auto_embed: dict | None = None) -> None:
     """N worker processes over one listening socket, and one honest total.
 
     Why processes at all, when the loop already removed the thread stacks:
@@ -2642,7 +2737,7 @@ def supervise(sock: socket.socket, workers: int, target: str,
                     max_connections=max_connections,
                     drain_seconds=drain_seconds, advertise=advertise,
                     fan_out=fan_out, give_up=give_up,
-                    vault_spec=vault_spec,
+                    vault_spec=vault_spec, auto_embed=auto_embed,
                     meter=meters[index] if meters else None))
             except BaseException:
                 traceback.print_exc()
@@ -2845,6 +2940,23 @@ def _vault_from(args) -> dict | int:
             "collection": collection or "__keys"}
 
 
+def _embeds_from(options: Mapping) -> dict:
+    """Collection -> the model the server embeds it with.
+
+    Flattened from the policy file's `OPTIONS`, because the boundary's
+    question is per collection: *does this collection's index hold text
+    the server encoded?* Which field it is declared on matters to the
+    index and not to the refusal -- a client vector is wrong for the
+    collection however many paths it embeds.
+    """
+    out = {}
+    for name, opt in options.items():
+        declared = opt.get("auto_embed") or {}
+        if declared:
+            out[name] = next(iter(declared.values()))
+    return out
+
+
 def _vault_uri(target: str) -> str:
     """The connection string the vault dials, from `--target`.
 
@@ -3002,7 +3114,7 @@ def main(argv: list[str] | None = None) -> int:
               max_connections=args.max_connections, advertise=advertise,
               workers=args.workers, metrics_port=args.metrics,
               fan_out=args.fan_out, give_up=args.fan_out_give_up,
-              vault_spec=vault_spec)
+              vault_spec=vault_spec, auto_embed=_embeds_from(OPTIONS))
     except KeyboardInterrupt:
         summarise(guards)
     return 0

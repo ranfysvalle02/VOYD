@@ -58,7 +58,9 @@ jobs:
             tests/test_the_codec_round_trips.py \
             tests/test_the_boundary_refuses.py \
             tests/test_the_policy_file_is_the_configuration.py \
-            tests/test_the_scanner_is_not_confidently_wrong.py
+            tests/test_the_scanner_is_not_confidently_wrong.py \
+            tests/test_the_server_owns_the_encoding.py \
+            -m 'not needs_mongo'
 
       - name: Fan-out, against three mongods and a real election
         # Kept as its own step because it is the only one that can fail for

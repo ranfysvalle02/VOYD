@@ -165,6 +165,13 @@ testpaths = ["tests"]
 addopts = "-m 'not slow'"
 markers = [
     "slow: needs a real search index to build, or a live Atlas cluster",
+    # Applied only where a file is *mixed*. The "core needs no database" CI
+    # step used to work by naming four files that happened to be entirely
+    # pure, which is fine until somebody adds a file that is mostly pure --
+    # and then the honest choice is a marker rather than a `-k` expression
+    # matching test names, which silently stops matching when a test is
+    # renamed.
+    "needs_mongo: drives a real mongod through a real proxy",
 ]
 # `scanner` is a second distribution with no dependencies and no import of
 # `voyd`; putting it on the path is what lets a test reach it without the
