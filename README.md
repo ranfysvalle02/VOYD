@@ -16,6 +16,29 @@ with nothing logged and nothing to page on.
 **Refuse is a contract** — answered on every read, immediately, whatever the
 sweeper is doing.
 
+### Three ways to make a fact go away, and only one of them is immediate
+
+This is the whole design in one table. Every claim below is a consequence of
+it, and the last column is the part that decides which one you actually need:
+
+| | when | reaches |
+|---|---|---|
+| **refusal** | immediately, on the next read | this application's read path |
+| **crypto erasure** | ~60s (measured) | every copy that exists anywhere |
+| the TTL reaper | ~60s (measured) | this deployment's disk |
+
+Nothing here replaces your TTL index; the bottom row is MongoDB doing its
+job. What the top two add is the two questions it cannot answer — *may this
+reach a prompt **now***, and *what about the backup nobody has restored yet*.
+
+**They cover each other exactly, which is the argument for having both rather
+than choosing.** Refusal is instant and binds only this read path, so a
+restored snapshot walks straight past it. A destroyed key binds every copy
+and is *not* instant — a reader that decrypted a moment ago keeps decrypting
+until its key cache turns over. So each one's window is the other's
+guarantee, and the boundary orders them that way on purpose: **unreachable
+first, unreadable second.**
+
 ---
 
 ## No code
@@ -149,16 +172,17 @@ one place: [`--key-vault`](#the-erasure-refusal-cannot-perform).
 | `distinct()` | refuse a repeat of content already on the page |
 | `sealed()` | ciphertext at rest, under a key scoped to the tenant |
 
-The last two are **set-relative**: they refuse a document because of the
-*other* documents on the page, so the same document is admitted alone and
-refused in company. No index filter and no policy engine can express that —
+`budget(n)` and `distinct()` are **set-relative**: they refuse a document
+because of the *other* documents on the page, so the same document is
+admitted alone and refused in company. No index filter and no policy engine
+can express that —
 `$vectorSearch` decides each candidate before the page exists, and
 `enforce(subject, object, action)` has nowhere to put the rest of the set.
 
 A policy file that is wrong fails when it is *loaded*, not when a query comes
 back with the wrong rows.
 
-### It sizes its own fetch
+## It sizes its own fetch
 
 `$vectorSearch` draws `numCandidates` and returns `limit`. Ask for a pool
 sized for `limit` on a collection where half of what the index ranks is
@@ -199,22 +223,18 @@ await docs.revoke({"_id": x}, reason="credential leaked")
 `revoke()` makes a fact unreachable on the next read while its row is still on
 disk. Unreachable first, erased second — the reverse order is the bug.
 
-Also kept: **server-side embedding** (`auto_embed`, so the index owns the
-vector and a client-side embedder cannot drift from it), which is reachable
-only from the library today. Encryption is not on that list any more — see
-below.
+One thing is still library-only: **server-side embedding** (`auto_embed`, so
+the index owns the vector and a client-side embedder cannot drift from it).
+Encryption used to be on that list and is not any more — it is
+[the next section](#the-erasure-refusal-cannot-perform).
 
 ## The erasure refusal cannot perform
 
-Refusal answers *may this fact reach a prompt* — immediately, on every read,
-whatever the sweeper is doing. It has nothing to say about a replica, a
-snapshot, or a backup somebody restores next year, because **none of those
-run this read path**. That is the honest gap. It is in
-[LIMITS.md](LIMITS.md) §2 and no amount of refusing closes it: the plaintext
-is on disk and every copy of the disk has it.
-
-Destroying a key closes it for every copy at once, without visiting any of
-them. Declare which field:
+Row two of the table at the top. Refusal binds this application's read path,
+so a replica, a snapshot, or a backup restored next year walks straight past
+it — none of them run it, the plaintext is on their disk, and no amount of
+refusing changes that ([LIMITS.md](LIMITS.md) §2). Destroying a key reaches
+all of them at once without visiting any. Declare which field:
 
 ```python
 @guard("notes", on_delete="revoke")
@@ -262,27 +282,17 @@ collection:
   alice's bytes                 Binary(...) <- noise, in every copy
 ```
 
-The boundary **revokes the scope's documents, then destroys its key**, and
-the order is the entire correctness of the feature rather than a nicety.
-Destroying a key is not instant at the reader: libmongocrypt caches data
-keys, so a process that decrypted a scope a moment ago keeps decrypting it
-until that cache turns over — about 60 seconds, which is the same shape and
-very nearly the same number as the TTL window this README opens by
-complaining about.
+The boundary **revokes the scope's documents, then destroys its key** — the
+ordering the table at the top ends on, and the entire correctness of the
+feature rather than a nicety. libmongocrypt caches data keys, so a shred on
+its own leaves the ciphertext readable for as long as somebody holds one:
+*a second delete-is-a-wish window, opened inside the feature that exists to
+close the first one*.
 
-A shred on its own therefore opens *a second delete-is-a-wish window, inside
-the feature that exists to close the first one*. The first working version
-of this did exactly that, and served a shredded tenant's plaintext for
-thirty seconds while reporting the erasure as done. **Unreachable first,
-erased second.** The two halves cover each other exactly:
-
-```
-  the key cache is a window where the ciphertext still reads
-      -> refusal already refused the document, on the first read
-         after the revocation, with no window at all
-  refusal only binds this application's read path
-      -> the key is gone, so a backup restored next year is noise
-```
+Not theorised. The first working version of this did exactly that, and
+served a shredded tenant's plaintext for thirty seconds while reporting the
+erasure as done. It was found by pointing a driver at it, which is the
+subject of [LIMITS.md](LIMITS.md) §1.
 
 ### It says what it did
 
@@ -324,30 +334,27 @@ voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database connection of its
            refuse. See LIMITS.md §5
 ```
 
-- **A connection of its own**, one per worker, to the key vault. Every other
-  upstream connection this proxy makes is the client's.
-- **A credential of its own.** `--kms local:/path` keeps the master key in a
-  file; `--kms env:PREFIX` reaches the rungs where destroying it is somebody
-  else's audited operation. The default is ephemeral, does not survive a
-  restart, and says so in capitals.
+- **A connection and a credential of its own**, one per worker. Every other
+  upstream connection this proxy makes is the client's. `--kms local:/path`
+  keeps the master key in a file; `--kms env:PREFIX` reaches the rungs where
+  destroying it is somebody else's audited operation. The default is
+  ephemeral, does not survive a restart, and says so in capitals.
 - **A sealed read costs ~8.1µs per document instead of 2.3µs**, because it
-  decrypts before it refuses — which is the order the library uses, and the
-  two must agree or the same document would be admitted one way and refused
-  the other. Measured, not estimated: `python tools/voyd_bench.py --seal`
-  reports **5.8µs** to decrypt (stable to a hundredth across passes) and
-  **~8.7µs** to encrypt once the key cache is warm, against a real key
-  vault. The first encrypting pass costs ~26µs while that cache fills,
-  which is why the benchmark prints a spread rather than one draw.
-  Unsealed collections still take the pure path untouched at 2.3µs.
-- **A write it cannot seal is refused, never forwarded.** No tenant in the
-  document, a pipeline update that may assign a sealed field, `$inc` on
-  ciphertext: the error goes straight back and the server never sees the
-  command. There is no safe fallback — forwarding puts plaintext on the
-  disk, the replica and the backup, permanently, and no later fix reaches
-  the copy that already has it.
-- **A sealed collection is never ranked on a secondary.** Fan-out takes the
-  marks from the primary and the documents from a replica, which is right
-  for a verdict that reads marks and wrong for one that must decrypt what it
+  decrypts before it refuses — the order the library uses, and the two must
+  agree or the same document would be admitted one way and refused the
+  other. Measured: `tools/voyd_bench.py --seal` reports **5.8µs** to
+  decrypt, stable across passes, and **~8.7µs** to encrypt warm (~26µs on
+  the first pass, while the key cache fills — which is why the benchmark
+  prints a spread rather than one draw). Unsealed collections still take
+  the pure path untouched.
+- **A write it cannot seal is refused, never forwarded.** No tenant to scope
+  a key to, a pipeline update that would assign a sealed field server-side,
+  `$inc` on ciphertext. There is no safe fallback: an error is loud,
+  harmless and fixable, and a forwarded plaintext row is none of those and
+  is already in the backup.
+- **A sealed collection is never ranked on a secondary**, because fan-out
+  takes the marks from the primary and the documents from a replica — right
+  for a verdict that reads marks, wrong for one that must decrypt what it
   was handed.
 
 **What it buys is the sentence the library version cannot say.** In-process,
@@ -361,59 +368,7 @@ applied to the stronger guarantee.
 Run it: `uv run python examples/seal.py`. The full trade, including what is
 still open, is [LIMITS.md](LIMITS.md) §5.
 
-## Status
-
-**Mid-rewrite, and honest about it.** This repository was just cut hard: the
-HTTP service, the MCP server, the store layer, the job queue, the perimeter,
-the hash-chain ledger and the context index are gone, along with ~817 tests
-and ~35,000 words of documentation that described them. What is left is the
-boundary, the policy file, and the wire.
-
-The suite is **272 tests**, and it is the foundation rather than a census —
-the smallest set of claims that, if any one broke, would make everything
-above it a lie:
-
-| | |
-|---|---|
-| the wire codec round-trips | including the document sequence that carries a write, where the one silent bug lived |
-| the boundary refuses | expired, revoked, unreadable-deadline, off-tenant — **with no database anywhere near it** |
-| a policy file compiles, or fails at *load* | five ways to be wrong, each refused by name |
-| a plain driver gets all of it | real `mongod`, real proxy, real driver |
-| the write path forgets without deleting | the deadline moves *earlier only*; a quarantine stays pinned; a revocation cannot be lifted |
-| encryption is the answer refusal cannot give | plaintext is not on disk, shredding one tenant leaves the others readable |
-| **the boundary seals and shreds** | a plain driver with no encryption configured writes ciphertext; an erasure is unreachable *immediately* and unreadable everywhere after |
-| a refusal travels | revoke a source, the summary and the answer and the embedding go with it |
-| the boundary sizes its own fetch | `numCandidates` from the measured refusal rate, not a constant |
-| it is operable | TLS termination, a capped message size, keepalive, a draining `SIGTERM` |
-| the suite does not leak databases | a stale search index starves the next index build |
-| a client cannot walk past it | `hello` is rewritten, so the guarantee is not a connection-string option somebody remembers |
-| **the server embeds and refusal still holds** | against a **live Atlas cluster**, because this one cannot run anywhere else |
-
-That last row is worth its ninety seconds. Atlas Local registers no embedding
-models, so it *declines* an `auto_embed` declaration and falls back to a
-client-supplied vector — a test that accepted the fallback would assert the
-opposite of what it claims. Against a real cluster the application never
-computes a vector at all, the index owns the encoding, and the expired hit is
-still refused on the way out. Point it at your own cluster with
-`VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
-
-```bash
-pytest              # 272 tests, 96 seconds -- the inner loop
-pytest -m ""        # everything, including the real index builds
-```
-
-Most files need no MongoDB, and that is not a convenience. A
-per-document check that cannot run without a database is one that cannot move
-to a wire — so if that ever stops being true, the architecture has quietly
-changed, and CI runs those three in a step with no database to make it
-obvious.
-
-The suite is checked against sabotage rather than trusted: disabling the
-delete rewrite, the tenant egress check, the tenant *shape* check, cascade,
-refusal itself, wire-side encryption, or the revocation that must precede a
-shred each turns it red.
-
-### Fan-out
+## Fan-out
 
 `$vectorSearch` scans `numCandidates` across the corpus. Doing that on the
 primary, beside every write, is the cost a read replica exists to remove:
@@ -510,7 +465,41 @@ Reads served from a secondary run as the `--fan-out` URI's identity, so:
 
 See [LIMITS.md](LIMITS.md) §3.
 
-### Known gaps
+## When you do not need this
+
+The fastest way to understand what this is for is to know what it is not
+for, and none of these is rare:
+
+- **Your corpus has no deadline and nothing is ever revoked.** Then ranking
+  really is the only question, an index filter is the right tool, and this
+  is a proxy you would be running for nothing.
+- **One tenant, one audience, no erasure requests.** `tenant()`,
+  `restricted_to()` and `sealed()` are most of the value here. Without them
+  you are left with the deadline, and a TTL index plus
+  `{"expire_at": {"$gt": now}}` in the query is a smaller thing that
+  closes the same window — *provided* the bullet below holds.
+- **You can put that filter in every query and trust every call site to
+  keep doing it.** Then do that; it is genuinely cheaper than a proxy. This
+  exists because *remembering* is the failure mode — a rule you have to
+  apply is not enforced — so the question is not whether the filter works
+  but whether it is in the notebook, the migration script, and the service
+  somebody adds next quarter. One read path that nobody else will touch is
+  a real answer to that, and plenty of systems have one.
+- **You need to query the sealed field itself.** Sealed values are opaque
+  ciphertext under a Random algorithm. That is free here because what gets
+  searched is the *embedding*, and the embedding is not the sensitive field
+  — if that is not true of your data, Queryable Encryption is the trade to
+  look at, and it costs you the thing this is for: QE rejects a pointer
+  `keyId`, so one key covers one field across the whole collection and
+  shredding it erases that field for everybody rather than for one subject.
+  Stated once, with the error message, in `voyd/engine/keyring.py`. It is
+  library-only and not reachable from the wire ([LIMITS.md](LIMITS.md) §5).
+
+What is left, and it is a narrow, real shape: **retrieval over a corpus where
+facts expire, get revoked, or belong to somebody** — and more than one thing
+reads it.
+
+## Known gaps
 
 Stated rather than discovered:
 
@@ -541,7 +530,8 @@ Stated rather than discovered:
   primary, and strict `secondary` — the only mode that could have quietly
   become a primary read — is an error before a byte leaves the client. The
   driver performs its own retries, which is why this does not and must not.
-  Keeping `setName` in the rewritten `hello` is what buys the last two rows;
+  Keeping `setName` in the rewritten `hello` is what buys the retryable-write
+  and session rows;
   a driver that thinks it is talking to a standalone turns retries off and
   tells nobody.
 - An upstream connection is **per client**, not pooled, and deliberately: a
@@ -575,3 +565,67 @@ Stated rather than discovered:
   the application's key context, which a proxy deliberately does not hold.
 
 MIT.
+
+## Status
+
+**One thing, on purpose.** This repository used to also be an HTTP service, an
+MCP server, a store layer, a job queue, a perimeter, a hash-chain ledger and
+a context index. All of it was cut, along with ~817 tests and ~35,000 words
+of documentation describing it. What is left is the boundary, the policy
+file, and the wire — which is the part that was load-bearing, and the part
+that is hard.
+
+That is a decision rather than a state. The cut is finished; nothing above is
+waiting on it.
+
+**What would actually change this project** is in
+[LIMITS.md](LIMITS.md) §1 and it is not on this page: nobody has used it but
+its author. Zero external users, zero pilots, and every claim here verified
+by the person who wrote the claim. Eighteen defects last month, and not one
+of them was caught by the suite going red — they came from running it. One
+team, two weeks, their own corpus is worth more than anything else that
+could be built next.
+
+The suite is **272 tests**, and it is the foundation rather than a census —
+the smallest set of claims that, if any one broke, would make everything
+above it a lie:
+
+| | |
+|---|---|
+| the wire codec round-trips | including the document sequence that carries a write, where the one silent bug lived |
+| the boundary refuses | expired, revoked, unreadable-deadline, off-tenant — **with no database anywhere near it** |
+| a policy file compiles, or fails at *load* | five ways to be wrong, each refused by name |
+| a plain driver gets all of it | real `mongod`, real proxy, real driver |
+| the write path forgets without deleting | the deadline moves *earlier only*; a quarantine stays pinned; a revocation cannot be lifted |
+| encryption is the answer refusal cannot give | plaintext is not on disk, shredding one tenant leaves the others readable |
+| **the boundary seals and shreds** | a plain driver with no encryption configured writes ciphertext; an erasure is unreachable *immediately* and unreadable everywhere after |
+| a refusal travels | revoke a source, the summary and the answer and the embedding go with it |
+| the boundary sizes its own fetch | `numCandidates` from the measured refusal rate, not a constant |
+| it is operable | TLS termination, a capped message size, keepalive, a draining `SIGTERM` |
+| the suite does not leak databases | a stale search index starves the next index build |
+| a client cannot walk past it | `hello` is rewritten, so the guarantee is not a connection-string option somebody remembers |
+| **the server embeds and refusal still holds** | against a **live Atlas cluster**, because this one cannot run anywhere else |
+
+That last row is worth its ninety seconds. Atlas Local registers no embedding
+models, so it *declines* an `auto_embed` declaration and falls back to a
+client-supplied vector — a test that accepted the fallback would assert the
+opposite of what it claims. Against a real cluster the application never
+computes a vector at all, the index owns the encoding, and the expired hit is
+still refused on the way out. Point it at your own cluster with
+`VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
+
+```bash
+pytest              # 272 tests, 96 seconds -- the inner loop
+pytest -m ""        # everything, including the real index builds
+```
+
+Most files need no MongoDB, and that is not a convenience. A
+per-document check that cannot run without a database is one that cannot move
+to a wire — so if that ever stops being true, the architecture has quietly
+changed, and CI runs those three in a step with no database to make it
+obvious.
+
+The suite is checked against sabotage rather than trusted: disabling the
+delete rewrite, the tenant egress check, the tenant *shape* check, cascade,
+refusal itself, wire-side encryption, or the revocation that must precede a
+shred each turns it red.

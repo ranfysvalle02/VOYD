@@ -13,7 +13,7 @@ yet. They are marked.
 
 ## 1. The one that actually matters
 
-**Nobody has used this but its author.** 96 commits, one contributor, zero
+**Nobody has used this but its author.** 99 commits, one contributor, zero
 external users, zero pilots. Every claim in this repository is verified by
 somebody who also wrote the claim.
 
@@ -553,7 +553,7 @@ documents?"
 
 ## 4. Coverage
 
-201 tests, ~3,922 lines, against 8,078 lines of `voyd/` and 2,731 of
+276 tests, ~5,700 lines, against 8,152 lines of `voyd/` and 5,304 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -613,7 +613,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (197 tests, ~52 seconds) with
+**Consider:** the suite is fast by default (272 tests, ~95 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
@@ -780,6 +780,18 @@ so the key still dies, and the revocation that should have preceded it is
 skipped. **Consider:** that is fail-open on the *window*, not on the erasure.
 A regex or `$nin` delete against the vault would erase correctly and leave
 the minute-long window open, and nothing currently refuses it.
+
+**Queryable Encryption is library-only and stays that way for now.** The
+wire seals with CSFLE, which is the mode whose `keyId` may be a JSON pointer
+-- the only reason per-subject shredding is possible at all. QE rejects a
+pointer, so a key is bound per field per collection at creation time, and
+destroying it erases that field for every document rather than for one
+subject. That is the opposite of what `--key-vault` exists to provide, so
+the wire does not offer it. **Consider:** a deployment that genuinely needs
+a queryable ciphertext needs collection-granularity erasure too, and should
+be told so rather than handed a flag that quietly changes what an erasure
+request means. The full trade, with the error message, is in
+`voyd/engine/keyring.py`.
 
 **A sealed collection is never ranked on a secondary.** Fan-out takes the
 marks from the primary and the documents from a secondary, which is right
