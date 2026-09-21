@@ -60,9 +60,12 @@ import sys
 import threading
 import time
 import traceback
+from typing import Mapping
 
 try:
     import bson
+    from bson.codec_options import CodecOptions
+    from bson.raw_bson import RawBSONDocument
 except ImportError:  # pragma: no cover - the one dependency, and it is pymongo's
     sys.exit("pip install pymongo   (for the bson library)")
 
@@ -311,12 +314,31 @@ def encode_sections(req_id: int, resp_to: int, flags: int, body: dict,
                        OP_MSG) + payload
 
 
-def decode_op_msg(raw: bytes) -> tuple[int, dict] | None:
+# Decode a body without building Python objects for the fields nobody reads.
+# `RawBSONDocument` keeps the original bytes and walks them on `[]`/`.get()`,
+# which is the difference between reading `cursor.ns` and materialising a
+# thousand floats per document to reach it. Immutable by design, which suits
+# this file: nothing on the read path may edit a document in place anyway.
+# `tz_aware` is left at its default, which is *off*, because that is what the
+# eager `bson.decode` above this used and a verdict must not depend on which
+# decoder read the document. Naive means UTC here anyway: `voyd.engine.time.
+# aware` coerces on the way into a rule, "because that is what BSON stored".
+# Turning it on would be more correct in the abstract and a silent change of
+# behaviour in practice, which is the trade this file always refuses.
+LAZY = CodecOptions(document_class=RawBSONDocument, tz_aware=False)
+
+
+def decode_op_msg(raw: bytes, opts: CodecOptions | None = None
+                  ) -> tuple[int, Mapping] | None:
     """The flags and the body document of a kind-0 OP_MSG.
 
     Returns ``None`` for anything else -- a document sequence (kind 1), a
     body we cannot parse. Those are forwarded untouched, which is safe here
     because a *reply* carrying a cursor batch is always a kind-0 body.
+
+    ``opts=LAZY`` returns a ``RawBSONDocument`` instead of a ``dict``: the
+    same fields, read on demand. Use it where the body is *inspected* and
+    usually forwarded; use the default where it is taken apart and rebuilt.
     """
     payload = raw[16:]
     if len(payload) < 5:
@@ -326,12 +348,13 @@ def decode_op_msg(raw: bytes) -> tuple[int, dict] | None:
         return None
     end = len(payload) - (4 if flags & FLAG_CHECKSUM else 0)
     try:
-        return flags, bson.decode(payload[5:end])
+        return flags, bson.decode(payload[5:end], opts)
     except Exception:
         return None
 
 
-def encode_op_msg(req_id: int, resp_to: int, flags: int, doc: dict) -> bytes:
+def encode_op_msg(req_id: int, resp_to: int, flags: int,
+                  doc: Mapping) -> bytes:
     """Re-frame a body document as an OP_MSG, checksum bit cleared."""
     body = bson.encode(doc)
     payload = struct.pack("<I", flags & ~FLAG_CHECKSUM) + b"\x00" + body
@@ -343,7 +366,7 @@ def encode_op_msg(req_id: int, resp_to: int, flags: int, doc: dict) -> bytes:
 # The two legs. Only one of them rewrites anything.
 # --------------------------------------------------------------------------
 
-def _collection_of(reply: dict) -> str | None:
+def _collection_of(reply: Mapping) -> str | None:
     """Which collection this cursor batch came from.
 
     ``cursor.ns`` is ``"db.collection"``, and it is the only place a reply
@@ -678,13 +701,21 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
     That is deliberate: a proxy that re-encoded every message would be a new
     source of protocol bugs in exchange for nothing, and the only thing worth
     touching is the one array of documents that is about to become context.
+
+    **Nothing is decoded until it is about to be judged.** Every reply on the
+    connection arrives here, and all but a few are forwarded -- so the body is
+    read lazily and the questions are asked cheapest-first: is there a cursor,
+    what collection is it, is that collection guarded. A `find` on a
+    collection nobody declared costs four field reads, not a Python object per
+    float in every embedding it happens to carry. The documents become real
+    only at ``guard.filter``, which is the first line that needs their values.
     """
-    decoded = decode_op_msg(raw)
+    decoded = decode_op_msg(raw, LAZY)
     if decoded is None:
         return raw
     flags, reply = decoded
     cursor = reply.get("cursor")
-    if not isinstance(cursor, dict):
+    if not isinstance(cursor, Mapping):
         return raw
     key = "firstBatch" if "firstBatch" in cursor else (
         "nextBatch" if "nextBatch" in cursor else None)
@@ -700,6 +731,10 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
     if not isinstance(batch, list) or not batch:
         return raw
 
+    # The first read of the documents themselves, and only on a batch that a
+    # declared guard is about to judge. Still lazy: the rules name a handful
+    # of top-level fields, so a vector never becomes a list of floats -- and a
+    # document that survives is re-encoded from the bytes it arrived in.
     kept = guard.filter(batch)
     if len(kept) == len(batch):
         return raw                      # nothing refused: do not touch the bytes
@@ -707,6 +742,8 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
     reply = dict(reply)
     reply["cursor"] = dict(cursor)
     reply["cursor"][key] = kept
+    # `reply` is now a plain dict of raw values; `bson.encode` splices the
+    # untouched ones back in as bytes rather than re-serialising them.
     if verbose:
         print(f"  voyd: {collection}: refused {len(batch) - len(kept)} of "
               f"{len(batch)}  {guard.reasons()}", flush=True)

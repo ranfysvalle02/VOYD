@@ -13,16 +13,19 @@ yet. They are marked.
 
 ## 1. The one that actually matters
 
-**Nobody has used this but its author.** 83 commits, one contributor, zero
+**Nobody has used this but its author.** 87 commits, one contributor, zero
 external users, zero pilots. Every claim in this repository is verified by
 somebody who also wrote the claim.
 
 That is not a coverage problem and no amount of code fixes it. The suite is
 good at holding claims somebody thought to state; it has never once been the
 thing that caught a problem a *user* hit, because there have been no users.
-Three defects this month were found by running something new rather than by
-a test catching a regression — which is the honest description of where the
-value of an outside perspective would land.
+Seven defects this month were found by running something new rather than by
+a test catching a regression: three from exercising paths nobody had
+exercised, and four more from the hostile pass in §4. Every one of them was
+found by *doing something different*, not by the suite going red — which is
+the honest description of where the value of an outside perspective would
+land. The suite is a ratchet, not a search.
 
 **What would change it:** one team, two weeks, their own corpus. Everything
 else on this page is second.
@@ -256,6 +259,51 @@ also reports the refused share read back from the worker summary. It is
 built with. A row that says `LEAKED` is a row whose throughput means
 nothing.
 
+### What the proxy stopped paying for
+
+`enforce` used to decode every reply body in full before asking whether it
+was even a cursor batch on a guarded collection. On a RAG corpus that is
+the expensive possible mistake: the rules read two or three top-level
+fields, and the decode was building a Python float per dimension per
+document in order to reach them. Reading the body lazily and asking the
+cheap questions first -- is there a cursor, what is its collection, is that
+collection declared -- moves the work to the one batch that is about to be
+judged.
+
+Measured on a 100-document batch carrying 1536-dimension embeddings, 2.06MB
+on the wire, one document in ten refused:
+
+| path | before | after | |
+|---|---|---|---|
+| unguarded collection | 2.72ms | 0.11ms | **24.3x** |
+| guarded, 10% refused | 5.66ms | 3.22ms | **1.76x** |
+| reply with no cursor | ~0 | ~0 | |
+
+The first row is the one that matters in a deployment, because most
+collections on a connection are not declared and every one of their replies
+was paying full price to be forwarded unchanged.
+
+**The remaining 3.22ms is mostly not avoidable by decoding less.**
+`RawBSONDocument` inflates a whole document on the first field read, so a
+guarded batch pays for its embeddings exactly once, which is what the old
+path did too. A hand-written scan for named top-level fields measures
+0.12ms against 2.77ms -- a real 24x still sitting there -- and it is not
+being taken. Hand-rolled BSON parsing on the enforcement path fails in the
+direction of admitting something, and the prototype already produced a
+naive datetime where the decoder produces a naive datetime *for a different
+reason*. That is the class of bug this repository is named after, offered
+in exchange for a millisecond nobody has yet asked for. It stays here as a
+number, not a branch, until somebody's p99 makes the case.
+
+**Decoding lazily is a speed change inside the enforcement path**, which is
+the worst place to put one: a decoder that disagrees with the old decoder
+about a deadline does not get slower, it gets wrong and quiet. So the two
+are pinned against each other in `test_the_codec_round_trips.py` -- same
+values, same verdicts, same absent timezone, and every field of a surviving
+document spliced back from the bytes it arrived in.
+
+---
+
 **`update` is not intercepted.** An `update` that overwrites a fact is
 mutation, not forgetting, and treating it otherwise would make every edit a
 revocation. That is the right call, but it means "make this unreachable" has
@@ -278,7 +326,7 @@ documents?"
 
 ## 4. Coverage
 
-165 tests, ~3,280 lines, against 8,078 lines of `voyd/` and 2,731 of
+171 tests, ~3,560 lines, against 8,078 lines of `voyd/` and 2,731 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -288,6 +336,28 @@ mistaken for it.
 `trait.py` and `expiry.py` are small and exercised indirectly, `sealing.py`
 runs under the encryption tests even though a name-scan cannot see it.
 
+**The scanner is 1,043 lines with no test at all.** `scanner/voyd_scan` is
+not in the count above and not in the suite: CI runs `ruff` over it and
+nothing else. It is the first thing a stranger runs, it makes a *judgement*
+about somebody else's repository, and a false negative there is this
+project's own failure mode wearing a different hat — a confident answer
+about facts that can leak, with nothing to page on. It is untested because
+it shipped as a dependency-free single file and the suite grew around the
+boundary instead. That is an explanation, not a defence.
+
+**What would change it:** the tool's own inference is the testable part —
+a fixture repo with a known-leaky read and a known-clean one, asserting
+both the finding and the absence of one. Until then, treat its output as
+an argument, not a result.
+
+**`mypy` reads `voyd/` and nothing else.** `files = ["voyd"]` in
+`pyproject.toml`, so the 1,716-line wire proxy — the front door, the part
+with the concurrency and the failover handling — is type-checked by nobody.
+The justification is that `py.typed` ships in the wheel and `tools/` does
+not, so the promise to downstream checkers is only about `voyd/`. That is
+true and it is also the wrong axis: the reason to check the proxy is that
+it is the hardest code here, not that somebody imports it.
+
 `capabilities.py` was listed here as "the one with no real excuse" and now
 has seventeen. It was a bad gap specifically because that module decides
 which search tier everything above it uses, and its own docstrings record
@@ -296,7 +366,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (161 tests, ~55 seconds) with
+**Consider:** the suite is fast by default (167 tests, ~54 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
