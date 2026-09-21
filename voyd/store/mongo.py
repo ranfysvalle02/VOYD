@@ -520,6 +520,9 @@ class MongoStore:
         """
         out = {"total": 0, "indexed": 0, "pending": 0, "failed": 0}
         cur = await self.db.documents.aggregate([
+            # voyd: filtered(expire_at) -- the handle's own match() is the
+            # deadline; `voyd-scan` cannot see through a call, so the claim
+            # is made here where the next reader of this stage will find it.
             {"$match": self.admission_documents.match(
                 {"voyd_id": voyd_id, "token": token})},
             {"$group": {"_id": "$indexed", "n": {"$sum": 1}}},

@@ -192,6 +192,40 @@ jobs:
           test "$rc" -eq 255 || { echo "FAIL: a missing path exited $rc, not 255"; exit 1; }
           echo "voyd-scan: finds the leak, and refuses to bless a path that is not there"
 
+      - name: voyd-scan finds a mark it has never heard of
+        # The step above proves the pattern match, which is the part Semgrep
+        # and CodeQL already do better. This proves the part they cannot:
+        # working out *which field* without being told. `settles_on` is in no
+        # list in that file -- the only evidence is that three of this
+        # collection's four reads name it and one does not, which makes it a
+        # convention with a deviation. If inference ever silently stops
+        # working, the pattern match keeps this tool green while its actual
+        # claim is dead, so the two are checked apart.
+        run: |
+          mkdir -p /tmp/inferdemo
+          cat > /tmp/inferdemo/s.py <<'PY'
+          def a(db, u): return db.orders.find({"user": u, "settles_on": {"$gt": 0}})
+          def b(db, u): return db.orders.find({"user": u, "settles_on": {"$gt": 0}})
+          def c(db, u): return db.orders.find({"user": u, "settles_on": {"$gt": 0}})
+          def d(db, u): return db.orders.find({"user": u})
+          PY
+          rc=0; out=$(/tmp/scancheck/bin/voyd-scan /tmp/inferdemo) || rc=$?
+          echo "$out"
+          test "$rc" -eq 1 || { echo "FAIL: inferred exactly one deviation, got $rc"; exit 1; }
+          echo "$out" | grep -q "settles_on" || { echo "FAIL: the mark was not named"; exit 1; }
+          echo "$out" | grep -q "s.py:4" || { echo "FAIL: the deviating line was not found"; exit 1; }
+
+      - name: This repository discharges its own unjudged reads
+        # `--strict` counts the reads the scanner could not judge. The claim
+        # in the README is that the column can be driven to zero and *held*
+        # there, and a ratchet nobody has ratcheted is a suggestion. VOYD's
+        # own source is the first thing it has to be true of -- the one
+        # `# voyd: filtered` claim that gets it there is in
+        # `voyd/store/mongo.py`, and this step is what stops it rotting into
+        # a comment that suppresses a finding it no longer describes.
+        run: |
+          /tmp/scancheck/bin/voyd-scan --strict voyd/
+
       - name: No agent tool can leave a cleanup obligation
         # The pitch is that a scope collects itself. An agent that has to
         # remember to clean up is the failure this exists to remove.

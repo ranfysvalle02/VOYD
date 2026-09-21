@@ -261,11 +261,32 @@ now built.
 
 **Shipped: the source scan.** `scanner/voyd_scan/__init__.py` reads a repository with
 `ast` — no database, no credentials, one stdlib file a stranger can copy — and
-reports how many reads hit a collection its own code marks with a deadline or
-soft-delete field *without* filtering on it. It is the AST walker in
-`test_no_module_reaches_past_the_handle.py` turned outward, and it is honest
-about being a floor: dynamically named collections and ORM layers are
-invisible, and a filter it cannot read is called *indeterminate*, never a leak.
+reports how many reads hit a collection its own code marks *without* filtering
+on it. It is the AST walker in `test_no_module_reaches_past_the_handle.py`
+turned outward, and it is honest about being a floor: dynamically named
+collections and ORM layers are invisible, and a filter it cannot read is
+called *indeterminate*, never a leak.
+
+**Shipped since: the inference, which is the part worth having.** A
+pattern that only fires on field names this repository has heard of is a rule
+anybody could write in Semgrep, and the abstraction is one level out — a
+mark-bearing collection plus a read that does not name the mark is a class of
+silent defect, and deletion is its sharpest instance rather than its
+definition. So the scanner now derives the mark per collection: a TTL index
+names its own field, and beyond that, a field most of a collection's reads
+filter on and some do not is a convention with a deviation. The convention is
+the spec, so the deviation is the finding. It needs no configuration, works on
+a field name nobody has invented yet, and gets *stronger* on larger
+codebases — which inverts the usual economics of static analysis. VOYD's
+handle already generalises this at runtime; it is the same `Rule` protocol.
+
+**Shipped since: indeterminate as a ratchet.** The three-state output is the
+credibility abstraction, and a third state that is only a shrug spends it
+slowly. An unjudged read is now a proof obligation a team discharges in the
+source — `# voyd: filtered(field) -- why`, or `# voyd: audit -- why` for a
+read that deliberately reads everything — and `--strict` counts what is left.
+A claim that no longer describes the code under it is reported as stale, which
+is the difference between a ratchet and a suppression file.
 
 **Still deferred: the live scan.** Pointing a tool at a live Pinecone +
 Postgres to report how many currently queryable vectors have no live row needs

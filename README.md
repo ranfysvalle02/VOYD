@@ -130,10 +130,24 @@ stdlib file, no database, no credentials:
 python scanner/voyd_scan path/to/your/repo
 ```
 
-It reports your own floor: reads that hit a collection your code marks with a
-deadline or soft-delete field, without filtering on it. Every one is a read
-that can serve a document your own schema says is gone. The header is honest
-about what a source scan cannot see.
+It reports your own floor — but the pattern match is not the part that
+matters. Semgrep and CodeQL can already find "reads on collection X that do
+not name field Y" if somebody writes that rule. What they cannot do is work
+out what **Y** is without being told, and that inference is the tool: for each
+collection it counts what your reads actually filter on, and a field most of
+them name and some do not is a convention with a deviation. *The convention is
+the spec, so the deviation is the finding.* No configuration, no list of field
+names, and it gets stronger on bigger codebases rather than noisier.
+
+So the output is not "you might have a problem." It is **you already have a
+convention, and here is the exact line where it already failed** — this
+project's founding incident, computed from your own repository, on a field
+called `valid_until` or `is_active` or something nobody has invented yet.
+
+Unjudged reads — a filter built by a helper, which a source scan cannot see —
+are a proof obligation rather than a shrug, dischargeable in the source the
+way `# type: ignore` is, and `--strict` holds the count at zero once you get
+it there. The header is honest about what a source scan cannot see.
 
 And to see why this is more than a soft-delete flag, run
 [`examples/rosetta.py`](examples/rosetta.py): soft-delete, TTL, a feature flag,

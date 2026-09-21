@@ -1,10 +1,21 @@
 """The leak scanner is a credibility instrument, so its classifier is pinned.
 
 An instrument that hands a stranger "you have N leaks" earns nothing if N is
-noise. These fixtures fix the four judgements it makes -- a collection is
-deadline-bearing, a read is filtered, a read is a leak, a read is
-indeterminate -- and the two it must refuse to make: a read on a collection
-with no mark is not counted, and a filter it cannot see is never called a leak.
+noise. These fixtures fix the judgements it makes -- a collection carries a
+mark, a read is filtered, a read is a leak, a read is indeterminate -- and the
+ones it must refuse to make: a read on a collection with no mark is not
+counted, and a filter it cannot see is never called a leak.
+
+Two later sections carry more weight than the classifier does, because they
+are where the tool stops being a pattern match:
+
+- **inference.** The scanner has to work out what the mark is *called* without
+  being told, from the repository's own conventions. A rule that only fires on
+  names hard-coded here is one anybody could have written in Semgrep.
+- **the ratchet.** An indeterminate read is a proof obligation discharged in
+  the source. What separates that from a suppression file is that a claim
+  which stops describing its code becomes a finding itself, so those cases are
+  pinned hardest.
 """
 
 from __future__ import annotations
@@ -226,3 +237,285 @@ def test_the_exit_code_cannot_wrap_around_to_success():
     assert min(len(report.leaks), EXIT_MAX) == EXIT_MAX  # none of them lost
     assert EXIT_MAX & 0xFF != 0, "an exit code that wraps to 0 reads as clean"
     assert EXIT_MAX < EXIT_ERROR, "a full count must not be read as a failure"
+
+
+# --------------------------------------------------------------------------
+# Inference: the scanner has to work out *what the mark is called* without
+# being told. A pattern that only fires on names this file already knows is
+# a rule anybody could have written in Semgrep; the inference is the claim.
+# --------------------------------------------------------------------------
+
+def _src(*reads: str, collection: str = "orders") -> dict[str, str]:
+    body = "".join(f"    db.{collection}.find({r})\n" for r in reads)
+    return {"a.py": "def f(db, u, q):\n" + body}
+
+
+def test_the_convention_is_inferred_from_a_field_nobody_declared():
+    """The whole point, in one case: `valid_until` is in no list anywhere.
+
+    Three reads name it, one does not. The convention is the spec, so the
+    deviation is the finding -- and the finding arrives with the evidence
+    for it, because an inferred rule the reader cannot audit is worse than
+    no rule.
+    """
+    report = analyze(_src(
+        "{'user': u, 'valid_until': {'$gt': 0}}",
+        "{'user': u, 'valid_until': {'$gt': 0}}",
+        "{'user': u, 'valid_until': {'$gt': 0}}",
+        "{'user': u}",
+    ))
+    assert report.bearing == {"orders"}
+    marks = {m.field: m for m in report.marks["orders"]}
+    assert marks["valid_until"].source == "inferred"
+    assert (marks["valid_until"].support, marks["valid_until"].total) == (3, 4)
+    assert _leaks(report) == {("a.py", 5)}
+    assert "3 of 4" in report.leaks[0].why, "the evidence travels with the finding"
+
+
+def test_a_ttl_index_names_its_own_field():
+    """`expireAfterSeconds` is MongoDB's word; the field next to it is the
+    team's. That pairing hands over `Y` for a name this file has never seen,
+    which is why a hard-coded list is a shortcut and not the mechanism."""
+    report = analyze({"a.py": (
+        "def f(db, u):\n"
+        "    db.sessions.create_index('purge_after', expireAfterSeconds=0)\n"
+        "    return db.sessions.find({'user': u})\n"
+    )})
+    assert [m.field for m in report.marks["sessions"]] == ["purge_after"]
+    assert _leaks(report) == {("a.py", 3)}
+
+
+def test_a_ttl_index_declared_as_a_key_list_is_read_too():
+    report = analyze({"a.py": (
+        "def f(db, u):\n"
+        "    db.sessions.create_index([('purge_after', 1)], expireAfterSeconds=60)\n"
+        "    return db.sessions.find({'user': u})\n"
+    )})
+    assert [m.field for m in report.marks["sessions"]] == ["purge_after"]
+
+
+def test_a_field_every_read_names_is_a_schema_not_a_finding():
+    """No deviation, nothing to say.
+
+    This is the guard that keeps inference from flooding the output with
+    every column a collection happens to have -- and it is load-bearing in
+    the other direction too: see the test below.
+    """
+    report = analyze(_src("{'user': u}", "{'user': u}", "{'user': u}"))
+    assert report.bearing == set()
+    assert report.leaks == []
+
+
+def test_a_unanimous_field_cannot_exonerate_a_read_that_forgets_the_deadline():
+    """The failure mode the rule above exists to prevent.
+
+    If a field named by every read became a mark, then every read would
+    satisfy it, and a collection whose reads all filter `tenant` and all
+    forget `expire_at` would come back clean -- the instrument reporting
+    zero because it found a rule that nothing violates. The declared mark
+    still has to be named, by all of them.
+    """
+    report = analyze({"a.py": (
+        "def f(db, u):\n"
+        "    db.orders.insert_one({'expire_at': 1})\n"
+        "    db.orders.find({'tenant': u})\n"
+        "    db.orders.find({'tenant': u})\n"
+        "    db.orders.find({'tenant': u})\n"
+    )})
+    assert len(report.leaks) == 3
+
+
+def test_one_read_is_not_a_convention_however_lonely_the_others_are():
+    """Support floor, which is where inference has to refuse to speak.
+
+    A single read that names a field is a fact about that read, not a rule
+    the others are breaking. Without this the first `find` anyone writes
+    against a new collection becomes the spec, and every existing read is
+    retroactively a leak -- an instrument that manufactures findings out of
+    the smallest possible sample earns nothing.
+    """
+    report = analyze(_src("{'live': True}", "{'a': 1}", "{'b': 2}", "{'c': 3}"))
+    assert report.bearing == set()
+
+
+def test_inference_gets_stronger_as_the_codebase_grows():
+    """The economics claim, pinned. Nine honouring reads and one deviation
+    is a finding; the same single deviation against two honouring reads is
+    not. More code means more signal here, which is the opposite of how
+    pattern-matching static analysis usually scales."""
+    strong = analyze(_src(*(["{'user': u, 'live': True}"] * 9 + ["{'user': u}"])))
+    assert len(strong.leaks) == 1
+    weak = analyze(_src("{'user': u, 'live': True}", "{'user': u}"))
+    assert weak.leaks == []
+
+
+def test_identity_is_never_a_convention():
+    """`find_one({'_id': x})` is the sharpest leak there is -- a lookup by
+    primary key that can still serve a forgotten fact. If `_id` could be
+    inferred as a mark, those reads would exonerate themselves."""
+    report = analyze({"a.py": (
+        "def f(db, x):\n"
+        "    db.orders.insert_one({'expire_at': 1})\n"
+        "    db.orders.find_one({'_id': x})\n"
+        "    db.orders.find_one({'_id': x})\n"
+        "    db.orders.find_one({'_id': x})\n"
+    )})
+    assert all(m.field != "_id" for m in report.marks["orders"])
+    assert len(report.leaks) == 3
+
+
+def test_a_read_must_name_every_mark_the_collection_carries():
+    """A deadline and a tenant key are the same defect in different clothes,
+    so a read that remembers one and forgets the other is not half safe."""
+    report = analyze({"a.py": (
+        "def f(db, u, t):\n"
+        "    db.orders.insert_one({'expire_at': 1})\n"
+        "    db.orders.find({'tenant': t, 'expire_at': {'$gt': 0}})\n"
+        "    db.orders.find({'tenant': t, 'expire_at': {'$gt': 0}})\n"
+        "    db.orders.find({'tenant': t, 'expire_at': {'$gt': 0}})\n"
+        "    db.orders.find({'expire_at': {'$gt': 0}})\n"   # forgets the tenant
+    )})
+    fields = {m.field for m in report.marks["orders"]}
+    assert fields == {"expire_at", "tenant"}
+    assert _leaks(report) == {("a.py", 6)}
+    assert "tenant" in report.leaks[0].why
+
+
+# --------------------------------------------------------------------------
+# The ratchet: an indeterminate read is a proof obligation, dischargeable in
+# the source. What makes it a ratchet rather than a suppression file is that
+# a claim which stops describing its code becomes a finding itself.
+# --------------------------------------------------------------------------
+
+def test_a_claim_discharges_an_indeterminate_read():
+    report = analyze({"a.py": (
+        "def f(db, u):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    return db.notes.find(living(u))  # voyd: filtered(expire_at) -- living() applies it\n"
+    )})
+    assert report.indeterminate == []
+    assert len(report.discharged) == 1
+    assert report.discharged[0].reason == "living() applies it"
+
+
+def test_a_claim_on_a_multi_line_read_is_still_found():
+    """Every real filter worth annotating spans lines. The claim binds to the
+    call's whole extent, not to the line the receiver happens to be on."""
+    report = analyze({"a.py": (
+        "def f(db, u):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    return db.notes.aggregate([\n"
+        "        # voyd: filtered(expire_at) -- the stage helper applies it\n"
+        "        {'$match': stage(u)},\n"
+        "    ])\n"
+    )})
+    assert len(report.discharged) == 1
+
+
+def test_an_audit_claim_names_an_unfiltered_read_rather_than_hiding_it():
+    """The static half of `including_refused()`: a door with an alarm, not a
+    permanent pass. The read leaves the leak column and arrives in one that
+    is still printed, still counted, and carries the author's reason."""
+    report = analyze({"a.py": (
+        "def f(db):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    return db.notes.find({})  # voyd: audit -- the retention report, by design\n"
+    )})
+    assert report.leaks == []
+    assert len(report.audited) == 1
+    assert report.audited[0].reason == "the retention report, by design"
+
+
+def test_an_audit_claim_without_a_reason_is_itself_the_finding():
+    """A break-glass with no reason is a suppression comment wearing a
+    costume. It does not silence the read; it replaces one finding with
+    another that names the missing justification."""
+    report = analyze({"a.py": (
+        "def f(db):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    return db.notes.find({})  # voyd: audit\n"
+    )})
+    assert report.leaks == []
+    assert len(report.stale) == 1
+    assert "no reason given" in report.stale[0].why
+
+
+def test_a_filtered_claim_cannot_discharge_a_visible_leak():
+    """The claim says "you cannot see my filter, trust me" -- but the filter
+    here is perfectly visible and does not name the mark. Honouring that
+    would let one comment silence any finding, which is the whole of what is
+    wrong with a suppression file."""
+    report = analyze({"a.py": (
+        "def f(db, u):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    return db.notes.find({'user': u})  # voyd: filtered -- no it is not\n"
+    )})
+    assert len(report.stale) == 1
+    assert "use `voyd: audit" in report.stale[0].why
+
+
+def test_a_claim_that_is_no_longer_needed_is_reported():
+    """mypy's `warn_unused_ignores`, and for the same reason: an annotation
+    added once outlives the code it was written about. A claim on a read
+    that now plainly filters the mark is stale, and saying so is what stops
+    the annotations drifting into decoration nobody rereads."""
+    report = analyze({"a.py": (
+        "def f(db):\n"
+        "    return db.notes.find({'expire_at': {'$gt': 0}})  # voyd: filtered -- stale now\n"
+    )})
+    assert report.filtered == []
+    assert len(report.stale) == 1
+    assert "already visible" in report.stale[0].why
+
+
+def test_a_claim_inside_a_string_is_not_a_claim():
+    """The suppression mechanism must not be reachable from inside a
+    docstring or a test fixture. `tokenize`, not a regex over lines."""
+    report = analyze({"a.py": (
+        "def f(db, u):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    doc = '# voyd: audit -- in a string'\n"
+        "    return db.notes.find({'user': u})\n"
+    )})
+    assert len(report.leaks) == 1
+    assert report.audited == []
+
+
+def test_strict_counts_the_obligations_and_the_default_does_not(tmp_path: Path):
+    """Two contracts at once. The documented exit code stays "the number of
+    candidate leaks", so nobody's CI changes meaning under them -- and
+    `--strict` is the opt-in that turns the unjudged column into something
+    that can be driven to zero and held there.
+    """
+    (tmp_path / "a.py").write_text(
+        "def f(db, q):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    db.notes.find({'user': 1})\n"          # a leak
+        "    db.notes.find(q)\n"                    # unjudged
+    )
+    assert main([str(tmp_path)]) == 1
+    assert main([str(tmp_path), "--strict"]) == 2
+
+    (tmp_path / "a.py").write_text(
+        "def f(db, q):\n"
+        "    db.notes.insert_one({'expire_at': 1})\n"
+        "    db.notes.find({'user': 1, 'expire_at': {'$gt': 0}})\n"
+        "    db.notes.find(q)  # voyd: filtered(expire_at) -- the helper applies it\n"
+    )
+    assert main([str(tmp_path), "--strict"]) == 0, "the ratchet can reach zero"
+
+
+def test_the_json_carries_the_evidence_for_every_inferred_mark():
+    """A number somebody is asked to act on has to be auditable. The JSON
+    says which field, by what route, and on what support -- so an inferred
+    finding can be disputed on its evidence rather than on faith."""
+    report = analyze(_src(
+        "{'user': u, 'valid_until': 1}",
+        "{'user': u, 'valid_until': 1}",
+        "{'user': u, 'valid_until': 1}",
+        "{'user': u}",
+    ))
+    d = report.as_dict()
+    assert d["marks"]["orders"] == [
+        {"field": "valid_until", "source": "inferred", "support": 3, "reads": 4}]
+    assert d["strict_obligations"] == 1

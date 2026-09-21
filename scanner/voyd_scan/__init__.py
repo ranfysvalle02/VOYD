@@ -1,8 +1,8 @@
-"""Your own number: reads that can serve a forgotten fact, from your source.
+"""Your own number: reads that can serve a fact your code already treats as gone.
 
     python scanner/voyd_scan path/to/your/repo
     python scanner/voyd_scan --json app/ services/ > leak_scan.json
-    python scanner/voyd_scan --allow app/admin/ src/
+    python scanner/voyd_scan --strict app/          # unjudged reads fail too
 
 This is a separate, dependency-free package on purpose. It ships apart from
 ``voyd`` because the first thing a stranger runs must cost them nothing: no
@@ -10,18 +10,55 @@ install, no database, no credentials, no import of the library it is trying
 to make a case for. One stdlib file -- this one -- which you may also simply
 copy into your own repository and run there.
 
-VOYD's founding incident was a count: six read paths against a collection with
-a deadline, and one of them forgot the filter. This turns that count outward.
-Point it at a repository -- yours, not this one -- and it reports how many
-reads hit a collection that carries a deadline or a soft-delete mark *without*
-filtering on it. That is the number the pitch is about, computed from code you
-already have.
+**The pattern match is not the point.** Semgrep and CodeQL can already express
+"find reads on collection X that do not name field Y", and express it better
+than this file does. What they cannot do is work out what Y *is* without
+somebody first knowing the answer and writing it down. That inference is the
+whole of this tool:
 
-**How it decides.** A collection is "deadline-bearing" if the repo's own code
-treats it as one -- a write or index that names a mark field, or a read that
-already filters on it. For every read against such a collection, it asks one
-question of the *filter*: do its keys mention the mark? A read with no filter,
-or a filter whose keys do not, is a candidate leak.
+    a mark-bearing collection + a read that does not name the mark
+        = a class of silent defect
+
+Deletion is the sharpest instance of that class, not the definition of it.
+``expire_at`` is one spelling of Y. So is ``valid_until``, ``is_active``,
+``tombstone``, ``tenant_id``, and a name nobody has invented yet.
+
+**How it finds Y.** Two ways, and the second is the one that generalises:
+
+1. *Declared.* A TTL index names its own field -- ``create_index("valid_until",
+   expireAfterSeconds=0)`` says what the deadline is called without this file
+   having heard of ``valid_until``. A write or filter that names one of the
+   usual soft-delete spellings counts too.
+
+2. *Inferred, from your own convention.* For each collection, the fields its
+   reads actually filter on are counted. A field that most reads name and some
+   do not is a convention with a deviation -- and the convention is the spec,
+   so the deviation is the finding. No configuration, no allowlist of field
+   names, and it gets **stronger on larger codebases**, because the majority
+   that establishes the convention is bigger. That inverts the usual economics
+   of static analysis, where more code means more noise.
+
+   A convention needs at least two reads that honour it and at least one that
+   does not (so: three reads, minimum). A field every read names is not a
+   finding, it is just a schema, and this says nothing about it.
+
+The output is three-state -- **leak**, **filtered**, **indeterminate** -- and
+the third one is load-bearing. A filter assembled by a helper cannot be read
+from source, and calling it a leak would be inventing a number. But a shrug is
+not a result either, so an indeterminate read is a *proof obligation* you can
+discharge in the source, the way ``# type: ignore`` discharges one for mypy::
+
+    return db.notes.find(living(user))   # voyd: filtered(expire_at) -- living() applies it
+
+    return db.notes.find({})             # voyd: audit -- the retention report, by design
+
+``filtered`` asserts the invisible filter does name the mark; ``audit`` names
+a read that deliberately does not, and requires a reason. Neither is a way to
+go quiet: both are counted and printed, a claim on a read that did not need
+one is reported as **stale**, and ``--strict`` makes an undischarged
+indeterminate fail the build. That is the ratchet -- the unjudged column can
+be driven to zero and then held there, which a number nobody can act on
+cannot be.
 
 **What it cannot see, stated plainly so the number is defensible:**
 
@@ -29,16 +66,14 @@ or a filter whose keys do not, is a candidate leak.
   (``db[name]`` where ``name`` is a variable), ORM layers, query builders and
   raw-driver wrappers are invisible. False negatives are expected.
 - It inspects *filter keys only*, and only in literal ``dict``/``list``
-  arguments. A filter built by a helper (``living("expire_at")``, a shared
-  ``base_filter()``) is reported as *indeterminate*, not as a leak -- it will
-  not manufacture a number it cannot stand behind.
+  arguments. A filter built by a helper is reported as indeterminate, not as
+  a leak -- it will not manufacture a number it cannot stand behind.
 - It never connects to a database. It cannot tell you the leak *fired*; it
-  tells you the read *could*. The live version needs someone's production
-  credentials, which is a different kind of responsibility (see
-  ``docs/ideas.md``).
+  tells you the read *could*.
 
 So the output is a floor, not a census. A non-zero floor is still the fastest
-way to turn "refusal is a real problem" from a claim into your own incident.
+way to turn "refusal is a real problem" from a claim into your own incident --
+with a file and a line number, in code you already own.
 
 Exit code is the number of candidate leaks -- clamped to 254, because an exit
 status is one byte and 256 leaks exiting 0 would be this tool committing the
@@ -49,8 +84,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import json
+import re
 import sys
+import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,11 +104,33 @@ WRITE_VERBS = {"insert_one", "insert_many", "update_one", "update_many",
 # and revocation fields, plus the soft-delete conventions other teams use.
 # Compared after lowercasing and dropping underscores, so ``expire_at`` and
 # ``expireAt`` and ``EXPIRE_AT`` are one field.
+#
+# This list is a convenience, not the mechanism. It shortcuts the common
+# spellings so a small repository gets an answer before it has enough reads
+# to establish a convention -- but everything below works on a field name
+# that is not in it, which is the point of the file. Do not add to it in
+# preference to fixing the inference.
 MARKS = frozenset({
     "expireat", "expireafterseconds", "forgotten", "revoked", "tombstone",
     "deleted", "isdeleted", "deletedat", "softdeleted", "removedat",
 })
 
+# A field must be named by this share of a collection's judgeable reads before
+# it counts as that collection's convention. 0.6 rather than a bare majority:
+# a field that half the reads name is a disagreement, not a convention, and
+# this instrument's only asset is that its findings are not arguable.
+CONVENTION_THRESHOLD = 0.6
+# ...and by at least this many, so two reads that happen to share a key on a
+# three-read repository do not become a rule. With one deviation required on
+# top, the smallest collection that can produce an inferred finding has three
+# judgeable reads.
+CONVENTION_SUPPORT = 2
+
+# Keys that are never a convention. ``_id`` is identity -- a lookup by primary
+# key is exactly the read that can still serve a forgotten fact, so treating it
+# as a filter that satisfies anything would silence the sharpest case there is.
+# ``$``-prefixed keys are operators, not fields.
+NEVER_A_CONVENTION = frozenset({"_id"})
 
 # The exit code carries the count so this drops into CI, and a process exit
 # status is one byte. Unclamped, a repository with exactly 256 candidate
@@ -131,27 +191,59 @@ def _dict_keys(node: ast.AST) -> set[str]:
     return keys
 
 
-def _mentions_mark(call: ast.Call) -> bool:
-    """Does a write/index call name a mark field anywhere in its arguments?
+def _fields(keys: set[str]) -> set[str]:
+    """The keys that could be somebody's convention: no operators, no ``_id``."""
+    return {k for k in keys
+            if not k.startswith("$") and k.split(".")[0] not in NEVER_A_CONVENTION}
+
+
+def _ttl_field(call: ast.Call) -> set[str]:
+    """The field a TTL index puts a deadline on, if this call declares one.
+
+    This is the generalising half of the declared path, and the reason a
+    hard-coded list of names is not the mechanism. ``expireAfterSeconds`` is
+    MongoDB's word, not the team's, and the index states its own field right
+    next to it:
+
+        create_index("valid_until", expireAfterSeconds=0)
+        create_index([("purge_after", 1)], expireAfterSeconds=86400)
+
+    Both give up ``Y`` without this file having ever heard of it.
+    """
+    if not any(kw.arg and _norm(kw.arg) == "expireafterseconds"
+               for kw in call.keywords):
+        return set()
+    found: set[str] = set()
+    for arg in call.args:
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            found.add(arg.value)
+        elif isinstance(arg, (ast.List, ast.Tuple)):
+            for el in ast.walk(arg):
+                if isinstance(el, ast.Constant) and isinstance(el.value, str):
+                    found.add(el.value)
+                    break
+    return found
+
+
+def _declared_marks(call: ast.Call) -> set[str]:
+    """The mark fields a write or index call names, by any route.
 
     Broader than the read check on purpose: an index is declared as
     ``create_index("expire_at", expireAfterSeconds=60)`` or
-    ``create_index([("expire_at", 1)])``, so a bare string constant or the
-    TTL keyword both count as evidence the collection carries a deadline.
+    ``create_index([("expire_at", 1)])``, so a bare string constant, a dict
+    key, or the TTL keyword's own field all count as evidence.
     """
-    for kw in call.keywords:
-        if kw.arg and _norm(kw.arg) == "expireafterseconds":
-            return True
+    found = _ttl_field(call)
     for child in ast.walk(call):
         if isinstance(child, ast.Constant) and isinstance(child.value, str):
             if _is_mark(child.value):
-                return True
+                found.add(child.value)
         if isinstance(child, ast.Dict):
             for k in child.keys:
                 if (isinstance(k, ast.Constant) and isinstance(k.value, str)
                         and _is_mark(k.value)):
-                    return True
-    return False
+                    found.add(k.value)
+    return found
 
 
 def _filter_args(call: ast.Call) -> list[ast.AST]:
@@ -202,65 +294,206 @@ def _delegates_filter(node: ast.AST) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------
+# Claims: an indeterminate read is a proof obligation, and this is how a team
+# discharges it without leaving the file it is in.
+# --------------------------------------------------------------------------
+
+# ``# voyd: filtered(expire_at) -- living() applies the deadline``
+# ``# voyd: audit -- the retention report reads everything, by design``
+CLAIM_RE = re.compile(
+    r"#\s*voyd:\s*(?P<verb>filtered|audit)\b"
+    r"(?:\s*\(\s*(?P<field>[^)]*?)\s*\))?"
+    r"(?:\s*--\s*(?P<reason>.*?))?\s*$"
+)
+
+
+@dataclass(frozen=True)
+class Claim:
+    """One ``# voyd:`` comment: what it asserts, and where it was written."""
+    verb: str                 # "filtered" | "audit"
+    field: str | None         # the mark the author says is applied
+    reason: str | None
+    line: int
+
+
+def _claims(code: str) -> dict[int, Claim]:
+    """Every ``# voyd:`` claim in a file, by the line it sits on.
+
+    ``tokenize`` rather than a line-by-line regex, so a ``"# voyd: audit"``
+    inside a string literal is not a claim. An instrument whose suppression
+    mechanism can be triggered from inside a doctest is not one you would
+    let gate a build.
+    """
+    out: dict[int, Claim] = {}
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
+        for tok in tokens:
+            if tok.type != tokenize.COMMENT:
+                continue
+            m = CLAIM_RE.search(tok.string)
+            if m:
+                out[tok.start[0]] = Claim(
+                    verb=m.group("verb"),
+                    field=m.group("field") or None,
+                    reason=(m.group("reason") or "").strip() or None,
+                    line=tok.start[0],
+                )
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        # The file did not tokenise. ``analyze`` already tolerates a file
+        # that does not parse; a claim we could not read is simply absent,
+        # which fails towards reporting more rather than less.
+        pass
+    return out
+
+
 @dataclass
 class Read:
     file: str
     line: int
     collection: str
-    status: str          # "leak" | "filtered" | "indeterminate"
+    status: str          # see STATUSES
     why: str
+    end_line: int = 0
+    keys: frozenset[str] = frozenset()
+    judgeable: bool = False
+    claim: Claim | None = None
+
+    @property
+    def reason(self) -> str | None:
+        return self.claim.reason if self.claim else None
+
+
+# "leak"          -- reads the collection's mark is not named by
+# "filtered"      -- names every mark the collection carries
+# "indeterminate" -- the filter is not visible; nobody has said anything
+# "discharged"    -- indeterminate, and a `# voyd: filtered` claim covers it
+# "audited"       -- deliberately unfiltered, named as such, counted
+# "stale"         -- a claim on a read that did not need one: the ratchet's teeth
+STATUSES = ("leak", "filtered", "indeterminate", "discharged", "audited", "stale")
+
+
+@dataclass
+class Mark:
+    """A field a collection's reads are expected to name, and why we say so."""
+    field: str
+    source: str        # "declared" | "inferred"
+    support: int = 0   # reads that name it (inferred only)
+    total: int = 0     # judgeable reads against the collection (inferred only)
+
+    def evidence(self) -> str:
+        """The header form: what this mark is, and why we believe it."""
+        if self.source == "declared":
+            return f"`{self.field}` (declared by a write or index)"
+        return (f"`{self.field}` (your convention: {self.support} of "
+                f"{self.total} reads name it)")
+
+    def shortly(self) -> str:
+        """The form that reads well inside a finding, which is a sentence.
+
+        The header already carries the full evidence, and a file:line whose
+        parenthetical contains a second parenthetical is a finding nobody
+        finishes reading.
+        """
+        if self.source == "declared":
+            return f"`{self.field}`"
+        return (f"`{self.field}`, which {self.support} of {self.total} "
+                f"reads here do")
 
 
 @dataclass
 class Report:
     files: int = 0
-    bearing: set[str] = field(default_factory=set)
+    marks: dict[str, list[Mark]] = field(default_factory=dict)
     reads: list[Read] = field(default_factory=list)
 
     @property
-    def leaks(self) -> list[Read]:
+    def bearing(self) -> set[str]:
+        return set(self.marks)
+
+    def _of(self, status: str) -> list[Read]:
         return [r for r in self.reads
-                if r.collection in self.bearing and r.status == "leak"]
+                if r.collection in self.marks and r.status == status]
+
+    @property
+    def leaks(self) -> list[Read]:
+        return self._of("leak")
 
     @property
     def filtered(self) -> list[Read]:
-        return [r for r in self.reads
-                if r.collection in self.bearing and r.status == "filtered"]
+        return self._of("filtered")
 
     @property
     def indeterminate(self) -> list[Read]:
-        return [r for r in self.reads
-                if r.collection in self.bearing and r.status == "indeterminate"]
+        return self._of("indeterminate")
+
+    @property
+    def discharged(self) -> list[Read]:
+        return self._of("discharged")
+
+    @property
+    def audited(self) -> list[Read]:
+        return self._of("audited")
+
+    @property
+    def stale(self) -> list[Read]:
+        return self._of("stale")
+
+    @property
+    def considered(self) -> int:
+        return sum(len(self._of(s)) for s in STATUSES)
+
+    def obligations(self) -> int:
+        """What ``--strict`` refuses to let through.
+
+        Leaks, plus every read nobody has said anything about, plus every
+        claim that no longer describes the code under it. The third one is
+        what makes this a ratchet rather than a suppression file: an
+        annotation that stops being true becomes a finding instead of
+        quietly continuing to silence one.
+        """
+        return len(self.leaks) + len(self.indeterminate) + len(self.stale)
 
     def as_dict(self) -> dict:
         def rows(rs: list[Read]) -> list[dict]:
             return [{"file": r.file, "line": r.line,
-                     "collection": r.collection, "why": r.why} for r in rs]
-        considered = len(self.leaks) + len(self.filtered) + len(self.indeterminate)
+                     "collection": r.collection, "why": r.why,
+                     **({"reason": r.reason} if r.reason else {})} for r in rs]
         return {
             "files_scanned": self.files,
-            "deadline_bearing_collections": sorted(self.bearing),
-            "reads_against_them": considered,
+            "deadline_bearing_collections": sorted(self.marks),
+            "marks": {c: [{"field": m.field, "source": m.source,
+                           "support": m.support, "reads": m.total}
+                          for m in ms]
+                      for c, ms in sorted(self.marks.items())},
+            "reads_against_them": self.considered,
             "candidate_leaks": rows(self.leaks),
             "filtered_reads": len(self.filtered),
             "indeterminate_reads": rows(self.indeterminate),
+            "discharged_reads": rows(self.discharged),
+            "audited_reads": rows(self.audited),
+            "stale_claims": rows(self.stale),
+            "strict_obligations": self.obligations(),
         }
 
 
-def analyze(sources: dict[str, str]) -> Report:
-    """Classify every read in ``sources`` (path -> code). Pure; no I/O.
+def _gather(sources: dict[str, str]) -> tuple[list[Read], dict[str, set[str]]]:
+    """Pass one: every read, and every mark a write or index *declares*.
 
-    Two passes, because the write that proves a collection carries a deadline
-    may live in a different file from the read that forgets it.
+    Nothing is classified here. Which fields a collection requires is a
+    property of the whole repository -- the write that proves a deadline and
+    the reads that establish a convention are routinely in other files -- so
+    a read cannot be judged until every file has been seen.
     """
-    report = Report(files=len(sources))
-    bearing: set[str] = set()
+    reads: list[Read] = []
+    declared: dict[str, set[str]] = {}
 
     for path, code in sources.items():
         try:
             tree = ast.parse(code)
         except SyntaxError:
             continue
+        claims = _claims(code)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -270,35 +503,188 @@ def analyze(sources: dict[str, str]) -> Report:
             collection = _collection_of(fn.value)
             if collection is None:
                 continue
-            if fn.attr in WRITE_VERBS and _mentions_mark(node):
-                bearing.add(collection)
-            elif fn.attr in READ_VERBS:
-                dict_args = _filter_args(node)
-                if not dict_args:
-                    status, why = "indeterminate", "filter is not a literal"
-                    # A read with genuinely no filter argument is a leak, not
-                    # indeterminate: ``find()`` returns everything.
-                    if not node.args and not any(
-                            kw.arg in ("filter", "pipeline")
-                            for kw in node.keywords):
-                        status, why = "leak", "no filter"
-                elif any(_delegates_filter(a) for a in dict_args):
-                    status, why = ("indeterminate",
-                                   "filter is partly built elsewhere")
-                else:
-                    keys = set().union(*(_dict_keys(a) for a in dict_args))
-                    if any(_is_mark(k) for k in keys):
-                        status, why = "filtered", "filter names the mark"
-                        bearing.add(collection)   # it filters it -> it has it
-                    elif keys:
-                        status, why = "leak", "filter does not name the mark"
-                    else:
-                        status, why = "leak", "empty filter"
-                report.reads.append(
-                    Read(path, node.lineno, collection, status, why))
 
-    report.bearing = bearing
-    return report
+            if fn.attr in WRITE_VERBS:
+                found = _declared_marks(node)
+                if found:
+                    declared.setdefault(collection, set()).update(found)
+                continue
+            if fn.attr not in READ_VERBS:
+                continue
+
+            end = node.end_lineno or node.lineno
+            claim = next((claims[ln] for ln in range(node.lineno, end + 1)
+                          if ln in claims), None)
+            dict_args = _filter_args(node)
+
+            if not dict_args:
+                # A read with genuinely no filter argument is not unreadable,
+                # it is unfiltered: ``find()`` returns everything.
+                bare = (not node.args and not any(
+                    kw.arg in ("filter", "pipeline") for kw in node.keywords))
+                read = Read(path, node.lineno, collection,
+                            "leak" if bare else "indeterminate",
+                            "no filter" if bare else "filter is not a literal",
+                            end_line=end, judgeable=bare, claim=claim)
+            elif any(_delegates_filter(a) for a in dict_args):
+                read = Read(path, node.lineno, collection, "indeterminate",
+                            "filter is partly built elsewhere",
+                            end_line=end, claim=claim)
+            else:
+                keys = set().union(*(_dict_keys(a) for a in dict_args))
+                read = Read(path, node.lineno, collection, "", "",
+                            end_line=end, keys=frozenset(keys),
+                            judgeable=True, claim=claim)
+                for k in keys:
+                    if _is_mark(k):
+                        declared.setdefault(collection, set()).add(k)
+            reads.append(read)
+
+    return reads, declared
+
+
+def _infer(reads: list[Read], declared: dict[str, set[str]], *,
+           threshold: float, support_floor: int) -> dict[str, list[Mark]]:
+    """Pass two: what each collection's own reads say its rule is.
+
+    This is the part a rule-based scanner cannot do for you. It never asks
+    what a field is *called*; it asks what this collection's reads agree on
+    and which ones do not. A field carried by most of them and missing from
+    at least one is a convention with a deviation, and the deviation is the
+    finding.
+
+    A field that *every* read names is deliberately not reported. There is no
+    deviation, so there is nothing to say, and manufacturing a mark out of a
+    unanimous schema would both flood the output and -- worse -- let a real
+    leak look filtered because it happened to name the unanimous field.
+    """
+    marks: dict[str, list[Mark]] = {}
+    for collection, fields in declared.items():
+        marks[collection] = [Mark(f, "declared") for f in sorted(fields)]
+
+    judgeable: dict[str, list[Read]] = {}
+    for r in reads:
+        if r.judgeable:
+            judgeable.setdefault(r.collection, []).append(r)
+
+    for collection, rs in judgeable.items():
+        total = len(rs)
+        known = {_norm(m.field) for m in marks.get(collection, [])}
+        counts: dict[str, int] = {}
+        spelling: dict[str, str] = {}
+        for r in rs:
+            for f in _fields(set(r.keys)):
+                n = _norm(f)
+                counts[n] = counts.get(n, 0) + 1
+                spelling.setdefault(n, f)
+        for n, support in sorted(counts.items()):
+            if n in known:
+                continue                      # already required, by declaration
+            deviations = total - support
+            if (support >= support_floor and deviations >= 1
+                    and support / total >= threshold):
+                marks.setdefault(collection, []).append(
+                    Mark(spelling[n], "inferred", support=support, total=total))
+
+    return {c: ms for c, ms in marks.items() if ms}
+
+
+def _classify(reads: list[Read], marks: dict[str, list[Mark]]) -> None:
+    """Pass three: judge each read against the marks its collection carries.
+
+    A read must name *every* mark. That is the generalisation the whole file
+    is for: a deadline and a tenant key are the same defect wearing different
+    clothes, and a read that remembers one and forgets the other is not half
+    safe.
+    """
+    for r in reads:
+        required = marks.get(r.collection)
+        if not required:
+            if r.status == "":
+                r.status, r.why = "filtered", "no mark on this collection"
+            continue
+        if r.judgeable:
+            named = {_norm(k) for k in r.keys}
+            missing = [m for m in required if _norm(m.field) not in named]
+            if not missing:
+                r.status, r.why = "filtered", "filter names the mark"
+            else:
+                r.status = "leak"
+                if r.why == "no filter":
+                    pass                    # ``find()``: already the whole story
+                elif len(missing) == 1 and missing[0].source == "declared":
+                    # The wording the declared path has always used: the mark
+                    # is a known spelling, so naming it adds nothing a reader
+                    # cannot see. Inferred marks are the opposite -- the
+                    # finding is only as good as the evidence for the
+                    # convention, so that evidence is printed with it.
+                    r.why = ("filter does not name the mark" if r.keys
+                             else "empty filter")
+                else:
+                    r.why = ("filter does not name "
+                             + ", ".join(m.shortly() for m in missing))
+        _apply_claim(r)
+
+
+def _apply_claim(r: Read) -> None:
+    """Honour a ``# voyd:`` claim -- or report that it no longer describes
+    the code it sits on.
+
+    Three outcomes, and the third is the one that keeps this honest:
+
+    - ``filtered`` on an indeterminate read discharges it. The author says
+      the helper applies the mark; this tool could not see that, and now the
+      assertion is in the file where the next reader will find it.
+    - ``audit`` on any read names it as deliberately unfiltered. It is not
+      silenced -- it is moved to a column with the author's reason next to
+      it, which is exactly what ``including_refused()`` does at runtime:
+      a door with an alarm rather than a permanent pass.
+    - anything else is **stale**. A ``filtered`` claim on a read whose
+      filter is plainly visible, or an ``audit`` with no reason given, is a
+      finding in its own right. Without this an annotation added once keeps
+      suppressing after the code beneath it has changed, which is how a
+      suppression file rots into a lie.
+    """
+    claim = r.claim
+    if claim is None:
+        return
+    if claim.verb == "audit":
+        if not claim.reason:
+            r.status = "stale"
+            r.why = "`voyd: audit` with no reason given (write `-- why`)"
+        else:
+            r.status = "audited"
+            r.why = "deliberately unfiltered, and named as such"
+        return
+    # verb == "filtered"
+    if r.status == "indeterminate":
+        r.status = "discharged"
+        named = f" ({claim.field})" if claim.field else ""
+        r.why = f"filter is built elsewhere; asserted to apply the mark{named}"
+    elif r.status == "filtered":
+        r.status = "stale"
+        r.why = "`voyd: filtered` on a read whose filter is already visible"
+    else:
+        r.status = "stale"
+        r.why = (f"`voyd: filtered` on a read that does not filter the mark "
+                 f"({r.why}) -- use `voyd: audit -- why` if that is intended")
+
+
+def analyze(sources: dict[str, str], *,
+            threshold: float = CONVENTION_THRESHOLD,
+            support_floor: int = CONVENTION_SUPPORT) -> Report:
+    """Classify every read in ``sources`` (path -> code). Pure; no I/O.
+
+    Three passes, because none of the three questions can be answered from
+    one file: what marks exist (any file may declare one), what the
+    convention is (it is a property of all the reads at once), and whether a
+    given read honours it.
+    """
+    reads, declared = _gather(sources)
+    marks = _infer(reads, declared, threshold=threshold,
+                   support_floor=support_floor)
+    _classify(reads, marks)
+    return Report(files=len(sources), marks=marks, reads=reads)
 
 
 class ScanError(Exception):
@@ -339,6 +725,58 @@ def collect_sources(paths: list[Path], allow: list[Path]) -> dict[str, str]:
     return out
 
 
+def _print_report(report: Report, strict: bool) -> None:
+    print(f"scanned {report.files} file(s).")
+    print(f"{len(report.marks)} collection(s) carry a mark your code expects "
+          "its reads to name:")
+    for collection, ms in sorted(report.marks.items()):
+        print(f"  {collection}: " + "; ".join(m.evidence() for m in ms))
+    print()
+
+    leaks = report.leaks
+    if leaks:
+        print(f"{len(leaks)} of {report.considered} read(s) against them do "
+              f"not:\n")
+        for r in leaks:
+            print(f"  {r.file}:{r.line}  {r.collection}  ({r.why})")
+    else:
+        print(f"0 of {report.considered} read(s) against them are unfiltered.")
+
+    for label, rows, note in (
+        ("unjudged read", report.indeterminate,
+         "the filter is built elsewhere and nobody has said what it does"),
+        ("stale claim", report.stale,
+         "a `# voyd:` comment that no longer describes the code under it"),
+    ):
+        if rows:
+            s = "" if len(rows) == 1 else "s"
+            print(f"\n{len(rows)} {label}{s} -- {note}:\n")
+            for r in rows:
+                print(f"  {r.file}:{r.line}  {r.collection}  ({r.why})")
+    if report.discharged or report.audited:
+        print(f"\n{len(report.discharged)} discharged, {len(report.audited)} "
+              "audited by an explicit claim in the source.")
+        for r in report.audited:
+            print(f"  {r.file}:{r.line}  {r.collection}  -- {r.reason}")
+
+    if leaks:
+        print("\nEach leak is a read that can serve a document the "
+              "collection's own rule says is gone. Route it through a filter "
+              "on the mark -- or, if you want that enforced structurally "
+              "rather than remembered, that is what VOYD is for.")
+    elif report.indeterminate and not strict:
+        print("\nNo unfiltered read found against a marked collection. The "
+              "unjudged reads above are the honest remainder: discharge one "
+              "with `# voyd: filtered(field) -- why` where the helper does "
+              "apply the mark, or `# voyd: audit -- why` where it deliberately "
+              "does not, and run with --strict to hold the count at zero.")
+    else:
+        print("\nNo unfiltered read found against a marked collection. That "
+              "is a real result for the paths this can see, and the header "
+              "says what it cannot -- ORM layers and dynamically named "
+              "collections stay invisible.")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -349,6 +787,15 @@ def main(argv: list[str] | None = None) -> int:
                          "module); repeatable")
     ap.add_argument("--json", action="store_true",
                     help="emit the full report as JSON on stdout")
+    ap.add_argument("--strict", action="store_true",
+                    help="count unjudged reads and stale claims towards the "
+                         "exit code, so the obligation has to be discharged in "
+                         "the source rather than carried indefinitely")
+    ap.add_argument("--convention-threshold", type=float,
+                    default=CONVENTION_THRESHOLD, metavar="R",
+                    help=f"share of a collection's reads that must name a field "
+                         f"before it counts as that collection's convention "
+                         f"(default {CONVENTION_THRESHOLD})")
     args = ap.parse_args(argv)
 
     try:
@@ -357,11 +804,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"voyd-scan: {exc}", file=sys.stderr)
         return EXIT_ERROR
 
-    report = analyze(sources)
+    report = analyze(sources, threshold=args.convention_threshold)
+    count = report.obligations() if args.strict else len(report.leaks)
 
     if args.json:
         print(json.dumps(report.as_dict(), indent=2))
-        return min(len(report.leaks), EXIT_MAX)
+        return min(count, EXIT_MAX)
 
     if not report.files:
         # Distinct from "scanned files, found no marked collection". The
@@ -371,43 +819,16 @@ def main(argv: list[str] | None = None) -> int:
               f"contains no .py to read. Nothing was checked.")
         return 0
 
-    if not report.bearing:
-        print(f"scanned {report.files} file(s); found no collection that "
-              "carries a deadline or soft-delete mark. Nothing to check.\n"
+    if not report.marks:
+        print(f"scanned {report.files} file(s); found no collection whose own "
+              "code treats a field as a mark -- no deadline, no soft-delete "
+              "flag, and no field its reads agree on.\n"
               "(This is a source heuristic -- dynamically named collections "
               "and ORM layers are invisible. See the header.)")
         return 0
 
-    leaks = report.leaks
-    considered = len(leaks) + len(report.filtered) + len(report.indeterminate)
-    print(f"scanned {report.files} file(s).")
-    print(f"{len(report.bearing)} collection(s) carry a deadline or mark: "
-          f"{', '.join(sorted(report.bearing))}")
-    if leaks:
-        print(f"{len(leaks)} of {considered} read(s) against them do not "
-              f"filter the mark:\n")
-        for r in leaks:
-            print(f"  {r.file}:{r.line}  {r.collection}  ({r.why})")
-    else:
-        print(f"0 of {considered} read(s) against them are unfiltered.")
-    if report.indeterminate:
-        print(f"\n{len(report.indeterminate)} read(s) had a non-literal filter "
-              "and could not be judged; inspect them by hand.")
-    # A clean result has to *read* as clean. The closing paragraph used to
-    # explain "each leak" to a reader who had none, which makes a passing
-    # scan look like a broken one -- the wrong impression for the first
-    # thing a stranger runs.
-    if leaks:
-        print("\nEach leak is a read that can serve a document the "
-              "collection's own mark says is gone. Route it through a filter "
-              "on the mark -- or, if you want that enforced structurally "
-              "rather than remembered, that is what VOYD is for.")
-    else:
-        print("\nNo unfiltered read found against a marked collection. That "
-              "is a real result for the paths this can see, and the header "
-              "says what it cannot -- ORM layers, dynamically named "
-              "collections, and the filters listed above as unjudged.")
-    return min(len(leaks), EXIT_MAX)
+    _print_report(report, args.strict)
+    return min(count, EXIT_MAX)
 
 
 if __name__ == "__main__":

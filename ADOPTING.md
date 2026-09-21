@@ -70,6 +70,13 @@ python scanner/voyd_scan path/to/your/repo
 Run it before hour one and after. The number that matters is not how many
 reads you wrapped, it is how many you did not.
 
+It finds the field to check by reading your own conventions, so it works on
+whatever you call the mark. Add `--strict` when you want the reads it *could
+not* judge to be a number you drive to zero rather than a footnote — each one
+is discharged with a `# voyd: filtered(field) -- why` comment on the read, and
+a claim that stops being true is reported instead of quietly continuing to
+suppress.
+
 **What it costs.** About 1 µs p50 and under 2 µs p99 per candidate, flat from
 a 1-hit page to a 100-hit page. Because refused hits are fetched and then
 dropped, a page can over-fetch — near 2× at up to 50% refused — and the handle
