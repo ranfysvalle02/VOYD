@@ -565,7 +565,7 @@ documents?"
 
 ## 4. Coverage
 
-319 tests, ~6,552 lines, against 8,152 lines of `voyd/` and 5,933 of
+319 tests, ~6,552 lines, against 8,152 lines of `voyd/` and 5,909 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
