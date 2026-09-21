@@ -53,6 +53,15 @@ MONGO_URI = os.environ.get(
 # would be asserting the opposite of what it claims.
 ATLAS_URI = os.environ.get("VOYD_ATLAS_URI")
 
+# A real three-node replica set (`docker compose up rs`). Fan-out is the one
+# claim the default deployment cannot test: Atlas Local is a single-node set,
+# so it has a primary and nothing to fan out to, and every routing assertion
+# against it would pass by having nowhere else to go.
+RS_URI = os.environ.get(
+    "VOYD_TEST_RS_URI",
+    "mongodb://localhost:27021,localhost:27022,localhost:27023"
+    "/?replicaSet=voydrs")
+
 # ---------------------------------------------------------------------------
 # Leaked databases, and why this exists.
 #
@@ -155,6 +164,39 @@ def db():
         client.admin.command("ping")
     except Exception:
         pytest.skip(f"no MongoDB at {MONGO_URI}")
+    name = throwaway_name()
+    try:
+        yield client[name]
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+@pytest.fixture(scope="session")
+def replica_set():
+    """The three-node set, or a skip. Yields the URI.
+
+    Session-scoped because electing a replica set costs seconds and nothing
+    in these tests mutates the topology permanently.
+    """
+    pymongo = pytest.importorskip("pymongo")
+    client = pymongo.MongoClient(RS_URI, serverSelectionTimeoutMS=4000)
+    try:
+        client.admin.command("ping")
+        if len(client.secondaries) < 2:
+            pytest.skip("the replica set has no secondaries to rank on")
+    except Exception:
+        pytest.skip(f"no replica set at {RS_URI} -- `docker compose up -d rs`")
+    finally:
+        client.close()
+    return RS_URI
+
+
+@pytest.fixture
+def rs_db(replica_set):
+    """A throwaway database on the replica set, dropped afterwards."""
+    pymongo = pytest.importorskip("pymongo")
+    client = pymongo.MongoClient(replica_set, serverSelectionTimeoutMS=8000)
     name = throwaway_name()
     try:
         yield client[name]

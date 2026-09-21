@@ -72,6 +72,9 @@ GLOBAL = (
     "messages_from_client_total",
     "messages_from_upstream_total",
     "worker_flushes_total",
+    "fanout_reads_total",
+    "fanout_verified_total",
+    "fanout_unverified_total",
 )
 
 
@@ -222,6 +225,9 @@ class Meter:
         self.messages_from_client_total = 0
         self.messages_from_upstream_total = 0
         self.worker_flushes_total = 0
+        self.fanout_reads_total = 0
+        self.fanout_verified_total = 0
+        self.fanout_unverified_total = 0
 
     def flush(self, guards: dict) -> None:
         self.worker_flushes_total += 1
@@ -266,6 +272,20 @@ HELP = {
         "Flushes summed over every worker. For liveness use "
         "voyd_worker_flush_age_seconds instead: this total keeps climbing "
         "while one worker is wedged, because the healthy ones carry it."),
+    "fanout_reads_total": (
+        "counter", "Reads ranked on a secondary instead of the primary."),
+    "fanout_verified_total": (
+        "counter",
+        "Guarded batches whose marks were re-read from the primary before "
+        "release. This is the number that says the rank/permit split is "
+        "actually running; if it stays at zero while fanout_reads_total "
+        "climbs, reads are being spread but nothing guarded is among them."),
+    "fanout_unverified_total": (
+        "counter",
+        "Guarded batches refused whole because the primary could not "
+        "confirm their marks. Any sustained value here is a primary that "
+        "is failing the lookups, and the boundary is failing closed -- "
+        "correct, and costing every fanned-out read on that collection."),
     "admitted_total": ("counter", "Documents a prompt was allowed to see."),
     "refused_total": ("counter", "Documents refused on the read path."),
     "revoked_total": ("counter", "Deletes rewritten as revocations."),

@@ -28,6 +28,74 @@ services:
       start_period: 20s
 
 
+  # A real three-node replica set, for the one claim Atlas Local cannot test.
+  #
+  # Atlas Local is a single-node set: it has a primary and no secondary, so
+  # every fan-out assertion against it would pass by having nothing to fan
+  # out to. That is the shape of test this repository exists to distrust.
+  #
+  # All three mongods live in *one* container on 27021-27023, which is the
+  # only arrangement where the member hostnames work from both sides: peers
+  # reach each other over the container's own loopback, and the proxy --
+  # running on the host, outside Docker -- reaches the same `localhost:PORT`
+  # strings through the published ports. Split across three services, the
+  # replica set config would have to name either container DNS (unreachable
+  # from the host) or published ports (unreachable from a peer), and the
+  # boundary would be handed member addresses it cannot dial.
+  #
+  # Plain `mongo:8`, not Atlas Local: this rig exists to test routing and
+  # replication lag, and needs no mongot.
+  rs:
+    image: mongo:8
+    container_name: voyd-rs
+    ports:
+      - "27021:27021"
+      - "27022:27022"
+      - "27023:27023"
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        for p in 27021 27022 27023; do
+          mkdir -p /data/rs$$p
+          # `enableTestCommands` is what makes `configureFailPoint`
+          # available, and that is the whole reason this rig exists rather
+          # than a second Atlas Local: replication lag has to be *caused*
+          # on demand, not waited for. The same argument the failover test
+          # makes with `replSetStepDown` -- an outage you cannot cause is
+          # one you are reasoning about instead of measuring. Test-only,
+          # never a flag for a real deployment.
+          mongod --replSet voydrs --port $$p --dbpath /data/rs$$p \
+                 --bind_ip_all --oplogSize 128 --fork \
+                 --setParameter enableTestCommands=1 \
+                 --logpath /data/rs$$p/mongod.log
+        done
+        mongosh --quiet --port 27021 --eval '
+          try { rs.status() } catch (e) {
+            rs.initiate({_id: "voydrs", members: [
+              {_id: 0, host: "localhost:27021", priority: 10},
+              {_id: 1, host: "localhost:27022", priority: 1},
+              {_id: 2, host: "localhost:27023", priority: 1}]})
+          }'
+        # Hold the container open; the mongods are forked into the background.
+        tail -f /data/rs27021/mongod.log
+    healthcheck:
+      # Not "is mongod up" but "is there a primary and are both secondaries
+      # reporting" -- a fan-out test that starts before the set has elected
+      # would be flaky in a way that looks like a routing bug.
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --port 27021 --eval
+          'quit(rs.status().members.filter(m => m.stateStr == "PRIMARY").length == 1
+           && rs.status().members.filter(m => m.stateStr == "SECONDARY").length == 2 ? 0 : 1)'
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 10s
+
+
 volumes:
   # Declared because it is referenced above. Without this stanza `docker
   # compose up` fails with "invalid compose project" and never starts

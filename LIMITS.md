@@ -178,13 +178,49 @@ them. `SIGTERM` and `SIGINT` are both handled and both drain cleanly, so
 this needs somebody to reach for `-9` specifically. **Consider:** a
 supervisor that reaps by process group will not find them.
 
-**One node, no fan-out.** Clients are pinned here, but *here* is a single
-process group: every read lands on one upstream and nothing is spread across
-secondaries. Pinning and fanning out are different problems and only the
-first one is solved. For a read-heavy retrieval workload that is a real cost
-lever left on the table -- serving embeddings off secondaries is a standard
-move and this cannot do it. **Consider:** it is the only one of the three
-things this section used to claim were missing that actually is.
+**Fan-out exists, and it cost the boundary a property.** `--fan-out URI`
+ranks reads on secondaries and re-reads each guarded batch's marks from the
+primary before releasing it. The secondary ranks, the primary permits;
+`test_the_boundary_ranks_on_a_replica_and_asks_the_primary.py` freezes
+replication with `stopReplProducer`, revokes a document on the primary only,
+and asserts the boundary still refuses it -- with a control assertion that
+first proves the secondary really was behind, because otherwise that test
+passes on a deployment where nothing was ever at risk.
+
+What it gave up is stated here rather than in the README's margin:
+
+- **It carries its own credential.** Every other upstream connection this
+  proxy makes is the client's; this one cannot be. Authentication is per
+  connection and SCRAM is a challenge-response bound to a nonce, so the
+  client's handshake cannot be replayed onto a second socket without the
+  password. "Holds no credentials" was true of every version of this file
+  before fan-out and is now true only when fan-out is off.
+- **Authenticated fan-out is not implemented, and fails closed.** With a
+  credential in the `--fan-out` URI the handshake refuses and reads stay on
+  the primary. That is a stub, and it is named as one in `handshake()`:
+  writing the SCRAM exchange onto a raw stream pair is the remaining work,
+  and a half-finished version of it is how a boundary ends up with an
+  upstream socket that skipped authentication. **Consider:** in practice
+  this means fan-out is usable today on deployments that do not
+  authenticate, which is a narrow set and honestly not many production
+  ones.
+- **Identity is checked, not assumed.** If a client authenticates as a
+  different user than the fan-out URI names, fan-out switches off for that
+  connection -- because serving its reads over a connection authenticated
+  as somebody else is a privilege change wearing the shape of an
+  optimisation. The username is read off the SCRAM first message, which is
+  in the clear; the proof is what is protected, not the identity.
+- **One extra round trip per guarded batch**, and a whole-document fetch
+  rather than a projection whenever a rule cannot be introspected.
+  `verdict_fields` returns `None` for any third-party rule, which is the
+  case that matters, because this module cannot have been written with one
+  in mind.
+
+**Consider:** the cost argument for fan-out assumes the scan dominates the
+lookup. For a `$vectorSearch` returning 10 of 100,000 that is obviously
+true. For a `find` returning most of a small collection it is obviously
+false, and the extra round trip is pure loss. Nothing measures this
+automatically and nothing refuses to fan out a read that will not benefit.
 
 The other two were wrong, and wrong in the direction that talks a reader out
 of the tool. This page said the boundary does not "honour read preference, or

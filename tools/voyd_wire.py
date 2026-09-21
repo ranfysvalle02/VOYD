@@ -27,8 +27,8 @@ same property that makes shadow mode three lines.
 portable, and it is deliberately outside `voyd/` -- nothing here is importable
 package surface. It terminates TLS, follows a failover, drains on `SIGTERM`,
 and runs one coroutine pair per connection across `--workers` processes. What
-it still is not: a driver. It does not fan reads out across secondaries, and
-it does not pool upstream connections -- that last one deliberately, because
+it still is not: a driver. It does not pool upstream connections -- that one
+deliberately, because
 a MongoDB connection carries authentication, sessions, cursors and
 transactions, and sharing one would hand a cursor to whoever asked second.
 
@@ -36,7 +36,10 @@ What does survive the crossing, measured rather than assumed: read preference
 is honoured against a topology of one (the `*Preferred` modes served by the
 primary, strict `secondary` a client-side error rather than a quiet primary
 read), retryable writes stay armed because `rewrite_topology` keeps
-`setName`, and sessions and transactions are forwarded intact.
+`setName`, and sessions and transactions are forwarded intact. `--fan-out`
+ranks reads on secondaries and re-reads their marks from the primary before
+releasing them -- see `voyd_fanout.py` for why the obvious version of that
+is unsafe.
 
 **Concurrency is the transport's problem, not the boundary's.** Every
 function that rewrites bytes here -- `enforce`, `refuse_unrewritable`,
@@ -74,6 +77,7 @@ try:
 except ImportError:  # pragma: no cover - the one dependency, and it is pymongo's
     sys.exit("pip install pymongo   (for the bson library)")
 
+import voyd_fanout
 import voyd_metrics
 from voyd.declare import OPTIONS, load
 from voyd.engine import Deadline, revoked
@@ -1056,6 +1060,150 @@ class Upstream:
         return reader, writer
 
 
+class Secondaries:
+    """The nodes a read may be ranked on, and the credential to reach them.
+
+    Separate from `Upstream` because it answers a different question and
+    fails differently. `Upstream` must be right or nothing works; this may
+    be empty, stale, or unreachable and the only consequence is that reads
+    stay on the primary -- which is the behaviour of every version of this
+    proxy before fan-out existed. Degrading to "correct but not spread" is
+    the only acceptable failure mode for an optimisation that sits in front
+    of a guarantee.
+
+    **It carries its own credential, and that is a real change.** Every
+    other upstream connection in this file is the client's: the proxy holds
+    no credentials and forwards the client's handshake. A secondary
+    connection cannot work that way. Authentication is per connection and
+    SCRAM is a challenge-response bound to a nonce, so the client's
+    handshake cannot be replayed onto a second socket -- the proxy would
+    have to know the password, and it deliberately does not.
+
+    So fan-out takes a URI of its own, and reads served from a secondary run
+    as *that* identity rather than the caller's. Where the two differ, that
+    is a privilege change, which is why `Conversation` refuses to fan out on
+    any connection whose client authenticated as a different user. See
+    LIMITS.md §3.
+    """
+
+    def __init__(self, uri: str, *, verbose: bool = True,
+                 meter: "voyd_metrics.Meter | None" = None):
+        self.uri = uri
+        self.verbose = verbose
+        self.meter = meter
+        self._nodes: list[tuple[str, int, bool]] = []
+        self._next = 0
+        self._lock = threading.Lock()
+        self._resolving = asyncio.Lock()
+        self._resolved = False
+
+    @property
+    def user(self) -> str | None:
+        """The username in the fan-out URI, for the identity check."""
+        try:
+            from pymongo.uri_parser import parse_uri
+            return parse_uri(self.uri).get("username")
+        except Exception:
+            return None
+
+    def _resolve(self) -> list[tuple[str, int, bool]]:
+        from pymongo.uri_parser import parse_uri
+        parsed = parse_uri(self.uri)
+        tls = bool(parsed["options"].get("tls",
+                                         self.uri.startswith("mongodb+srv")))
+        try:
+            from pymongo import MongoClient
+            with MongoClient(self.uri, serverSelectionTimeoutMS=15000) as probe:
+                probe.admin.command("ping")
+                found = sorted(probe.secondaries)
+        except Exception as exc:
+            print(f"voyd-wire: cannot enumerate secondaries "
+                  f"({type(exc).__name__}); reads stay on the primary",
+                  flush=True)
+            return []
+        if self.verbose:
+            where = ", ".join(f"{h}:{p}" for h, p in found) or "none"
+            print(f"voyd-wire: ranking reads on {where}", flush=True)
+        return [(h, p, tls) for h, p in found]
+
+    async def pick(self) -> tuple[str, int, bool] | None:
+        """The next secondary, round robin, or `None` if there are none."""
+        async with self._resolving:
+            if not self._resolved:
+                loop = asyncio.get_running_loop()
+                nodes = await loop.run_in_executor(None, self._resolve)
+                with self._lock:
+                    self._nodes, self._resolved = nodes, True
+        with self._lock:
+            if not self._nodes:
+                return None
+            node = self._nodes[self._next % len(self._nodes)]
+            self._next += 1
+            return node
+
+    def forget(self) -> None:
+        """A secondary that would not answer is not one to keep offering."""
+        with self._lock:
+            self._resolved = False
+            self._nodes = []
+
+    async def open(self) -> tuple[asyncio.StreamReader,
+                                  asyncio.StreamWriter] | None:
+        node = await self.pick()
+        if node is None:
+            return None
+        host, port, tls = node
+        ssl_ctx = ssl.create_default_context() if tls else None
+        try:
+            reader, writer = await asyncio.open_connection(
+                host, port, ssl=ssl_ctx,
+                server_hostname=host if tls else None)
+        except (OSError, asyncio.TimeoutError, ssl.SSLError) as exc:
+            print(f"voyd-wire: secondary {host}:{port} unreachable "
+                  f"({type(exc).__name__}); reads stay on the primary",
+                  flush=True)
+            self.forget()
+            return None
+        raw_sock = writer.get_extra_info("socket")
+        if raw_sock is not None:
+            keepalive(raw_sock)
+        if not await handshake(reader, writer, self.uri):
+            await close(writer)
+            self.forget()
+            return None
+        return reader, writer
+
+
+async def handshake(reader: asyncio.StreamReader,
+                    writer: asyncio.StreamWriter, uri: str) -> bool:
+    """Authenticate this proxy's own connection to a secondary.
+
+    Done with pymongo's machinery rather than by hand: SCRAM is a two-round
+    challenge-response with a salted proof, and an implementation of it
+    written here to save a dependency would be a security primitive written
+    by somebody who did not have to. The connection is a plain socket pair,
+    so the exchange is driven message by message over it.
+    """
+    from pymongo.uri_parser import parse_uri
+    parsed = parse_uri(uri)
+    if not parsed.get("username"):
+        # No credential in the fan-out URI: an unauthenticated deployment,
+        # where the handshake is a `hello` and nothing more.
+        return True
+    try:
+        import pymongo.auth as _auth  # noqa: F401
+    except Exception:
+        return False
+    # Deliberately unimplemented in this pass, and it fails *closed*: an
+    # authenticated deployment gets no fan-out rather than an unauthenticated
+    # secondary connection. Writing the SCRAM exchange onto a raw stream pair
+    # is the remaining work, and shipping a half-done version of it is how a
+    # boundary ends up with an upstream socket that skipped authentication.
+    print("voyd-wire: fan-out to an authenticated secondary is not "
+          "implemented; reads stay on the primary", flush=True)
+    return False
+
+
 def stepped_down(reply: dict) -> str | None:
     """Did the server just say this node may not write?
 
@@ -1218,6 +1366,480 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
             await close(client_w)
 
 
+# Request ids this proxy invents for its own permission lookups. High and
+# fixed so they cannot collide with a driver's, which start near zero and
+# count up: a collision would mean a client's reply being resolved into a
+# mark lookup's future and never reaching it.
+ASKED_BASE = 0x7F00_0000
+
+
+class Conversation:
+    """One client, one primary connection, and at most one secondary.
+
+    The fan-out path is a separate object from the plain one on purpose.
+    Every other version of this proxy is a byte pipe with two coroutines and
+    no routing decision to get wrong, and that path is untouched by this
+    class -- `session` still runs it whenever `--fan-out` is absent. A
+    boundary that made its simplest configuration go through its most
+    complicated code to get there would be trading the property that matters
+    for one that does not.
+
+    State worth naming, because all of it is the kind that goes wrong:
+
+    - ``home`` -- which upstream issued each cursor id. A `getMore` follows
+      its cursor or it is asking a server about a cursor it never opened.
+    - ``asked`` -- the futures for this proxy's own mark lookups, sent on the
+      client's primary connection so they run as the client's identity and
+      cost no extra socket.
+    - ``client_lock`` -- two reply pumps now write to one client. Without it
+      a secondary's batch and a primary's acknowledgement interleave into
+      bytes no driver can frame.
+    """
+
+    def __init__(self, client_w, primary_w, guards, verbose, meter):
+        self.client_w = client_w
+        self.primary_w = primary_w
+        self.guards = guards
+        self.verbose = verbose
+        self.meter = meter
+        self.secondary_r = None
+        self.secondary_w = None
+        self.home: dict[int, str] = {}
+        self.asked: dict[int, asyncio.Future] = {}
+        self._next_ask = ASKED_BASE
+        self.client_lock = asyncio.Lock()
+        self.primary_lock = asyncio.Lock()
+        self.fan_out_ok = True
+
+    async def to_client(self, payload: bytes) -> None:
+        async with self.client_lock:
+            self.client_w.write(payload)
+            await self.client_w.drain()
+
+    async def ask_primary(self, command: dict, timeout: float = 20.0) -> dict | None:
+        """Run one command on the client's own primary connection.
+
+        This is the only place the boundary speaks rather than forwards, and
+        it is worth being precise about why that is still not "a connection
+        of its own": the socket, the authentication and the identity are all
+        the client's. What is borrowed is a gap between its requests.
+        """
+        self._next_ask += 1
+        req_id = self._next_ask
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self.asked[req_id] = future
+        try:
+            async with self.primary_lock:
+                self.primary_w.write(encode_op_msg(req_id, 0, 0, command))
+                await self.primary_w.drain()
+            raw = await asyncio.wait_for(future, timeout)
+        except (asyncio.TimeoutError, ConnectionError, OSError):
+            return None
+        finally:
+            self.asked.pop(req_id, None)
+        decoded = decode_op_msg(raw)
+        return dict(decoded[1]) if decoded else None
+
+    async def authoritative(self, db: str, collection: str, ids: list,
+                            fields: set | None) -> dict | None:
+        """The marks the primary holds for these ids, drained to the end.
+
+        ``None`` means the question could not be answered -- a timeout, a
+        dead primary, an error reply. The caller refuses the batch on
+        ``None``, because the alternative is serving documents whose
+        permission nobody established, which is the failure this exists to
+        prevent rather than a degraded version of preventing it.
+        """
+        command: dict = {"find": collection, "filter": {"_id": {"$in": ids}},
+                         "batchSize": len(ids), "$db": db}
+        if fields is not None:
+            command["projection"] = {f: 1 for f in sorted(fields)}
+        reply = await self.ask_primary(command)
+        if not reply or not reply.get("ok"):
+            return None
+        cursor = reply.get("cursor") or {}
+        docs = list(cursor.get("firstBatch") or [])
+        cursor_id = cursor.get("id", 0)
+        # A whole-document fetch can exceed one reply. Draining is not an
+        # edge case to skip: a truncated answer would look exactly like
+        # documents the primary does not have, and those get refused.
+        while cursor_id:
+            more = await self.ask_primary(
+                {"getMore": cursor_id, "collection": collection,
+                 "batchSize": len(ids), "$db": db})
+            if not more or not more.get("ok"):
+                return None
+            nxt = more.get("cursor") or {}
+            docs.extend(nxt.get("nextBatch") or [])
+            cursor_id = nxt.get("id", 0)
+        out = {}
+        for doc in docs:
+            try:
+                out[doc["_id"]] = doc
+            except TypeError:
+                return None              # an unhashable _id cannot be matched
+        return out
+
+    async def permit(self, raw: bytes, req_id: int, resp_to: int) -> bytes:
+        """Take the verdict on a secondary's batch from the primary's marks.
+
+        The shape mirrors `enforce`, and the difference is the whole feature:
+        `enforce` judges the documents it was handed, which is correct when
+        they came from the primary and is a stale-mark bug when they did not.
+        """
+        decoded = decode_op_msg(raw, LAZY)
+        if decoded is None:
+            return raw
+        flags, reply = decoded
+        cursor = reply.get("cursor")
+        if not isinstance(cursor, Mapping):
+            return raw
+        key = ("firstBatch" if "firstBatch" in cursor
+               else "nextBatch" if "nextBatch" in cursor else None)
+        if key is None:
+            return raw
+        ns = (cursor.get("ns") or "")
+        db, _, collection = ns.partition(".")
+        guard = self.guards.get(collection)
+        if guard is None:
+            return raw                   # nothing declared: nothing to verify
+        batch = cursor[key]
+        if not isinstance(batch, list) or not batch:
+            return raw
+
+        ids = voyd_fanout.needed_ids(batch)
+        fields = voyd_fanout.verdict_fields(guard)
+        fresh = (await self.authoritative(db, collection, ids, fields)
+                 if ids is not None else None)
+        if fresh is None:
+            # Unverifiable. Refuse the page rather than serve it: a batch
+            # ranked on a replica whose marks could not be checked is
+            # exactly the confidently-wrong answer this repository is named
+            # after, and "the primary was briefly slow" is not a reason to
+            # produce one.
+            if self.meter is not None:
+                self.meter.fanout_unverified_total += 1
+            print(f"  voyd: {collection}: refused {len(batch)} of "
+                  f"{len(batch)} -- the primary could not confirm their "
+                  f"marks", flush=True)
+            kept: list = []
+        else:
+            judgeable, originals = voyd_fanout.merge_marks(batch, fresh, fields)
+            allowed = guard.filter(judgeable)
+            try:
+                permitted = {d["_id"] for d in allowed}
+                kept = [o for o in originals if o["_id"] in permitted]
+            except TypeError:
+                keep_ids = [id(d) for d in allowed]
+                kept = [o for o, j in zip(originals, judgeable)
+                        if id(j) in keep_ids]
+            if self.meter is not None:
+                self.meter.fanout_verified_total += 1
+            if self.verbose and len(kept) != len(batch):
+                print(f"  voyd: {collection}: refused {len(batch) - len(kept)}"
+                      f" of {len(batch)} on the primary's marks  "
+                      f"{guard.reasons()}", flush=True)
+        if len(kept) == len(batch):
+            return raw
+        reply = dict(reply)
+        reply["cursor"] = dict(cursor)
+        reply["cursor"][key] = kept
+        return encode_op_msg(req_id, resp_to, flags, reply)
+
+
+def _cursor_id(reply: Mapping) -> int | None:
+    cursor = reply.get("cursor")
+    if isinstance(cursor, Mapping):
+        got = cursor.get("id")
+        if isinstance(got, int) and got:
+            return got
+    return None
+
+
+def _scram_user(body: Mapping) -> str | None:
+    """The username a client is authenticating as, off the SCRAM first message.
+
+    SCRAM sends `n,,n=<user>,r=<nonce>` in the clear -- the *proof* is what
+    is protected, not the identity -- so this is readable without holding
+    any credential, which is the only reason the identity check below can
+    exist at all.
+    """
+    payload = body.get("payload")
+    raw = getattr(payload, "value", payload)
+    if not isinstance(raw, (bytes, bytearray)):
+        return None
+    try:
+        for part in raw.decode("utf8", "replace").split(","):
+            if part.startswith("n="):
+                return part[2:]
+    except Exception:
+        return None
+    return None
+
+
+async def route(client_r: asyncio.StreamReader, conv: Conversation,
+                upstream: Upstream, secondaries: Secondaries,
+                guards: dict[str, Guard], verbose: bool,
+                rewritten: set[int],
+                meter: "voyd_metrics.Meter | None") -> str:
+    """client -> upstream, choosing which upstream each message goes to.
+
+    Every write rewrite here is the same call the single-upstream pump
+    makes, in the same order, and that is not duplication worth removing:
+    the two paths must agree about what a `delete` means, and the way to be
+    sure of that is that both call `revoke_instead_of_delete` rather than
+    that one of them calls the other.
+    """
+    async def send_primary(payload: bytes) -> None:
+        async with conv.primary_lock:
+            conv.primary_w.write(payload)
+            await conv.primary_w.drain()
+
+    try:
+        while True:
+            raw, _len, req_id, resp_to, opcode = await read_message_async(client_r)
+            if meter is not None:
+                meter.messages_from_client_total += 1
+            if opcode == OP_COMPRESSED:
+                expanded = uncompress_message(raw)
+                if expanded is None:
+                    print("  voyd: WARNING: compressed message this proxy "
+                          "cannot read, forwarded unchecked", flush=True)
+                    await send_primary(raw)
+                    continue
+                raw, opcode = expanded, OP_MSG
+            if opcode != OP_MSG:
+                await send_primary(raw)
+                continue
+
+            raw = strip_compression(raw, req_id, resp_to)
+            head = decode_sections(raw)
+            body = head[1] if head else {}
+
+            refusal = refuse_unrewritable(raw, req_id, req_id, guards)
+            if refusal is not None:
+                await conv.to_client(refusal)
+                continue
+
+            target = guards.get(body.get("delete"))
+            if target is not None and target.on_delete == "revoke":
+                swapped = revoke_instead_of_delete(
+                    raw, req_id, resp_to, target, verbose)
+                if swapped is not None:
+                    raw = swapped
+                    rewritten.add(req_id)
+            fam = guards.get(body.get("findAndModify"))
+            if fam is not None and fam.on_delete == "revoke":
+                swapped = revoke_instead_of_find_and_delete(
+                    raw, req_id, resp_to, fam, verbose)
+                if swapped is not None:
+                    raw = swapped
+
+            # ---- the identity check -------------------------------------
+            #
+            # The secondary connection is this proxy's, not the client's. If
+            # the client is authenticating as somebody, serving its reads
+            # over a connection authenticated as somebody else is a
+            # privilege change wearing the shape of an optimisation. So
+            # fan-out is switched off for this connection unless the two
+            # identities are the same name.
+            if "saslStart" in body or "authenticate" in body:
+                who = _scram_user(body)
+                if who != secondaries.user:
+                    if conv.fan_out_ok and verbose:
+                        print(f"  voyd: client authenticated as "
+                              f"{who!r}; fan-out is off for this connection "
+                              f"(secondaries are reached as "
+                              f"{secondaries.user!r})", flush=True)
+                    conv.fan_out_ok = False
+
+            # ---- the routing decision -----------------------------------
+            dest = "primary"
+            if conv.fan_out_ok:
+                more = body.get("getMore")
+                if isinstance(more, int):
+                    dest = conv.home.get(more, "primary")
+                elif voyd_fanout.routes_to_secondary(body, guards):
+                    if conv.secondary_w is None:
+                        opened = await secondaries.open()
+                        if opened is not None:
+                            conv.secondary_r, conv.secondary_w = opened
+                        else:
+                            conv.fan_out_ok = False
+                    if conv.secondary_w is not None:
+                        dest = "secondary"
+                        # A secondary refuses an ordinary read: the command
+                        # has to say it accepts a non-primary. The client
+                        # sees one node and cannot have asked for this, so
+                        # the boundary asks on its behalf -- which is the
+                        # whole of what `--fan-out` opts into.
+                        if head is not None and voyd_fanout.read_preference_of(
+                                body) is None:
+                            patched = dict(body)
+                            patched["$readPreference"] = {
+                                "mode": "secondaryPreferred"}
+                            raw = encode_sections(req_id, resp_to, head[0],
+                                                  patched, head[2], head[3])
+                        if meter is not None:
+                            meter.fanout_reads_total += 1
+
+            if dest == "secondary" and conv.secondary_w is not None:
+                conv.secondary_w.write(raw)
+                await conv.secondary_w.drain()
+            else:
+                await send_primary(raw)
+    except Hangup:
+        return "hangup"
+    except ProtocolError as exc:
+        print(f"  voyd: dropped a connection: {exc}", flush=True)
+    except asyncio.CancelledError:
+        raise
+    except (ConnectionError, OSError):
+        pass
+    except Exception:
+        traceback.print_exc()
+    return "closed"
+
+
+async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
+                  source: str, guards: dict[str, Guard], verbose: bool,
+                  rewritten: set[int], upstream: Upstream | None,
+                  advertise: str | None,
+                  meter: "voyd_metrics.Meter | None") -> str:
+    """One upstream -> the client, with the verdict taken on the way.
+
+    Two of these run per fanned-out connection and they write to the same
+    client, which is what `conv.to_client` serialises. The `source` is not
+    cosmetic: it decides whether a batch is judged on the documents it
+    arrived with or on marks fetched from the primary, and getting that
+    backwards is the whole bug this feature could have been.
+    """
+    try:
+        while True:
+            raw, _len, req_id, resp_to, opcode = await read_message_async(reader)
+            if meter is not None:
+                meter.messages_from_upstream_total += 1
+            if opcode == OP_COMPRESSED:
+                expanded = uncompress_message(raw)
+                if expanded is None:
+                    print("  voyd: WARNING: compressed message this proxy "
+                          "cannot read, forwarded unchecked", flush=True)
+                    await conv.to_client(raw)
+                    continue
+                raw, opcode = expanded, OP_MSG
+            if opcode != OP_MSG:
+                await conv.to_client(raw)
+                continue
+
+            # This proxy's own mark lookup, answered. It is not the
+            # client's reply and must never reach it.
+            if source == "primary" and resp_to in conv.asked:
+                future = conv.asked.get(resp_to)
+                if future is not None and not future.done():
+                    future.set_result(raw)
+                continue
+
+            if advertise and source == "primary":
+                rebuilt = rewrite_topology(raw, req_id, resp_to, advertise)
+                if rebuilt is not None:
+                    await conv.to_client(rebuilt)
+                    continue
+
+            peek = decode_op_msg(raw, LAZY)
+            if peek is not None:
+                if upstream is not None and source == "primary":
+                    why = stepped_down(dict(peek[1]))
+                    if why:
+                        upstream.invalidate(why)
+                # Cursor affinity, recorded from the reply that opens the
+                # cursor. A `getMore` sent anywhere else is asking a server
+                # about a cursor it has never heard of.
+                open_cursor = _cursor_id(peek[1])
+                if open_cursor is not None:
+                    conv.home[open_cursor] = source
+
+            if source == "secondary":
+                raw = await conv.permit(raw, req_id, resp_to)
+            else:
+                was_delete = resp_to in rewritten
+                rewritten.discard(resp_to)
+                raw = (delete_reply(raw, req_id, resp_to) if was_delete
+                       else enforce(raw, req_id, resp_to, guards, verbose))
+            await conv.to_client(raw)
+    except Hangup:
+        return "hangup"
+    except ProtocolError as exc:
+        print(f"  voyd: dropped a connection: {exc}", flush=True)
+    except asyncio.CancelledError:
+        raise
+    except (ConnectionError, OSError):
+        pass
+    except Exception:
+        traceback.print_exc()
+    return "closed"
+
+
+async def fanned_session(client_r, client_w, upstream: Upstream,
+                         secondaries: Secondaries, guards, verbose: bool,
+                         live: Live, advertise, meter) -> None:
+    """One client connection when `--fan-out` is on.
+
+    Deliberately a sibling of `session` rather than a mode inside it. The
+    plain path is the one every deployment runs and the one the guarantee
+    is argued from; it does not grow a routing table so that this can exist.
+    """
+    with live:
+        try:
+            up_r, up_w = await upstream.open()
+        except (OSError, asyncio.TimeoutError) as exc:
+            host, port, _ = upstream.address()
+            print(f"voyd-wire: cannot reach {host}:{port}: {exc}", flush=True)
+            upstream.invalidate(type(exc).__name__)
+            await close(client_w)
+            return
+
+        conv = Conversation(client_w, up_w, guards, verbose, meter)
+        rewritten: set[int] = set()
+        tasks = [
+            asyncio.ensure_future(route(client_r, conv, upstream, secondaries,
+                                        guards, verbose, rewritten, meter)),
+            asyncio.ensure_future(replies(up_r, conv, source="primary",
+                                          guards=guards, verbose=verbose,
+                                          rewritten=rewritten,
+                                          upstream=upstream,
+                                          advertise=advertise, meter=meter)),
+        ]
+        secondary_task = None
+        try:
+            while True:
+                done, _ = await asyncio.wait(
+                    tasks + ([secondary_task] if secondary_task else []),
+                    return_when=asyncio.FIRST_COMPLETED, timeout=0.05)
+                # The secondary is opened lazily by `route`, so its reply
+                # pump cannot be started up front. Noticing it here keeps
+                # the ownership of every task in one place, which is what
+                # makes the teardown below complete.
+                if secondary_task is None and conv.secondary_r is not None:
+                    secondary_task = asyncio.ensure_future(
+                        replies(conv.secondary_r, conv, source="secondary",
+                                guards=guards, verbose=verbose,
+                                rewritten=rewritten, upstream=None,
+                                advertise=None, meter=meter))
+                    continue
+                if done:
+                    break
+        finally:
+            everything = tasks + ([secondary_task] if secondary_task else [])
+            for task in everything:
+                task.cancel()
+            await asyncio.gather(*everything, return_exceptions=True)
+            if conv.secondary_w is not None:
+                await close(conv.secondary_w)
+            await close(up_w)
+            await close(client_w)
+
+
 async def close(writer: asyncio.StreamWriter) -> None:
     """Close a stream and do not care how it goes.
 
@@ -1280,7 +1902,8 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           verbose: bool, *, certfile: str | None = None,
           keyfile: str | None = None, max_connections: int = 200,
           drain_seconds: float = 20.0, advertise: str | None = None,
-          workers: int = 1, metrics_port: int | None = None) -> None:
+          workers: int = 1, metrics_port: int | None = None,
+          fan_out: str | None = None) -> None:
     """Bind, announce, then run the boundary -- in this process or N of them.
 
     The listening socket is bound *here*, once, before any fork. That is
@@ -1330,7 +1953,8 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
         supervise(sock, workers, target, guards, verbose,
                   ssl_ctx=ssl_ctx, max_connections=max_connections,
                   drain_seconds=drain_seconds, advertise=advertise,
-                  slab=slab, meters=meters, metrics_port=metrics_port)
+                  slab=slab, meters=meters, metrics_port=metrics_port,
+                  fan_out=fan_out)
         return
 
     if slab is not None and metrics_port is not None:
@@ -1338,7 +1962,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
     counts = asyncio.run(_run(sock, ssl_ctx, target, guards, verbose,
                               max_connections=max_connections,
                               drain_seconds=drain_seconds,
-                              advertise=advertise,
+                              advertise=advertise, fan_out=fan_out,
                               meter=meters[0] if meters else None))
     summarise(counts)
 
@@ -1346,10 +1970,12 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
 async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
                target: str, guards: dict[str, Guard], verbose: bool, *,
                max_connections: int, drain_seconds: float,
-               advertise: str | None,
+               advertise: str | None, fan_out: str | None = None,
                meter: "voyd_metrics.Meter | None" = None) -> dict:
     """One worker: accept, serve, drain, and report what it counted."""
     upstream = Upstream(target, verbose=verbose, meter=meter)
+    secondaries = (Secondaries(fan_out, verbose=verbose, meter=meter)
+                   if fan_out else None)
     live = Live()
     stopping = asyncio.Event()
 
@@ -1392,8 +2018,12 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
                 meter.connections_refused_total += 1
             await close(writer)
             return
-        await session(reader, writer, upstream, guards, verbose, live,
-                      advertise, meter)
+        if secondaries is not None:
+            await fanned_session(reader, writer, upstream, secondaries,
+                                 guards, verbose, live, advertise, meter)
+        else:
+            await session(reader, writer, upstream, guards, verbose, live,
+                          advertise, meter)
 
     # A failed TLS handshake, a port scan, a plain-TCP probe against a TLS
     # listener: one client's problem, never the listener's. An earlier
@@ -1466,7 +2096,8 @@ def supervise(sock: socket.socket, workers: int, target: str,
               drain_seconds: float, advertise: str | None,
               slab: "voyd_metrics.Slab | None" = None,
               meters: "list[voyd_metrics.Meter] | None" = None,
-              metrics_port: int | None = None) -> None:
+              metrics_port: int | None = None,
+              fan_out: str | None = None) -> None:
     """N worker processes over one listening socket, and one honest total.
 
     Why processes at all, when the loop already removed the thread stacks:
@@ -1516,6 +2147,7 @@ def supervise(sock: socket.socket, workers: int, target: str,
                     sock, ssl_ctx, target, guards, verbose,
                     max_connections=max_connections,
                     drain_seconds=drain_seconds, advertise=advertise,
+                    fan_out=fan_out,
                     meter=meters[index] if meters else None))
             except BaseException:
                 traceback.print_exc()
@@ -1688,6 +2320,16 @@ def main(argv: list[str] | None = None) -> int:
                          "reads the real host list and connects past this "
                          "boundary entirely. Defaults to localhost:<listen> "
                          "when --advertise-self is given")
+    ap.add_argument("--fan-out", metavar="URI", default=None,
+                    help="rank reads on this deployment's secondaries "
+                         "instead of the primary, re-reading each guarded "
+                         "batch's marks from the primary before releasing "
+                         "it. Takes a URI of its own because a secondary "
+                         "connection cannot replay the client's "
+                         "authentication; reads served this way run as that "
+                         "URI's identity, and fan-out switches itself off "
+                         "for any connection whose client authenticated as "
+                         "somebody else. See LIMITS.md \u00a73")
     ap.add_argument("--advertise-self", action="store_true",
                     help="shorthand for --advertise localhost:<listen>")
     ap.add_argument("--max-connections", type=int, default=200, metavar="N",
@@ -1748,7 +2390,8 @@ def main(argv: list[str] | None = None) -> int:
         serve(args.listen, args.target, guards, not args.quiet,
               certfile=args.tls_cert, keyfile=args.tls_key,
               max_connections=args.max_connections, advertise=advertise,
-              workers=args.workers, metrics_port=args.metrics)
+              workers=args.workers, metrics_port=args.metrics,
+              fan_out=args.fan_out)
     except KeyboardInterrupt:
         summarise(guards)
     return 0

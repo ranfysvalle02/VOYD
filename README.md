@@ -253,6 +253,69 @@ The suite is checked against sabotage rather than trusted: disabling the
 delete rewrite, the tenant egress check, the tenant *shape* check, cascade, or
 refusal itself each turns it red.
 
+### Fan-out
+
+`$vectorSearch` scans `numCandidates` across the corpus. Doing that on the
+primary, beside every write, is the cost a read replica exists to remove:
+
+```bash
+python tools/voyd_wire.py --config voydfile.py --target "$RS" --fan-out "$RS"
+```
+
+**The obvious version of this is unsafe, and it is unsafe in exactly the way
+this README opens with.** Refusal is a function of the marks on the document
+it is shown. A secondary that has not yet replicated a revocation hands the
+boundary a document that still looks live, and the boundary admits it —
+confidently, with a receipt saying it was allowed. Replication lag becomes a
+second delete-is-a-wish window, opened by the thing that exists to close the
+first one.
+
+So the read is split in half:
+
+```
+client --find--> boundary --> SECONDARY   numCandidates scan, 100k documents
+                    |
+                    |  returned _ids: [a, b, c ... j]   (10)
+                    v
+                 PRIMARY   projection {_id, expire_at, forgotten}
+                    |
+                    v
+             refuse() on the authoritative marks --> client
+```
+
+**The secondary ranks. The primary permits.** The expensive part moves; the
+verdict does not. Ranking is not permission — here that is a routing rule
+rather than a slogan.
+
+What it costs, stated rather than discovered:
+
+- **One round trip per guarded batch.** Unguarded collections fan out with
+  no verification, because there is no verdict to be wrong about.
+- **A projection when the rules allow one.** `verdict_fields` works out
+  which fields the verdict reads. A rule it cannot introspect — `Distinct`
+  hashing content, a `Budget` with a custom cost callable, any third-party
+  rule — costs a whole-document fetch. Unknown means expensive, never
+  means skipped.
+- **Reads that cannot be correlated never leave the primary.** Matching a
+  batch against the primary's answer needs `_id`, so a `projection` that
+  drops it, or an aggregation with a stage that could rewrite it, is
+  decided *before* the query is sent.
+- **If the primary cannot confirm a batch, the batch is refused whole.**
+  `voyd_fanout_unverified_total` counts it. Failing closed is the only
+  behaviour available: the alternative is serving documents whose
+  permission nobody established.
+
+**It needs a credential of its own, and that is a real change.** Every other
+upstream connection this proxy makes is the client's. A secondary connection
+cannot be — authentication is per connection and SCRAM is a challenge-response
+bound to a nonce, so the client's handshake cannot be replayed onto a second
+socket without knowing the password, which this deliberately does not. Reads
+served from a secondary therefore run as the `--fan-out` URI's identity, and
+the boundary switches fan-out off for any connection whose client
+authenticated as a different user. **Authenticated fan-out is not implemented
+yet and fails closed** — reads stay on the primary. See
+[LIMITS.md](LIMITS.md) §3.
+
 ### Known gaps
 
 Stated rather than discovered:
@@ -266,11 +329,10 @@ Stated rather than discovered:
   flapping.
 - `SIGTERM` **drains**: stop accepting, let open connections finish, print
   what the process did. A second signal exits immediately.
-- It picks **one node** and forwards bytes, so the gap is **fan-out**: every
-  read lands on that one upstream and nothing is spread across secondaries.
-  What survives the crossing is more than that sentence used to admit, and
-  each line is asserted in `tests/test_the_wire_is_the_front_door.py` rather
-  than reasoned about:
+- **`--fan-out URI` ranks reads on secondaries and takes permission from
+  the primary.** See [below](#fan-out). Without it, reads land on one
+  upstream. What survives the crossing either way is asserted in
+  `tests/test_the_wire_is_the_front_door.py` rather than reasoned about:
 
   | a driver asks for | through the boundary |
   |---|---|
