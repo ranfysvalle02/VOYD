@@ -69,17 +69,18 @@ def claim_rows() -> list[tuple[str, str]]:
         rows.append((claim, cited))
     return rows
 
-# Files that hold up no *product* claim, with the reason each one is here.
-# A list rather than a pattern, because "which files are exempt" is exactly
-# the kind of thing that should require a sentence from whoever exempts one.
-EXEMPT = {
-    # This file. A claim pointing at it would be circular -- it is the
-    # check, not a thing checked -- and it is named in CLAIMS.md anyway so
-    # the bijection below stays honest without a special case in the
-    # parser.
-    "test_every_claim_names_its_evidence.py": "the check itself",
-}
-
+# There is deliberately no exemption list.
+#
+# There was one, for this file -- on the reasoning that a claim pointing at
+# the checker would be circular. It never fired: `CLAIMS.md` cites this file
+# like any other, so it was never an orphan, so the escape hatch was dead
+# permission sitting next to a test asserting that dead permission is bad.
+# The same defect as the `sealed()`/`auto_embed()` guard that could not run,
+# one level up, in the file whose subject is exactly that.
+#
+# The bijection is therefore exact. A test file that genuinely should not be
+# a product claim will trip the orphan check, and whoever adds it can decide
+# in the open rather than inheriting a hole somebody left open in advance.
 
 def cited_paths() -> set[str]:
     assert CLAIMS.exists(), "CLAIMS.md is the manifest; it has to exist"
@@ -145,24 +146,11 @@ def test_every_test_file_is_named_by_a_claim():
     that never made it into the argument -- which means the next person to
     find it slow or awkward has nothing telling them what it is for.
     """
-    orphans = sorted(
-        path for path in evidence_files() - cited_paths()
-        if Path(path).name not in EXEMPT)
+    orphans = sorted(evidence_files() - cited_paths())
     assert not orphans, (
         f"{orphans} hold up no claim in CLAIMS.md. Add the claim they are "
-        f"evidence for, or say in EXEMPT why they are not evidence for one")
-
-
-def test_the_exemptions_are_real_files():
-    """An exemption for a file that no longer exists is dead permission.
-
-    It sits there looking like a considered decision and quietly widens the
-    hole if a file with that name ever comes back.
-    """
-    for name in EXEMPT:
-        assert (TESTS / name).exists(), (
-            f"EXEMPT names {name!r}, which does not exist. Remove the "
-            f"exemption rather than leaving permission lying around")
+        f"evidence for -- and if they are evidence for nothing, that is the "
+        f"more interesting answer")
 
 
 @pytest.mark.parametrize("path", sorted(evidence_files()))

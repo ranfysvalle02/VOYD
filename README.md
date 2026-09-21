@@ -786,19 +786,20 @@ from somebody asking why a paragraph said what it said. One
 team, two weeks, their own corpus is worth more than anything else that
 could be built next.
 
-The suite is **366 tests**, and it is the foundation rather than a census —
+The suite is **365 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie. Each one and the file that holds it up is
 **[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim with
 no test, or a test file no claim points at, fails the suite.
 
-Two rows on that page are worth singling out. **The boundary refuses** is
-asserted with no database anywhere near it, because a per-document check
-that cannot run without one is a check that could not have moved to a wire.
-And **the server embeds and refusal still holds** runs against a **live
-Atlas cluster**, because that one cannot run anywhere else.
+Two of those rows are worth singling out. *A forgotten fact cannot reach a
+prompt* is asserted **with no database anywhere near it**, because a
+per-document check that cannot run without one is a check that could not
+have moved to a wire. And *a `$vectorSearch` hit is refused on the path that
+never passes through a query* runs against a **live Atlas cluster**, because
+that one cannot run anywhere else.
 
-That last one is worth its ninety seconds. Atlas Local registers no embedding
+That second one is worth its ninety seconds. Atlas Local registers no embedding
 models, so it *declines* an `auto_embed` declaration and falls back to a
 client-supplied vector — a test that accepted the fallback would assert the
 opposite of what it claims. Against a real cluster the application never
@@ -807,7 +808,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 366 tests, 105 seconds -- the inner loop
+pytest              # 365 tests, 105 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 

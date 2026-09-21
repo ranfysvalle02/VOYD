@@ -565,6 +565,16 @@ documents?"
 
 ## 4. Coverage
 
+369 tests, ~6,738 lines, against 8,152 lines of `voyd/` and 5,909 of
+`tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
+which is the right axis, but it is not line coverage and should not be
+mistaken for it.
+
+557 lines are mentioned by no test file, and all of it is defensible now:
+`composition.py` is type-checked rather than executed by design,
+`trait.py` and `expiry.py` are small and exercised indirectly, `sealing.py`
+runs under the encryption tests even though a name-scan cannot see it.
+
 **Every claim is attached to a file, and that mapping is checked.**
 `CLAIMS.md` names each guarantee and the test that would go red if it stopped
 holding; `tests/test_every_claim_names_its_evidence.py` asserts the mapping
@@ -584,17 +594,6 @@ assertions relate to the claim, and there is no honest way to do that
 mechanically. What would help is the thing §1 asks for -- somebody outside
 reading a claim, disagreeing, and finding the test that should have caught
 them being wrong.
-
-
-370 tests, ~6,750 lines, against 8,152 lines of `voyd/` and 5,909 of
-`tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
-which is the right axis, but it is not line coverage and should not be
-mistaken for it.
-
-557 lines are mentioned by no test file, and all of it is defensible now:
-`composition.py` is type-checked rather than executed by design,
-`trait.py` and `expiry.py` are small and exercised indirectly, `sealing.py`
-runs under the encryption tests even though a name-scan cannot see it.
 
 **The scanner had 1,043 lines and no test. It now has 27.** `voyd_scan` is
 the first thing a stranger runs and the only thing in this repository that
@@ -646,7 +645,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (366 tests, ~105 seconds) with
+**Consider:** the suite is fast by default (365 tests, ~105 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
