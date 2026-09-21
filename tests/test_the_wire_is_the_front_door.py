@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
@@ -55,15 +56,15 @@ def seeded(db):
     return db
 
 
-@pytest.fixture
-def boundary(tmp_path):
-    """A `voyd-wire` on a free port, from a policy file. Yields its URI."""
+@contextmanager
+def _wire(tmp_path, *extra):
+    """A `voyd-wire` on a free port, from a policy file. Yields the port."""
     policy = tmp_path / "voydfile.py"
     policy.write_text(POLICY)
     port = free_port()
     proc = subprocess.Popen(
         [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
-         "--listen", str(port), "--target", mongo_host()],
+         "--listen", str(port), "--target", mongo_host(), *extra],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         until = time.monotonic() + 15
@@ -77,13 +78,36 @@ def boundary(tmp_path):
                 time.sleep(0.1)
         else:
             pytest.fail("voyd-wire never started listening")
-        yield f"mongodb://localhost:{port}/?directConnection=true"
+        yield port
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+@pytest.fixture
+def boundary(tmp_path):
+    """The boundary as a pinned single server. Yields its URI."""
+    with _wire(tmp_path) as port:
+        yield f"mongodb://localhost:{port}/?directConnection=true"
+
+
+@pytest.fixture
+def advertised(tmp_path):
+    """The boundary advertising *itself* as the topology, and a URI with no
+    `directConnection`.
+
+    This is the shape the read-preference and retryable-write claims below
+    are about. `directConnection=true` tells the driver to stop thinking
+    about topology at all, which would make those assertions vacuous: the
+    question is what a driver does when it is allowed to discover, reads
+    the rewritten `hello`, and finds one member wearing this boundary's
+    address.
+    """
+    with _wire(tmp_path, "--advertise-self") as port:
+        yield f"mongodb://localhost:{port}/"
 
 
 def texts(uri, name, flt):
@@ -276,3 +300,143 @@ def test_an_ordinary_aggregation_is_untouched(seeded, boundary):
         client.close()
     assert [d["text"] for d in got] == ["doomed", "live"], (
         "the expired and revoked rows are refused; the rest aggregates")
+
+
+# --------------------------------------------------------------------------
+# What a driver still gets to do through the boundary.
+#
+# This page used to say the proxy "does not honour read preference, or retry
+# a write the client already saw fail." Both halves were written from
+# reasoning rather than measurement, and both were pessimistic -- which is
+# the same failure as being optimistic, pointed the other way, and a worse
+# one to ship in a README because it talks a reader out of the tool.
+#
+# The claims below are the measured behaviour. They are here rather than in
+# prose because an optimistic claim nobody tests is exactly what this
+# project exists to complain about.
+# --------------------------------------------------------------------------
+
+def test_a_strict_secondary_read_fails_instead_of_silently_reading_a_primary(
+        seeded, advertised):
+    """The one case that could have been a silent wrong answer.
+
+    A caller who asked for `secondary` and got the primary has been handed
+    a correct-looking result to a question nobody answered. Because the
+    rewritten `hello` advertises one member and passes `secondary` through
+    untouched, the driver finds nothing matching the selector and says so,
+    client-side, before a byte is sent. An error is the right answer here.
+    """
+    client = pymongo.MongoClient(
+        advertised, serverSelectionTimeoutMS=2500,
+        read_preference=pymongo.ReadPreference.SECONDARY)
+    try:
+        with pytest.raises(pymongo.errors.ServerSelectionTimeoutError,
+                           match="No replica set members match selector"):
+            list(client[seeded.name].notes.find({"tenant_id": "acme"}))
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("pref", [
+    pymongo.ReadPreference.PRIMARY,
+    pymongo.ReadPreference.PRIMARY_PREFERRED,
+    pymongo.ReadPreference.SECONDARY_PREFERRED,
+    pymongo.ReadPreference.NEAREST,
+], ids=lambda p: p.name)
+def test_every_satisfiable_read_preference_is_served_and_still_refuses(
+        seeded, advertised, pref):
+    """Honoured against a topology of one, which is what the spec says.
+
+    The `*Preferred` modes fall back to the primary when no secondary
+    exists, and `nearest` with no tags is satisfied by any member. So these
+    are not being ignored -- they are being answered correctly for the
+    topology the driver was shown. The refusal still applies to every one
+    of them, which is the part that matters: a read preference is not a way
+    around the boundary.
+    """
+    client = pymongo.MongoClient(advertised, serverSelectionTimeoutMS=8000,
+                                 read_preference=pref)
+    try:
+        got = sorted(d["text"] for d in
+                     client[seeded.name].notes.find({"tenant_id": "acme"}))
+    finally:
+        client.close()
+    assert got == ["doomed", "live"], (
+        f"{pref.name} served a different set of documents than primary did")
+
+
+def test_a_tagged_secondary_preferred_read_falls_back_rather_than_failing(
+        seeded, advertised):
+    """`secondaryPreferred` with tags that match nothing must fall back to
+    the primary *ignoring the tags* -- that is the spec, and it is the
+    difference between a boundary that is transparent to a driver's
+    configuration and one that breaks deployments using tag sets."""
+    client = pymongo.MongoClient(
+        advertised, serverSelectionTimeoutMS=8000,
+        read_preference=pymongo.read_preferences.SecondaryPreferred(
+            tag_sets=[{"dc": "east"}]))
+    try:
+        got = sorted(d["text"] for d in
+                     client[seeded.name].notes.find({"tenant_id": "acme"}))
+    finally:
+        client.close()
+    assert got == ["doomed", "live"]
+
+
+def test_retryable_writes_survive_the_topology_rewrite(seeded, advertised):
+    """`setName` is kept, so the driver still sees a replica set.
+
+    This is the payoff for the decision in `rewrite_topology` not to tidy
+    that field away. A driver that thinks it is talking to a standalone
+    silently disables retryable writes, and the caller finds out during a
+    failover. Asserting on `txnNumber` is asserting the retry is armed --
+    the driver performs the retry, which is why the proxy does not need to
+    and must not.
+    """
+    seen = []
+
+    class Watch(pymongo.monitoring.CommandListener):
+        def started(self, event):
+            if event.command_name == "insert":
+                seen.append("txnNumber" in event.command)
+
+        def succeeded(self, event): ...
+        def failed(self, event): ...
+
+    client = pymongo.MongoClient(advertised, serverSelectionTimeoutMS=8000,
+                                 retryWrites=True, event_listeners=[Watch()])
+    try:
+        client[seeded.name].notes.insert_one({"tenant_id": "acme",
+                                              "text": "retried"})
+        described = client.topology_description
+    finally:
+        client.close()
+
+    assert seen == [True], "the insert carried no txnNumber: no retry is armed"
+    assert described.topology_type_name == "ReplicaSetWithPrimary", (
+        "the driver stopped seeing a replica set, which disables retries")
+    assert described.logical_session_timeout_minutes is not None, (
+        "no logical session timeout means no sessions and so no retries")
+
+
+def test_a_session_and_a_transaction_cross_the_boundary(seeded, advertised):
+    """Sessions and multi-statement transactions are forwarded intact, and
+    a read inside one still refuses. A boundary that quietly broke either
+    would be found by an application, not by a README."""
+    client = pymongo.MongoClient(advertised, serverSelectionTimeoutMS=8000)
+    try:
+        db = client[seeded.name]
+        with client.start_session() as session:
+            with session.start_transaction():
+                db.notes.insert_one({"tenant_id": "acme", "text": "in a txn"},
+                                    session=session)
+                inside = sorted(d["text"] for d in db.notes.find(
+                    {"tenant_id": "acme"}, session=session))
+        assert inside == ["doomed", "in a txn", "live"], (
+            "a transaction either did not see its own write, or stopped "
+            "refusing the expired and revoked rows")
+        assert sorted(d["text"] for d in db.notes.find(
+            {"tenant_id": "acme"})) == ["doomed", "in a txn", "live"], (
+            "the transaction did not commit through the boundary")
+    finally:
+        client.close()

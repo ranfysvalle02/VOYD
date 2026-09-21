@@ -64,6 +64,15 @@ Then change one connection string. **That is the whole integration.** No
 import is added to your application, no handle replaces a collection, no read
 path is rewritten, and nobody has to remember anything.
 
+What your driver keeps, because this is the question that decides whether
+the sentence above is true for *you*: sessions, multi-statement transactions
+and retryable writes all cross the boundary intact, and every satisfiable
+read preference is served and still refused. What it loses is fan-out --
+every read lands on one upstream. The details, and the tests that hold them,
+are [below](#known-gaps). Run it with `--advertise-self` or reach it with
+`directConnection=true`; without one of the two your driver reads the
+cluster's own host list and connects straight past the boundary.
+
 ### Reads refuse
 
 ```
@@ -244,7 +253,9 @@ The suite is checked against sabotage rather than trusted: disabling the
 delete rewrite, the tenant egress check, the tenant *shape* check, cascade, or
 refusal itself each turns it red.
 
-Known gaps, stated rather than discovered:
+### Known gaps
+
+Stated rather than discovered:
 
 - Messages are capped at MongoDB's own 48MB ceiling and malformed framing
   closes the connection. A length field arrives from the wire and this
@@ -255,10 +266,28 @@ Known gaps, stated rather than discovered:
   flapping.
 - `SIGTERM` **drains**: stop accepting, let open connections finish, print
   what the process did. A second signal exits immediately.
-- It picks **one node** and forwards bytes. It does not load-balance reads,
-  honour read preference, or retry a write the client already saw fail —
-  reach it with `directConnection=true` so your driver does not chase the
-  hosts the cluster advertises straight past it.
+- It picks **one node** and forwards bytes, so the gap is **fan-out**: every
+  read lands on that one upstream and nothing is spread across secondaries.
+  What survives the crossing is more than that sentence used to admit, and
+  each line is asserted in `tests/test_the_wire_is_the_front_door.py` rather
+  than reasoned about:
+
+  | a driver asks for | through the boundary |
+  |---|---|
+  | `primary`, `primaryPreferred`, `secondaryPreferred`, `nearest` | served, and still refused |
+  | `secondaryPreferred` with a tag set matching nothing | falls back to the primary, per spec |
+  | `secondary` (strict) | **`ServerSelectionTimeoutError`**, client-side |
+  | retryable writes | armed — `txnNumber` attached, topology `ReplicaSetWithPrimary` |
+  | sessions, multi-statement transactions | forwarded intact, and reads inside them refuse |
+
+  Read preference is *honoured against a topology of one*, which is not the
+  same as ignored: the `*Preferred` modes are correctly satisfied by the
+  primary, and strict `secondary` — the only mode that could have quietly
+  become a primary read — is an error before a byte leaves the client. The
+  driver performs its own retries, which is why this does not and must not.
+  Keeping `setName` in the rewritten `hello` is what buys the last two rows;
+  a driver that thinks it is talking to a standalone turns retries off and
+  tells nobody.
 - An upstream connection is **per client**, not pooled, and deliberately: a
   MongoDB connection carries authentication, sessions, cursors and
   transactions, so sharing one would hand a cursor to whoever asked second.

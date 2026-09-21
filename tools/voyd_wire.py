@@ -27,11 +27,16 @@ same property that makes shadow mode three lines.
 portable, and it is deliberately outside `voyd/` -- nothing here is importable
 package surface. It terminates TLS, follows a failover, drains on `SIGTERM`,
 and runs one coroutine pair per connection across `--workers` processes. What
-it still is not: a driver. It does not load-balance reads, honour read
-preference, retry a write the client already saw fail, or pool upstream
-connections -- that last one deliberately, because a MongoDB connection
-carries authentication, sessions, cursors and transactions, and sharing one
-would hand a cursor to whoever asked second.
+it still is not: a driver. It does not fan reads out across secondaries, and
+it does not pool upstream connections -- that last one deliberately, because
+a MongoDB connection carries authentication, sessions, cursors and
+transactions, and sharing one would hand a cursor to whoever asked second.
+
+What does survive the crossing, measured rather than assumed: read preference
+is honoured against a topology of one (the `*Preferred` modes served by the
+primary, strict `secondary` a client-side error rather than a quiet primary
+read), retryable writes stay armed because `rewrite_topology` keeps
+`setName`, and sessions and transactions are forwarded intact.
 
 **Concurrency is the transport's problem, not the boundary's.** Every
 function that rewrites bytes here -- `enforce`, `refuse_unrewritable`,

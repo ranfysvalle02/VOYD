@@ -177,10 +177,42 @@ them. `SIGTERM` and `SIGINT` are both handled and both drain cleanly, so
 this needs somebody to reach for `-9` specifically. **Consider:** a
 supervisor that reaps by process group will not find them.
 
-**One node, no topology.** Clients are pinned here, but *here* is a single
-process group: it does not load-balance reads, honour read preference, or retry a
-write the client already saw fail. Pinning and fanning out are different
-problems and only the first one is solved.
+**One node, no fan-out.** Clients are pinned here, but *here* is a single
+process group: every read lands on one upstream and nothing is spread across
+secondaries. Pinning and fanning out are different problems and only the
+first one is solved. For a read-heavy retrieval workload that is a real cost
+lever left on the table -- serving embeddings off secondaries is a standard
+move and this cannot do it. **Consider:** it is the only one of the three
+things this section used to claim were missing that actually is.
+
+The other two were wrong, and wrong in the direction that talks a reader out
+of the tool. This page said the boundary does not "honour read preference, or
+retry a write the client already saw fail." Both were reasoned rather than
+measured. Measured:
+
+- **Read preference is honoured against a topology of one.** The
+  `*Preferred` modes and `nearest` are served by the primary, which is what
+  the spec prescribes when no secondary exists, and the refusal still
+  applies to every one of them. A `secondaryPreferred` read carrying a tag
+  set that matches nothing falls back to the primary ignoring the tags,
+  again per spec.
+- **Strict `secondary` is an error, not a quiet primary read.** That is the
+  one case that could have handed a caller a correct-looking answer to a
+  question nobody asked, and it fails client-side before a byte is sent,
+  because `secondary` is passed through the `hello` rewrite untouched.
+- **Retryable writes are armed.** `txnNumber` is attached and the driver
+  sees `ReplicaSetWithPrimary` -- a *richer* topology than the same driver
+  gets connecting directly with `directConnection=true`, which sees
+  `Single`. That is the `setName`-is-kept decision above paying off. The
+  proxy does not retry because the driver does; §3's `replSetStepDown` test
+  already walks that whole path.
+- **Sessions and multi-statement transactions cross intact**, and a read
+  inside a transaction still refuses.
+
+Every line of that is now an assertion in
+`tests/test_the_wire_is_the_front_door.py`. Restating a claim in prose and
+leaving it untested would have replaced a pessimistic guess with an
+optimistic one, which is not an improvement.
 
 **A failover costs the in-flight requests.** Re-resolution happens on the
 *next* connection. The request that received `NotWritablePrimary` is
