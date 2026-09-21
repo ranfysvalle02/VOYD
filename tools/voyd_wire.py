@@ -25,11 +25,21 @@ same property that makes shadow mode three lines.
 
 **What this is and is not.** It is a demonstration that the boundary is
 portable, and it is deliberately outside `voyd/` -- nothing here is importable
-package surface. It is not a production proxy: no TLS termination, no
-connection pooling, no auth passthrough beyond what the client sends, one
-thread per direction, and receipts shared across connections. A real one is a
-different project and probably not written in Python. The point it makes is
-architectural, and it makes it in about three hundred lines.
+package surface. It terminates TLS, follows a failover, drains on `SIGTERM`,
+and runs one coroutine pair per connection across `--workers` processes. What
+it still is not: a driver. It does not load-balance reads, honour read
+preference, retry a write the client already saw fail, or pool upstream
+connections -- that last one deliberately, because a MongoDB connection
+carries authentication, sessions, cursors and transactions, and sharing one
+would hand a cursor to whoever asked second.
+
+**Concurrency is the transport's problem, not the boundary's.** Every
+function that rewrites bytes here -- `enforce`, `refuse_unrewritable`,
+`revoke_instead_of_delete`, `rewrite_topology`, `delete_reply` -- is
+`bytes -> bytes` and touches no socket, because `reachable()` is pure. That
+is what made moving this from two OS threads per connection to one coroutine
+pair a change to the shell and nothing else, and it is why the ceiling is now
+upstream sockets rather than thread stacks.
 
 The wire framing -- header layout, OP_MSG sections, OP_COMPRESSED -- is lifted
 from `tools/wire_proxy.py` in the author's `mdb-embedded` repository, MIT to
@@ -39,9 +49,12 @@ MIT. That file logs traffic; this one rewrites it.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import os
 import signal
 import socket
+import ssl
 import struct
 import sys
 import threading
@@ -137,6 +150,21 @@ class ProtocolError(Exception):
     """
 
 
+def frame(hdr: bytes) -> tuple[int, int, int, int]:
+    """The header, validated. One rule, and both readers below obey it.
+
+    This is deliberately separate from the reading: the cap is the security
+    property and the socket is an implementation detail, so a sync reader
+    and an async one must not each carry their own copy of the bound. They
+    would drift, and the one that drifted would be the one nobody tested.
+    """
+    msg_len, req_id, resp_to, opcode = struct.unpack("<iiiI", hdr)
+    if not HEADER <= msg_len <= MAX_MESSAGE:
+        raise ProtocolError(
+            f"message length {msg_len} outside [{HEADER}, {MAX_MESSAGE}]")
+    return msg_len, req_id, resp_to, opcode
+
+
 def read_exact(sock: socket.socket, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
@@ -148,12 +176,30 @@ def read_exact(sock: socket.socket, n: int) -> bytes:
 
 
 def read_message(sock: socket.socket) -> tuple[bytes, int, int, int, int]:
+    """Blocking read of one message. Kept for tests and for anything that
+    wants the codec without an event loop; the proxy itself uses the async
+    reader below."""
     hdr = read_exact(sock, HEADER)
-    msg_len, req_id, resp_to, opcode = struct.unpack("<iiiI", hdr)
-    if not HEADER <= msg_len <= MAX_MESSAGE:
-        raise ProtocolError(
-            f"message length {msg_len} outside [{HEADER}, {MAX_MESSAGE}]")
+    msg_len, req_id, resp_to, opcode = frame(hdr)
     return hdr + read_exact(sock, msg_len - HEADER), msg_len, req_id, resp_to, opcode
+
+
+async def read_message_async(
+        reader: asyncio.StreamReader) -> tuple[bytes, int, int, int, int]:
+    """The same message, the same cap, without holding a thread.
+
+    `IncompleteReadError` is how a StreamReader spells the disconnect that
+    `read_exact` spells as an empty `recv`, and both mean the same thing:
+    the peer went away mid-message. It is translated here rather than at the
+    call site so `pump` has one disconnect to catch, not two.
+    """
+    try:
+        hdr = await reader.readexactly(HEADER)
+        msg_len, req_id, resp_to, opcode = frame(hdr)
+        body = await reader.readexactly(msg_len - HEADER)
+    except asyncio.IncompleteReadError as exc:
+        raise ConnectionError("disconnected") from exc
+    return hdr + body, msg_len, req_id, resp_to, opcode
 
 
 def _decompress(compressor_id: int, data: bytes) -> bytes | None:
@@ -648,22 +694,40 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
     return encode_op_msg(req_id, resp_to, flags, reply)
 
 
-def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
-         guards: dict[str, Guard], verbose: bool,
-         rewritten: set[int], lock: threading.Lock,
-         upstream: Upstream | None = None,
-         finished: threading.Semaphore | None = None,
-         advertise: str | None = None) -> None:
+async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+               back: asyncio.StreamWriter, *, to_server: bool,
+               guards: dict[str, Guard], verbose: bool,
+               rewritten: set[int],
+               upstream: Upstream | None = None,
+               advertise: str | None = None) -> None:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
     they share: a request id whose ``delete`` was turned into an ``update``
     has to be recognised again when its reply comes back the other way. It is
     per-connection, because request ids are.
+
+    It needs no lock. Both directions of a connection run on the same event
+    loop, so the set is only ever touched between awaits -- and the previous
+    version's `threading.Lock` was protecting against a preemption that can
+    no longer happen. Deleting it is not an optimisation; it removes a piece
+    of shared mutable state from a program whose entire argument is about
+    being careful with those.
+
+    ``back`` is the writer pointing the way we came, used to answer a
+    refusal without troubling the server.
     """
+
+    async def send(sock_writer: asyncio.StreamWriter, payload: bytes) -> None:
+        # `drain` is not optional. Without it a fast upstream and a slow
+        # client buffer the difference in this process's memory, which is
+        # the shape of an outage that looks like a leak.
+        sock_writer.write(payload)
+        await sock_writer.drain()
+
     try:
         while True:
-            raw, _len, req_id, resp_to, opcode = read_message(src)
+            raw, _len, req_id, resp_to, opcode = await read_message_async(reader)
             if opcode == OP_COMPRESSED:
                 expanded = uncompress_message(raw)
                 if expanded is None:
@@ -673,7 +737,7 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                     # failure this tool exists to make impossible.
                     print("  voyd: WARNING: compressed message this proxy "
                           "cannot read, forwarded unchecked", flush=True)
-                    dst.sendall(raw)
+                    await send(writer, raw)
                     continue
                 raw, opcode = expanded, OP_MSG
             if opcode == OP_MSG and to_server:
@@ -692,7 +756,7 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                 # reply goes straight back and the server never sees it.
                 refusal = refuse_unrewritable(raw, req_id, req_id, guards)
                 if refusal is not None:
-                    src.sendall(refusal)
+                    await send(back, refusal)
                     continue
 
                 target = guards.get(body.get("delete"))
@@ -701,8 +765,7 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                         raw, req_id, resp_to, target, verbose)
                     if swapped is not None:
                         raw = swapped
-                        with lock:
-                            rewritten.add(req_id)
+                        rewritten.add(req_id)
 
                 # `findOneAndDelete` is a *different command*, and
                 # intercepting one and not the other gave a team the
@@ -717,11 +780,10 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                 if advertise:
                     rebuilt = rewrite_topology(raw, req_id, resp_to, advertise)
                     if rebuilt is not None:
-                        dst.sendall(rebuilt)
+                        await send(writer, rebuilt)
                         continue
-                with lock:
-                    was_delete = resp_to in rewritten
-                    rewritten.discard(resp_to)
+                was_delete = resp_to in rewritten
+                rewritten.discard(resp_to)
 
                 # The failover signal, read off the reply the client was
                 # getting anyway. No health check, no timer: the server is
@@ -735,7 +797,7 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
 
                 raw = (delete_reply(raw, req_id, resp_to) if was_delete
                        else enforce(raw, req_id, resp_to, guards, verbose))
-            dst.sendall(raw)
+            await send(writer, raw)
     except ProtocolError as exc:
         print(f"  voyd: dropped a connection: {exc}", flush=True)
     except (ConnectionError, OSError):
@@ -745,16 +807,13 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
         # a connection error -- which printed a stack trace on every clean
         # exit and made a working proxy look broken.
         pass
+    except asyncio.CancelledError:
+        # The sibling direction ended and `session` is tearing this one
+        # down. Not an error, and re-raising is how a cancelled task is
+        # supposed to behave -- swallowing it would make shutdown hang.
+        raise
     except Exception:
         traceback.print_exc()
-    finally:
-        for sock in (src, dst):
-            try:
-                sock.close()
-            except OSError:
-                pass
-        if finished is not None:
-            finished.release()
 
 
 # What a replica set says when the node you are talking to is no longer the
@@ -807,6 +866,11 @@ class Upstream:
         self.verbose = verbose
         self._addr: tuple[str, int, bool] | None = None
         self._lock = threading.Lock()
+        # Resolution is serialised so a burst of clients arriving after an
+        # election causes one topology scan rather than one each. The
+        # threading lock above still guards the cache itself, because
+        # `_resolve` runs in an executor thread.
+        self._resolving = asyncio.Lock()
         self.generation = 0
 
     def address(self) -> tuple[str, int, bool]:
@@ -877,12 +941,41 @@ class Upstream:
         sock.settimeout(None)
         if not tls:
             return sock
-        import ssl
         ctx = ssl.create_default_context()
         # `server_hostname` is what makes certificate validation mean
         # anything against a named cluster; without it this is an encrypted
         # channel to whoever answered.
         return ctx.wrap_socket(sock, server_hostname=host)
+
+    async def open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """The same upstream connection, without holding a thread.
+
+        `_resolve` stays blocking -- it is a DNS round trip and a pymongo
+        topology scan -- so it goes to an executor. Doing it inline would
+        stall every other connection on this loop for the length of a
+        cluster handshake, which is exactly the failure an event loop is
+        supposed to remove.
+        """
+        async with self._resolving:
+            loop = asyncio.get_running_loop()
+            host, port, tls = await loop.run_in_executor(None, self.address)
+
+        ssl_ctx = None
+        server_hostname = None
+        if tls:
+            ssl_ctx = ssl.create_default_context()
+            server_hostname = host
+        reader, writer = await asyncio.open_connection(
+            host, port, ssl=ssl_ctx, server_hostname=server_hostname)
+
+        # No *read* timeout, deliberately -- see `connect` above. Keepalive
+        # is the tool that notices a peer that vanished without penalising
+        # one that is merely idle, and it has to be set on the socket under
+        # the stream rather than on the stream.
+        raw_sock = writer.get_extra_info("socket")
+        if raw_sock is not None:
+            keepalive(raw_sock)
+        return reader, writer
 
 
 def stepped_down(reply: dict) -> str | None:
@@ -912,26 +1005,36 @@ def keepalive(sock: socket.socket) -> None:
         pass                                 # best effort, never fatal
 
 
-def listener(port: int, certfile: str | None,
-             keyfile: str | None) -> socket.socket:
-    """The socket clients reach, TLS-terminated when a certificate is given.
+def listener(port: int, certfile: str | None, keyfile: str | None,
+             *, backlog: int = 512) -> tuple[socket.socket, "ssl.SSLContext | None"]:
+    """The socket clients reach, and the TLS context to wrap them in.
 
-    Without one this binds loopback only, and that is a decision rather than
-    a default: a plaintext boundary reachable from the network would carry
-    every document it just refused to refuse, in the clear, to anybody on
-    the path. With a certificate it binds all interfaces, because then it
-    can be one.
+    Without a certificate this binds loopback only, and that is a decision
+    rather than a default: a plaintext boundary reachable from the network
+    would carry every document it just refused to serve, in the clear, to
+    anybody on the path. With a certificate it binds all interfaces,
+    because then it can be one.
+
+    The context is returned *beside* the socket rather than wrapped around
+    it. A wrapped listening socket hands back an already-negotiated
+    `SSLSocket` from `accept()`, which means the handshake happens on the
+    accept path -- one slow or hostile client stalls every other pending
+    connection. `asyncio.start_server(ssl=...)` negotiates per connection
+    instead, so a handshake that never completes costs one coroutine.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0" if certfile else "127.0.0.1", port))
-    sock.listen(64)
+    # A deeper backlog than the old 64: with workers sharing this socket the
+    # kernel queue absorbs an accept burst that would otherwise be refused
+    # connections the client reads as the boundary being down.
+    sock.listen(backlog)
+    sock.setblocking(False)
     if not certfile:
-        return sock
-    import ssl
+        return sock, None
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ctx.load_cert_chain(certfile, keyfile)
-    return ctx.wrap_socket(sock, server_side=True)
+    return sock, ctx
 
 
 class Live:
@@ -956,68 +1059,116 @@ class Live:
             self.count -= 1
 
 
-def session(client: socket.socket, upstream: Upstream,
-            guards: dict[str, Guard], verbose: bool,
-            done: threading.Semaphore, live: Live,
-            advertise: str | None = None) -> None:
-    """One client connection, start to finish, on one thread pair.
+async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter,
+                  upstream: Upstream, guards: dict[str, Guard], verbose: bool,
+                  live: Live, advertise: str | None = None) -> None:
+    """One client connection, start to finish, as one coroutine pair.
 
     A MongoDB connection is stateful -- authentication, sessions, cursors
     and transactions all bind to it -- so an upstream connection is *per
     client* rather than pooled. Sharing one would hand a cursor to whoever
     asked second, which is the concurrency bug this whole package exists to
-    be careful about, committed by its own plumbing.
+    be careful about, committed by its own plumbing. That is unchanged by
+    the move off threads; what changed is that a connection now costs a
+    coroutine and a socket rather than two 8MB thread stacks.
 
-    What is bounded instead is how many there are at once. The semaphore is
-    released exactly once, here, so a client that disconnects mid-handshake
-    cannot leak a slot.
+    What is bounded instead is how many there are at once. `live` is
+    entered and exited exactly once, here, so a client that disconnects
+    mid-handshake cannot leak a slot.
     """
-    live.__enter__()
-    up = None
+    with live:
+        try:
+            up_r, up_w = await upstream.open()
+        except (OSError, asyncio.TimeoutError) as exc:
+            host, port, _ = upstream.address()
+            print(f"voyd-wire: cannot reach {host}:{port}: {exc}", flush=True)
+            # A connection failure is as good a reason to re-resolve as an
+            # election: the node may simply be gone.
+            upstream.invalidate(type(exc).__name__)
+            await close(client_w)
+            return
+
+        rewritten: set[int] = set()
+        common = {"guards": guards, "verbose": verbose,
+                  "rewritten": rewritten, "upstream": upstream,
+                  "advertise": advertise}
+        tasks = [
+            asyncio.ensure_future(pump(client_r, up_w, client_w,
+                                       to_server=True, **common)),
+            asyncio.ensure_future(pump(up_r, client_w, up_w,
+                                       to_server=False, **common)),
+        ]
+        try:
+            # Either direction ending ends the connection: a client that
+            # hung up has no reply to receive, and an upstream that closed
+            # has nothing more to say. Waiting for both instead would hold
+            # a slot open on the half-closed socket until keepalive
+            # noticed, which is minutes.
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            # Both have to actually finish before the slot is released, or
+            # a burst of short-lived clients reports a connection count
+            # with nothing to do with the sockets actually open.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await close(up_w)
+            await close(client_w)
+
+
+async def close(writer: asyncio.StreamWriter) -> None:
+    """Close a stream and do not care how it goes.
+
+    A peer that already vanished makes this raise, and a teardown path that
+    raises is how a clean disconnect ends up printing a stack trace and
+    making a working proxy look broken.
+    """
     try:
-        up = upstream.connect()
-    except OSError as exc:
-        host, port, _ = upstream.address()
-        print(f"voyd-wire: cannot reach {host}:{port}: {exc}", flush=True)
-        # A connection failure is as good a reason to re-resolve as an
-        # election: the node may simply be gone.
-        upstream.invalidate(type(exc).__name__)
-        client.close()
-        done.release()
-        live.__exit__()
-        return
-
-    rewritten: set[int] = set()
-    lock = threading.Lock()
-    finished = threading.Semaphore(0)
-    for src, dst, to_server in ((client, up, True), (up, client, False)):
-        threading.Thread(
-            target=pump, args=(src, dst),
-            kwargs={"to_server": to_server, "guards": guards,
-                    "verbose": verbose, "rewritten": rewritten, "lock": lock,
-                    "upstream": upstream, "finished": finished,
-                    "advertise": advertise},
-            daemon=True).start()
-
-    # Both directions have to end before the slot is free, or a burst of
-    # short-lived clients would report a connection count that has nothing
-    # to do with the sockets actually open.
-    finished.acquire()
-    finished.acquire()
-    done.release()
-    live.__exit__()
+        writer.close()
+        await writer.wait_closed()
+    except (OSError, ConnectionError, ssl.SSLError):
+        pass
 
 
-def summarise(guards: dict[str, Guard]) -> None:
-    """What this process actually did. A guarantee nobody counted is a
-    claim about one."""
-    served = sum(g.admitted for g in guards.values())
-    refused = sum(g.refused for g in guards.values())
-    revoked = sum(g.revoked for g in guards.values())
+def tally(guards: dict[str, Guard]) -> dict:
+    """What one process actually did, as data rather than as a print.
+
+    Separated from the printing because with `--workers` the counters live
+    in N address spaces and the number a human should read is the sum. A
+    summary printed per worker is not a summary, it is N partial ones that
+    each look like the whole -- and undercounting a refusal tally is the
+    specific way this tool would lie about the thing it exists to prove.
+    """
     reasons: dict[str, int] = {}
     for g in guards.values():
         for reason, n in g.reasons().items():
             reasons[reason] = reasons.get(reason, 0) + n
+    return {"served": sum(g.admitted for g in guards.values()),
+            "refused": sum(g.refused for g in guards.values()),
+            "revoked": sum(g.revoked for g in guards.values()),
+            "reasons": reasons}
+
+
+def merge(tallies: list[dict]) -> dict:
+    """N workers' counts, added up."""
+    total = {"served": 0, "refused": 0, "revoked": 0, "reasons": {}}
+    for one in tallies:
+        for key in ("served", "refused", "revoked"):
+            total[key] += one.get(key, 0)
+        for reason, n in (one.get("reasons") or {}).items():
+            total["reasons"][reason] = total["reasons"].get(reason, 0) + n
+    return total
+
+
+def summarise(counts: dict | dict[str, Guard]) -> None:
+    """What this boundary actually did. A guarantee nobody counted is a
+    claim about one."""
+    if counts and all(isinstance(v, Guard) for v in counts.values()):
+        counts = tally(counts)          # type: ignore[arg-type]
+    served = counts.get("served", 0)
+    refused = counts.get("refused", 0)
+    revoked = counts.get("revoked", 0)
+    reasons = counts.get("reasons") or {}
     print(f"voyd-wire: served {served}, refused {refused} {reasons or '{}'}, "
           f"turned {revoked} delete(s) into revocations", flush=True)
     print("voyd-wire: documents deleted by this process: 0", flush=True)
@@ -1026,9 +1177,17 @@ def summarise(guards: dict[str, Guard]) -> None:
 def serve(listen_port: int, target: str, guards: dict[str, Guard],
           verbose: bool, *, certfile: str | None = None,
           keyfile: str | None = None, max_connections: int = 200,
-          drain_seconds: float = 20.0, advertise: str | None = None) -> None:
-    upstream = Upstream(target, verbose=verbose)
-    server = listener(listen_port, certfile, keyfile)
+          drain_seconds: float = 20.0, advertise: str | None = None,
+          workers: int = 1) -> None:
+    """Bind, announce, then run the boundary -- in this process or N of them.
+
+    The listening socket is bound *here*, once, before any fork. That is
+    what makes a port already in use an error at startup rather than N
+    identical errors from children a moment later, and it is what lets the
+    workers share one accept queue without `SO_REUSEPORT`: the kernel hands
+    each connection to exactly one of them.
+    """
+    sock, ssl_ctx = listener(listen_port, certfile, keyfile)
 
     where = "0.0.0.0" if certfile else "127.0.0.1"
     print(f"voyd-wire: listening on {where}:{listen_port}"
@@ -1038,7 +1197,9 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
         print(f"voyd-wire: guarding {name}: {g.spec.describe()}"
               + (", delete -> revoke" if g.on_delete == "revoke" else ""),
               flush=True)
-    print(f"voyd-wire: up to {max_connections} concurrent connections",
+    print(f"voyd-wire: up to {max_connections} concurrent connections"
+          + (f" per worker, {workers} workers "
+             f"({max_connections * workers} total)" if workers > 1 else ""),
           flush=True)
     if advertise:
         print(f"voyd-wire: advertising itself as {advertise}; clients stay "
@@ -1052,81 +1213,203 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           f"mongodb{'+tls' if certfile else ''}://localhost:{listen_port}/"
           "?directConnection=true\n", flush=True)
 
-    slots = threading.Semaphore(max_connections)
-    live = Live()
-    stopping = threading.Event()
+    if workers > 1:
+        supervise(sock, workers, target, guards, verbose,
+                  ssl_ctx=ssl_ctx, max_connections=max_connections,
+                  drain_seconds=drain_seconds, advertise=advertise)
+        return
 
-    def drain(signum, _frame):
+    counts = asyncio.run(_run(sock, ssl_ctx, target, guards, verbose,
+                              max_connections=max_connections,
+                              drain_seconds=drain_seconds,
+                              advertise=advertise))
+    summarise(counts)
+
+
+async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
+               target: str, guards: dict[str, Guard], verbose: bool, *,
+               max_connections: int, drain_seconds: float,
+               advertise: str | None) -> dict:
+    """One worker: accept, serve, drain, and report what it counted."""
+    upstream = Upstream(target, verbose=verbose)
+    live = Live()
+    stopping = asyncio.Event()
+
+    async def handle(reader: asyncio.StreamReader,
+                     writer: asyncio.StreamWriter) -> None:
+        raw_sock = writer.get_extra_info("socket")
+        if raw_sock is not None:
+            keepalive(raw_sock)
+        if live.count >= max_connections:
+            # Closing beats queueing: a driver retries, and an unbounded
+            # backlog is how a proxy turns a busy minute into an outage.
+            print("voyd-wire: at the connection limit; refused one",
+                  flush=True)
+            await close(writer)
+            return
+        await session(reader, writer, upstream, guards, verbose, live,
+                      advertise)
+
+    # A failed TLS handshake, a port scan, a plain-TCP probe against a TLS
+    # listener: one client's problem, never the listener's. An earlier
+    # version caught `ssl.SSLError` -- which subclasses `OSError` -- in the
+    # shutdown branch and re-raised, killing the listener for everybody
+    # because one client spoke the wrong protocol. `start_server` isolates
+    # this per connection, and the handler below keeps it that way.
+    def mishap(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, (ssl.SSLError, ConnectionError, OSError)):
+            print(f"voyd-wire: rejected a connection: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            return
+        loop.default_exception_handler(context)
+
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(mishap)
+
+    server = await asyncio.start_server(handle, sock=sock, ssl=ssl_ctx)
+
+    def drain() -> None:
         """Stop accepting, let existing connections finish, then report.
 
         A proxy killed mid-flight drops whatever was in the air, and the
-        client sees a connection reset rather than an answer. Draining costs
-        a few seconds and turns a deploy into a non-event.
+        client sees a connection reset rather than an answer. Draining
+        costs a few seconds and turns a deploy into a non-event.
         """
         if stopping.is_set():
             os._exit(1)                  # second signal: they mean it
         stopping.set()
         print("\nvoyd-wire: draining; not accepting new connections",
               flush=True)
-        try:
-            server.close()               # unblocks accept()
-        except OSError:
-            pass
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
-            signal.signal(sig, drain)
-        except ValueError:
-            pass                         # not the main thread; fine
+            loop.add_signal_handler(sig, drain)
+        except (ValueError, NotImplementedError):
+            pass                         # not the main thread, or not POSIX
 
-    while not stopping.is_set():
-        try:
-            client, _ = server.accept()
-        except Exception as exc:
-            # Two very different things arrive here and telling them apart
-            # is load-bearing. `drain` closes the listener to wake this up,
-            # which raises -- that is the shutdown path. Everything else is
-            # *one client's* problem: a failed TLS handshake, a port scan, a
-            # plain-TCP probe against a TLS listener.
-            #
-            # `ssl.SSLError` subclasses `OSError`, so an earlier version of
-            # this caught the handshake failure in the shutdown branch and
-            # re-raised -- killing the listener for every other client
-            # because one of them spoke the wrong protocol. Trivially
-            # deniable, and found by a test that probed the port before
-            # connecting properly.
-            if stopping.is_set():
-                break
-            print(f"voyd-wire: rejected a connection: "
-                  f"{type(exc).__name__}: {exc}", flush=True)
-            continue
-        keepalive(client)
-        if not slots.acquire(blocking=False):
-            # Closing beats queueing: a driver retries, and an unbounded
-            # backlog is how a proxy turns a busy minute into an outage.
-            print("voyd-wire: at the connection limit; refused one",
-                  flush=True)
-            client.close()
-            continue
-        threading.Thread(target=session,
-                         args=(client, upstream, guards, verbose, slots, live,
-                               advertise),
-                         daemon=True).start()
+    async with server:
+        await stopping.wait()
+
+    server.close()
+    try:
+        await server.wait_closed()
+    except (OSError, ConnectionError):
+        pass
 
     # Wait for the connections that were already open. Bounded, because a
     # client holding a cursor open forever must not hold up a deploy.
     #
-    # A plain counter rather than draining the semaphore: acquiring N slots
+    # A plain counter rather than draining a semaphore: acquiring N slots
     # to prove nobody holds one leaks every slot acquired before the first
     # failure, so the check could never succeed and every shutdown burned
     # the full timeout looking patient.
     deadline = time.monotonic() + drain_seconds
     while time.monotonic() < deadline and live.count:
-        time.sleep(0.1)
+        await asyncio.sleep(0.05)
     if live.count:
         print(f"voyd-wire: {live.count} connection(s) still open after "
               f"{drain_seconds}s; closing anyway", flush=True)
-    summarise(guards)
+    return tally(guards)
+
+
+def supervise(sock: socket.socket, workers: int, target: str,
+              guards: dict[str, Guard], verbose: bool, *,
+              ssl_ctx: "ssl.SSLContext | None", max_connections: int,
+              drain_seconds: float, advertise: str | None) -> None:
+    """N worker processes over one listening socket, and one honest total.
+
+    Why processes at all, when the loop already removed the thread stacks:
+    the per-connection CPU here is BSON decode in `decode_sections` and
+    `enforce`, and that is the one cost an event loop cannot spread. A
+    single loop saturates one core and then queues. Workers are how the
+    other cores get used.
+
+    Why `fork` and not `multiprocessing`: the guards are live `Admission`
+    handles built from a policy file, and the default start method on macOS
+    is spawn, which would pickle them or re-read the file. Forking inherits
+    the objects that were already validated at startup, so every worker is
+    enforcing provably the same policy rather than its own re-parse of it.
+
+    Each child writes its tally back through a pipe before exiting. The
+    parent adds them up and prints once -- see `tally` for why N partial
+    summaries would be worse than none.
+    """
+    children: list[tuple[int, int]] = []          # (pid, read fd)
+    for _ in range(workers):
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            # Leave the parent's process group. A terminal sends `SIGINT`
+            # to the whole foreground group, so a child that stayed in it
+            # got the interrupt twice -- once from the tty and once
+            # forwarded by the parent -- and the second signal is the one
+            # that means "they mean it" and exits immediately. Both
+            # workers therefore died mid-drain without reporting, and the
+            # totals silently undercounted by everything they had served.
+            # Measured, not theorised: Ctrl-C lost both tallies.
+            #
+            # One signal path, from the parent, is the fix. It is also
+            # what containers already do -- `docker stop` and Kubernetes
+            # signal PID 1 alone, never the group.
+            try:
+                os.setpgrp()
+            except OSError:
+                pass
+            code = 0
+            try:
+                counts = asyncio.run(_run(
+                    sock, ssl_ctx, target, guards, verbose,
+                    max_connections=max_connections,
+                    drain_seconds=drain_seconds, advertise=advertise))
+            except BaseException:
+                traceback.print_exc()
+                counts, code = tally(guards), 1
+            try:
+                with os.fdopen(write_fd, "w") as out:
+                    json.dump(counts, out)
+            except OSError:
+                pass
+            # `_exit`, not `sys.exit`: a forked child must not run the
+            # parent's atexit handlers or flush its buffers a second time.
+            os._exit(code)
+        os.close(write_fd)
+        children.append((pid, read_fd))
+
+    # The parent holds no connections, so it must not hold the socket
+    # either -- an accept queue with a listener that never accepts is a
+    # client hanging for no reason.
+    sock.close()
+
+    def forward(signum, _frame):
+        for pid, _fd in children:
+            try:
+                os.kill(pid, signum)
+            except ProcessLookupError:
+                pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, forward)
+        except ValueError:
+            pass
+
+    tallies: list[dict] = []
+    for pid, read_fd in children:
+        with os.fdopen(read_fd) as incoming:
+            blob = incoming.read()
+        try:
+            tallies.append(json.loads(blob))
+        except ValueError:
+            # A worker that died without reporting is worth saying out
+            # loud: the total below is now missing its share, and a
+            # silently low refusal count is the one number here that must
+            # never be quietly wrong.
+            print(f"voyd-wire: worker {pid} exited without a tally; the "
+                  f"totals below undercount by its share", flush=True)
+        os.waitpid(pid, 0)
+    summarise(merge(tallies))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1172,6 +1455,12 @@ def main(argv: list[str] | None = None) -> int:
                          "closed rather than queued, because a driver "
                          "retries and an unbounded backlog turns a busy "
                          "minute into an outage")
+    ap.add_argument("--workers", type=int, default=1, metavar="N",
+                    help="worker processes sharing the listening socket. "
+                         "The event loop makes a connection cheap but "
+                         "cannot spread BSON decoding across cores, so "
+                         "this is the knob that does. Counters are summed "
+                         "across workers and reported once on shutdown")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -1203,9 +1492,18 @@ def main(argv: list[str] | None = None) -> int:
         advertise = args.advertise
         if args.advertise_self and not advertise:
             advertise = f"localhost:{args.listen}"
+        if args.workers < 1:
+            print("voyd-wire: --workers must be at least 1", file=sys.stderr)
+            return 2
+        if args.workers > 1 and not hasattr(os, "fork"):
+            print("voyd-wire: --workers needs fork(); this platform has "
+                  "none, so run one process per port behind a balancer",
+                  file=sys.stderr)
+            return 2
         serve(args.listen, args.target, guards, not args.quiet,
               certfile=args.tls_cert, keyfile=args.tls_key,
-              max_connections=args.max_connections, advertise=advertise)
+              max_connections=args.max_connections, advertise=advertise,
+              workers=args.workers)
     except KeyboardInterrupt:
         summarise(guards)
     return 0

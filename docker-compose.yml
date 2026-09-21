@@ -27,3 +27,10 @@ services:
       retries: 40
       start_period: 20s
 
+
+volumes:
+  # Declared because it is referenced above. Without this stanza `docker
+  # compose up` fails with "invalid compose project" and never starts
+  # mongod -- which took the integration half of CI with it, silently, for
+  # as long as nobody read past the first failing line.
+  voyd-atlas:

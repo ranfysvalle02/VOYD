@@ -80,9 +80,10 @@ def test_without_a_certificate_it_binds_loopback_only():
     """A decision, not a default. A plaintext boundary reachable from the
     network would carry in the clear every document it just refused."""
     port = free_port()
-    sock = w.listener(port, None, None)
+    sock, ctx = w.listener(port, None, None)
     try:
         assert sock.getsockname()[0] == "127.0.0.1"
+        assert ctx is None, "no certificate, no TLS"
     finally:
         sock.close()
 
@@ -90,10 +91,13 @@ def test_without_a_certificate_it_binds_loopback_only():
 def test_with_a_certificate_it_terminates_tls_and_binds_outward(tmp_path):
     port = free_port()
     cert, key = _self_signed(tmp_path)
-    sock = w.listener(port, str(cert), str(key))
+    sock, ctx = w.listener(port, str(cert), str(key))
     try:
         assert sock.getsockname()[0] == "0.0.0.0"
-        assert isinstance(sock, ssl.SSLSocket)
+        # The context comes back beside the socket rather than wrapped
+        # around it, so the handshake happens per connection instead of on
+        # the accept path where one stalled client blocks every other.
+        assert isinstance(ctx, ssl.SSLContext)
     finally:
         sock.close()
 

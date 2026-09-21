@@ -263,6 +263,13 @@ Known gaps, stated rather than discovered:
   MongoDB connection carries authentication, sessions, cursors and
   transactions, so sharing one would hand a cursor to whoever asked second.
   What is bounded is how many exist at once (`--max-connections`).
+- **One coroutine pair per connection, `--workers N` across cores.** A
+  connection costs a coroutine and a socket, not two OS thread stacks: 3,000
+  idle connections are 19 threads and 92MB, where the threaded version was
+  9,001 threads and 365MB. One event loop still saturates one core at
+  ~97% under load, because the per-message cost is BSON decode — `--workers`
+  pre-forks over one shared listening socket to use the rest. Counters are
+  summed across workers and printed once.
 - `on_delete="revoke"` covers both delete verbs and refuses the three that
   cannot be rewritten. An `update` that *overwrites* a fact is still an
   ordinary update — that is mutation rather than forgetting, and treating it

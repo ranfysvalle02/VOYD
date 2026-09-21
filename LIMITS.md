@@ -13,7 +13,7 @@ yet. They are marked.
 
 ## 1. The one that actually matters
 
-**Nobody has used this but its author.** 80 commits, one contributor, zero
+**Nobody has used this but its author.** 83 commits, one contributor, zero
 external users, zero pilots. Every claim in this repository is verified by
 somebody who also wrote the claim.
 
@@ -117,8 +117,17 @@ treat the target as a standalone, which silently disables retryable writes.
 
 ### Open
 
+**`--workers` orphans on `SIGKILL`.** Workers leave the parent's process
+group so the parent is the only thing that signals them -- that is what
+stops a terminal's `SIGINT` reaching a worker twice and killing it mid-drain
+before it reports its counts. The cost is the other direction: `kill -9` on
+the parent leaves the children accepting connections with nobody to drain
+them. `SIGTERM` and `SIGINT` are both handled and both drain cleanly, so
+this needs somebody to reach for `-9` specifically. **Consider:** a
+supervisor that reaps by process group will not find them.
+
 **One node, no topology.** Clients are pinned here, but *here* is a single
-process: it does not load-balance reads, honour read preference, or retry a
+process group: it does not load-balance reads, honour read preference, or retry a
 write the client already saw fail. Pinning and fanning out are different
 problems and only the first one is solved.
 
@@ -130,13 +139,46 @@ somebody reports it as a bug.
 **No upstream pooling, deliberately.** A MongoDB connection carries
 authentication, sessions, cursors and transactions; sharing one would hand a
 cursor to whoever asked second. One upstream per client is the right shape;
-what is bounded is how many exist. **Consider:** this means connection count
-scales 1:1 with clients, and each is two threads. Past a few hundred, this
-wants to be an event loop or a different language.
+what is bounded is how many exist. Connection count still scales 1:1 with
+clients -- that part is permanent and correct.
 
-**No metrics endpoint.** Counters exist and print on shutdown. There is no
-`/metrics`, no structured log, nothing to scrape. **Consider:** this is the
-first thing anybody operating it will ask for.
+What is no longer true is the cost of one. This used to be two OS threads
+per connection, and this page used to say that past a few hundred it wanted
+"an event loop or a different language." The second half was wrong: every
+byte-rewriting function here is `bytes -> bytes` over a pure `reachable()`,
+so nothing about the *boundary* was ever tied to the transport. Only the
+shell was, and replacing it was a contained change rather than a rewrite.
+
+Measured on this laptop, idle connections held open, old versus new:
+
+| connections | threads | RSS | accept |
+|---|---|---|---|
+| 400 | 1,201 -> 19 | 87.6MB -> 50.7MB | 0.12s -> 0.03s |
+| 1,500 | 4,501 -> 19 | 210.0MB -> 68.2MB | 0.85s -> 0.11s |
+| 3,000 | 9,001 -> 19 | 364.5MB -> 92.0MB | 3.39s -> 0.25s |
+
+The 19 is a fixed executor pool, not per connection; it does not grow.
+
+**One event loop is still one core.** Under 24 concurrent clients a single
+worker sits at **96.7% CPU** -- pinned to one core, because the per-message
+cost here is BSON decode in `decode_sections` and `enforce` and no event
+loop spreads that. `--workers N` pre-forks N processes over one inherited
+listening socket, which is the knob that uses the other cores.
+
+**Consider:** the measured gain from `--workers 4` was only **1.42x**
+(635 -> 901 queries/sec), not 4x, because at that point `mongod` and the
+load generator were competing for the same fourteen cores as the proxy. The
+honest reading is that the *single-core ceiling is real and now removable*,
+not that four workers buy four times the throughput. Nobody has run this on
+a machine where the database is somewhere else, which is the only
+measurement that would settle it.
+
+**No metrics endpoint.** Counters exist and print on shutdown -- summed
+across workers and printed once, because N workers each printing their own
+summary reads exactly like the real thing while reporting a fraction of the
+traffic. There is still no `/metrics`, no structured log, nothing to scrape.
+**Consider:** this is the first thing anybody operating it will ask for, and
+it is now the *only* thing on this list blocking a week-long pilot.
 
 **`update` is not intercepted.** An `update` that overwrites a fact is
 mutation, not forgetting, and treating it otherwise would make every edit a
@@ -160,7 +202,7 @@ documents?"
 
 ## 4. Coverage
 
-103 tests, ~2,050 lines, against 8,078 lines of `voyd/` and 1,228 of
+113 tests, ~2,210 lines, against 8,078 lines of `voyd/` and 1,497 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -171,7 +213,7 @@ mistaken for it.
 runs under the encryption tests even though a name-scan cannot see it.
 `capabilities.py` (130 lines) is the one with no real excuse.
 
-**Consider:** the suite is fast by default (106 tests, ~16 seconds) with
+**Consider:** the suite is fast by default (116 tests, ~19 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
@@ -219,7 +261,7 @@ wants them adds surface that has to be kept honest forever.
 | **Revocation that propagates** | a sync protocol | `perimeter.py` says who else holds a copy is auditable and never enforceable. That is true without a protocol between you and the replica — and stops being true with one |
 | **Reverse-indexed receipts** | a storage decision | *"which answers were built on this fact?"* is already a query for anything written back; what is missing is the artefact that **left** — a Slack message, a fine-tune |
 | **A second engine** | doubles the surface | a user who is not on MongoDB |
-| **Event-loop rewrite of the proxy** | a different program | someone hitting the connection ceiling |
+| **A second listener topology** | real work | `--workers` pins clients to one host; fanning out is still a different problem |
 
 ---
 
