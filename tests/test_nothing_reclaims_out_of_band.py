@@ -1,6 +1,6 @@
 """The principle said "tool or endpoint". Only the tool half was enforced.
 
-`docs/ideas.md` has said this since the beginning, under *Deliberately not
+`docs/STATE.md` has said this since the beginning, under *Deliberately not
 doing*:
 
     **A delete tool or endpoint.** A delete hands the caller a cleanup
@@ -16,7 +16,7 @@ So the destructive path nobody exercised was also the one guaranteed to
 rot.
 
 It is gone. This is the other half of the assertion, so the sentence in
-`docs/ideas.md` is now true rather than aspirational -- and so that the next
+`docs/STATE.md` is now true rather than aspirational -- and so that the next
 person to add one has to argue with a test instead of with a paragraph.
 """
 

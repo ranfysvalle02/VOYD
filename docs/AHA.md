@@ -158,6 +158,67 @@ division of labour that follows, is
 
 ---
 
+## Step 6 — so the protocol is the product, and the handle is the demo
+
+Five steps above derive *where* the check belongs. This is what that leaves
+you holding, and it is a smaller object than the library around it.
+
+```python
+class Rule(Protocol):
+    @property
+    def reason(self) -> str: ...                    # its identity
+
+    def refuses(self, doc: dict, *,                 # THE GUARANTEE
+                when: datetime | None = None) -> bool: ...
+
+    def clause(self) -> dict | None: ...            # an optimisation, or None
+```
+
+Three required members, and that is the whole obligation. `refuses` is the
+authority; `clause` is the pushdown and is allowed to be `None`, which step 5
+is the argument for. Everything else in this repository is an implementation
+detail hanging off those three.
+
+Then five optional class attributes, discovered with `getattr` and defaulting
+to the behaviour of the original rules. They are deliberately **not** protocol
+members: an optional method on a Python `Protocol` becomes *required* to a
+static type checker, which would falsely reject an ordinary third-party rule.
+
+| attribute | what declaring it buys |
+|---|---|
+| `needs_caller` | the rule is handed who is asking, so clearance and restriction are rules rather than a special case |
+| `needs_tab` | the rule is **cumulative** — it compares the document against a running total for this read, and is asked only after every pure rule has admitted it |
+| `charges` | the rule *spends* that state rather than only reading it, so it is asked last of all |
+| `bypassable` | whether `including_refused()` may set this rule aside. False means *not this handle's to waive* |
+| `reversible` | present at all means an operator *imposes* this reason with a verb; its value says whether that verb has an inverse |
+
+`reversible` is where the protocol stops being a filter interface and starts
+carrying policy. `Marked` is one class doing two operationally opposite jobs:
+a **revocation** is an instruction about the world and must not be undoable; a
+**quarantine** is a hypothesis and must be, or the feature is a graveyard.
+That coupling used to live in the caller of `revoke()`, which meant the next
+reason somebody added got whichever half its author happened to remember. Now
+the reason declares its own reversibility and the verb reads it, so *"can this
+be taken back?"* is answered by looking at the rule rather than by reading the
+method that writes it.
+
+**The tell that this is the product and not the packaging** is that the same
+three members are what a static scanner recovers from a repository that has
+never heard of this library — and that the rules with no query half are
+exactly the ones it cannot. That correspondence is checked over the whole rule
+set in
+[`tests/test_the_scanner_and_the_handle_are_one_idea.py`](../tests/test_the_scanner_and_the_handle_are_one_idea.py),
+which is what makes step 5's table a statement about every static tool there
+is rather than about this one.
+
+A stranger's rule against this protocol is exercised in
+[`tests/test_a_third_party_rule_is_a_first_class_reason.py`](../tests/test_a_third_party_rule_is_a_first_class_reason.py),
+and five everyday mechanisms written as five rules on one handle are in
+[`examples/rosetta.py`](../examples/rosetta.py) — where `deleted=true` turns
+out to be the smallest member of the set.
+
+---
+
 ## What this buys, in one table
 
 | | has a pushed-down half | has the egress half |
@@ -252,4 +313,4 @@ Read [`blog.md`](blog.md) for the long argument and the failures that
 motivated it, [`policy-engines.md`](policy-engines.md) for the rule no index
 or policy engine can express, [`PORTABILITY.md`](PORTABILITY.md) for what
 survives a change of database and what does not, and
-[`ISSUES.md`](ISSUES.md) for what is still wrong.
+[`STATE.md`](STATE.md) for what is still wrong.

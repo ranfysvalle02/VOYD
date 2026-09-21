@@ -42,11 +42,11 @@ DOCS = (sorted(ROOT.glob("*.md"))
 # updated when the code was -- and each entry here is a grave marker: it
 # stays so the name cannot quietly come back in prose alone.
 #
-# ``ISSUES.md`` is exempt, and the exemption is the point rather than a
+# ``STATE.md`` is exempt, and the exemption is the point rather than a
 # concession: its job is to record what was removed and why, so naming the
 # thing is the *correct* behaviour there. A guard that forbade it would be
 # forcing the one document that should be specific to be vague.
-RECORDS_REMOVALS = "ISSUES.md"
+RECORDS_REMOVALS = "STATE.md"
 
 BURIED = (
     "voyd verify", "voyd-verify", "voyd.verify",
@@ -135,13 +135,21 @@ def test_a_claimed_test_count_is_not_lower_than_the_real_one():
                 f"sentence did not")
 
 
-# The canon. `docs/` was cut from eighteen files to eight because a reader
-# who cannot tell which three to read reads none of them, and the ones that
-# went were a thinking journal rather than documentation -- they are in the
-# git history, which is where working notes belong. Each survivor has one
-# job, and the README must still point at the load-bearing ones.
-FRONT_DOOR = ("blog.md", "ISSUES.md", "ideas.md", "PORTABILITY.md",
-              "policy-engines.md")
+# The canon. `docs/` went eighteen files -> eight -> ten -> six, because a
+# reader who cannot tell which three to read reads none of them. The cuts that
+# stuck removed two kinds of thing, and neither was documentation: a thinking
+# journal, and a *changelog* -- `ISSUES.md`, `ideas.md` and `opportunities.md`
+# were half struck-through entries by the end, kept in the place a reader goes
+# for current state. Both belong in the git history and are there.
+#
+# The three-way split was the subtler mistake. Each of those files opened by
+# explaining how it differed from the other two, which is the tell: when a
+# document's first job is to distinguish itself from its siblings, the split
+# costs more than it earns. They are one `STATE.md` now.
+#
+# Each survivor has one job, and the README must still point at the
+# load-bearing ones.
+FRONT_DOOR = ("blog.md", "STATE.md", "PORTABILITY.md", "policy-engines.md")
 
 
 def test_the_front_door_points_at_documents_that_exist():

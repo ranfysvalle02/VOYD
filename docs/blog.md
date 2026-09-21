@@ -576,7 +576,7 @@ services, a document that outlives its deletion, and a port of the entire
 thesis to pgvector that says out loud what is *harder* there.
 
 The honest limit: all of that runs against infrastructure I chose. What is
-unproven on yours is listed in `ISSUES.md`, including the one that costs
+unproven on yours is listed in `STATE.md`, including the one that costs
 something — the enterprise KMS path has never been run against a real KMS.
 
 ## Why MongoDB, specifically — and what that does not mean

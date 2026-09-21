@@ -363,7 +363,7 @@ Did we meet it?                                       yes / no
 Kept after two weeks?                                 yes / no
 In our own words, why:
 
-Friction worth fixing upstream (feeds docs/ideas.md):
+Friction worth fixing upstream (feeds docs/STATE.md):
 ```
 
 ```

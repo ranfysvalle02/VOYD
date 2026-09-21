@@ -297,7 +297,7 @@ rotation and shredding are exercised against something that can refuse.
 Enterprise key custody is not a synonym for one cloud vendor's managed
 service, and the open standard for it can be started in a subprocess.
 
-And [`ISSUES.md`](docs/ISSUES.md) lists what is wrong, unproven or imprecise in what
+And [`STATE.md`](docs/STATE.md) lists what is wrong, unproven or imprecise in what
 already ships — now narrowly: the three *hosted* providers share every line of
 that code path, and what is unproven about them is vendor-specific.
 
@@ -379,9 +379,10 @@ would be a worse design.
   which is the path that now feeds a model rather than a person who could
   notice a stale result.
 
-[`gold.md`](docs/gold.md) argues that the second and third of those make the
-*protocol* the thing worth owning, and that this repository currently markets
-the object instead.
+The second and third of those are what make the *protocol* the thing worth
+owning rather than the object — [`AHA.md`](docs/AHA.md) step 6 is the
+argument, and the correspondence it rests on is checked over the whole rule
+set in `tests/test_the_scanner_and_the_handle_are_one_idea.py`.
 
 ---
 
@@ -405,7 +406,6 @@ front door, the on-ramp and the pilot; everything else is reference material in
 |---|---|
 | [`blog.md`](docs/blog.md) | the long version: the three times the same bug came back, and the two bugs in the proof |
 | [`policy-engines.md`](docs/policy-engines.md) | the converse of the one idea: a retrieval rule no index filter and no policy engine can express, checked against a live Casbin enforcer |
-| [`gold.md`](docs/gold.md) | the handle is the demo; the protocol is the product — three members, five attributes, and a theory of set-relative rules |
 | [`PORTABILITY.md`](docs/PORTABILITY.md) | the guarantee is portable; its *enforcement* is not. Three engines measured, and the rung most vector databases cannot reach |
 | [`drift/`](drift/README.md) | the counter-argument, executable — including the whole thesis ported to pgvector with no MongoDB in the file |
 | [`examples/`](examples/) | thirteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
@@ -415,9 +415,7 @@ front door, the on-ramp and the pilot; everything else is reference material in
 
 | | |
 |---|---|
-| [`ISSUES.md`](docs/ISSUES.md) | defects, unproven claims, and operational caveats |
-| [`ideas.md`](docs/ideas.md) | what is worth building next, and what is deliberately not |
-| [`opportunities.md`](docs/opportunities.md) | what is worth *doing*, ranked — mostly not code, and honest about the one number that is still zero |
+| [`STATE.md`](docs/STATE.md) | one page: what is wrong, what is worth building, what is worth *doing* — and what is deliberately not |
 | [`CONSIDERATIONS.md`](docs/CONSIDERATIONS.md) | what will bite you while working on it: the traps, what each cost, and which guard now catches it |
 | [`BUG.md`](docs/BUG.md) | an upstream defect this repository found and filed, kept because a test still depends on the fallback it forced |
 

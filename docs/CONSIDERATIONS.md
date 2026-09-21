@@ -5,7 +5,7 @@ easy to lose again. Not a style guide — every entry below is a trap somebody
 already fell into, with what it cost and what now stops it recurring.
 
 Two documents sit next to this one and answer different questions.
-[`AHA.md`](AHA.md) is *why the design is this shape*. [`ISSUES.md`](ISSUES.md)
+[`AHA.md`](AHA.md) is *why the design is this shape*. [`STATE.md`](STATE.md)
 is *what is currently wrong*. This is *what will bite you while you work on
 it* — and where a guard will stop you, so you meet the reasoning before you
 meet the failure.
@@ -284,5 +284,5 @@ argument for having them:
 
 **Further:** [`AHA.md`](AHA.md) for why the design is this shape,
 [`policy-engines.md`](policy-engines.md) for what a retrieval rule can and
-cannot be, [`ISSUES.md`](ISSUES.md) for what is wrong right now, and
-[`ideas.md`](ideas.md) for what is deliberately not being built.
+cannot be, and [`STATE.md`](STATE.md) for what is wrong right now and what
+is deliberately not being built.

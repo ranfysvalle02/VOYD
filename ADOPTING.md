@@ -183,4 +183,4 @@ A proof of the mechanism is not evidence of demand.
 - **It has no production users yet.** The mechanism is checked by 878 tests
   against a real MongoDB and real `mongot` on every commit, which is evidence
   the mechanism works and is not evidence that anyone needs it.
-  `docs/ISSUES.md` lists what is wrong, unproven or imprecise in what ships.
+  `docs/STATE.md` lists what is wrong, unproven or imprecise in what ships.
