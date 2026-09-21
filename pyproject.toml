@@ -27,10 +27,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Embeddings. `remember()` takes floats; this is only for computing them.
-voyage = [
-    "voyageai>=0.3.2",
-]
 # Cryptographic erasure. The deadline destroys the key, so the ciphertext is
 # unreadable in every copy -- replicas, snapshots, the backup nobody has
 # restored yet -- which is the one question refusal cannot answer.
@@ -42,9 +38,14 @@ voyage = [
 crypto = [
     "pymongo[encryption]>=4.9",
 ]
-# Everything optional: embeddings + cryptographic erasure.
+# Everything optional. One thing, now: nothing here computes an embedding.
+# There was a `voyage` extra, and it was residue -- its own comment described
+# `remember()`, a method the cut removed, and no module in this repository
+# imported `voyageai` at all. `auto_embed` is why: the index owns the vector
+# and the server produces it, so a client-side embedding library is not a
+# dependency this package has an opinion about.
 all = [
-    "voyd[voyage,crypto]",
+    "voyd[crypto]",
 ]
 dev = [
     "pytest>=8.0",
@@ -111,17 +112,32 @@ select = ["E4", "E7", "E9", "F"]
 [tool.mypy]
 # `scanner` is here because it ships as its own distribution and judges
 # somebody else's repository -- the one piece of this project that runs
-# against code nobody here has seen. `tools` is deliberately *not* here yet:
-# `voyd_wire.py` has 31 errors, mostly a `Meter | None` that the runtime
-# guards and the checker cannot see, and turning it on means fixing those
-# rather than blanket-ignoring them. Recorded in LIMITS.md, not forgotten.
+# against code nobody here has seen.
+#
+# `tools` is deliberately *not* here yet. It is mostly a `Meter | None` the
+# runtime guards and the checker cannot see, and turning it on means fixing
+# those rather than blanket-ignoring them. Recorded in LIMITS.md, not
+# forgotten.
+#
+# This comment used to carry a count. It said 31 and the real number had
+# reached 61, because the count was a claim about code with no expiry and
+# nobody responsible for it -- which is the category this project exists to
+# complain about, sitting in its own build file. A number nobody re-measures
+# is worse than no number: it reads as current. Run `mypy tools/` for the
+# real one.
 files = ["voyd", "scanner/voyd_scan"]
 # No `python_version` pin, deliberately. Pinning it to the 3.11 floor makes
-# mypy read every installed stub under 3.11 syntax, and a dependency resolved
-# for the 3.12 interpreter in this venv (numpy, via `voyageai`) then fails to
-# *parse* -- which is fatal, so the run dies before checking a line of `voyd`.
-# Letting mypy follow the interpreter means CI, which installs 3.11, checks
-# the floor against a 3.11 dependency set, and a 3.12 laptop checks 3.12.
+# mypy read every installed stub under 3.11 syntax, so any dependency
+# resolved for a newer interpreter can fail to *parse* -- which is fatal, and
+# kills the run before it checks a line of `voyd`. Letting mypy follow the
+# interpreter means CI, which installs 3.11, checks the floor against a 3.11
+# dependency set, and a 3.12 laptop checks 3.12.
+#
+# The concrete trigger was numpy, arriving via a `voyageai` extra, whose
+# stubs use 3.12 `type` statements. Both are gone now -- nothing here
+# computes an embedding -- so the decision stands on the general argument
+# above rather than on that dependency. Said plainly because "we did this
+# because of numpy" would now be a reason nobody can verify.
 # Both are real configurations; the pinned pair was not.
 # Deliberately not `strict`. Strict on a codebase this size produces a number
 # nobody acts on, and a check nobody acts on is the thing this repository
@@ -138,18 +154,15 @@ check_untyped_defs = true
 # Third parties without stubs. Listed one by one rather than with a blanket
 # `ignore_missing_imports = true`, so adding a dependency that *does* ship
 # types cannot quietly land untyped.
+#
+# `voyageai` and `numpy` used to be here too, with a paragraph explaining
+# that numpy's stubs are a syntax error under the pinned floor and had to be
+# skipped at the extra's edge. Both entries outlived the dependency: mypy
+# reported `unused section(s): module = ['voyageai.*']` on every single run,
+# which is the tool saying so out loud for however long nobody read it.
 [[tool.mypy.overrides]]
-module = ["voyageai.*", "pymongocrypt.*"]
+module = ["pymongocrypt.*"]
 ignore_missing_imports = true
-
-# `voyd` imports no numpy; it arrives because `voyageai` ships `py.typed`, so
-# mypy walks into it and on into numpy's stubs -- which use 3.12 `type`
-# statements and are a syntax error under the 3.11 floor pinned above, killing
-# the run before any of our own code is checked. Stopping at the extra's edge
-# keeps the floor honest, which is the point of pinning it.
-[[tool.mypy.overrides]]
-module = ["voyageai.*", "numpy.*"]
-follow_imports = "skip"
 
 [tool.pytest.ini_options]
 # The engine is async; `auto` means a test does not have to say so twice.

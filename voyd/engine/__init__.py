@@ -60,7 +60,7 @@ collections, fields and filters, never about namespaces or voids.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypeVar
 
 from .authority import AuthorityRequired, Anyone, Grants, NotAuthorised
 # Only ``report_assumptions`` -- it is called in ``describe()`` below. ``WORLD``
@@ -99,7 +99,11 @@ from .keyring import Keyring, KeyringSpec, Queryable, Sealed
 from .model import Model
 from .search import SearchEngine, SearchSpec, cosine
 from .time import UTC, aware, bind, deadline, live, living, now
-from .trait import collection_of, kind_of
+from .trait import Trait, collection_of, kind_of
+
+# Bound to the protocol so `use()` accepts only real traits and hands back
+# the caller's own type. See `use()`.
+_T = TypeVar("_T", bound=Trait)
 
 
 class Engine:
@@ -150,10 +154,25 @@ class Engine:
         self._models[collection] = m
         return m
 
-    def use(self, trait):
+    def use(self, trait: _T) -> _T:
         """Install a primitive. Anything with ``kind``, ``collection``,
         ``async ensure()``. Replaces a previous trait of the same kind on
         the same collection. Returns the trait so the caller has a handle.
+
+        Annotated with the ``Trait`` protocol rather than left untyped, which
+        is the difference between ``trait.py`` being the contract and being a
+        description of one. It was the latter: the protocol was defined,
+        documented at length as *the extension point*, and referenced by
+        nothing -- so a stranger's object missing ``ensure()`` was caught at
+        ``engine.ensure()`` if it was caught at all. Now mypy reads the same
+        docstring the humans do.
+
+        Generic in the trait rather than returning ``Trait``, because this
+        returns *the caller's* object and narrowing it to the protocol would
+        throw away everything the caller came for -- ``model(...).forgettable()``
+        needs an ``Admission`` back, not "something with ensure()". Adding
+        the annotation surfaced exactly that: two call sites were silently
+        relying on the untyped signature to pass their own type through.
         """
         kind = kind_of(trait)
         coll = collection_of(trait)

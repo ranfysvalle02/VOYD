@@ -23,13 +23,18 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 from .expiry import ExpirySpec
+from .trait import Trait
 from .admission import Admission
 from .search import SearchSpec
 
 if TYPE_CHECKING:
     from . import Engine
 
-T = TypeVar("T")
+# Bound to the trait protocol, like `Engine.use`'s. A trait installed
+# through a model is still a trait, and leaving this unbound is what let a
+# `use()` call typed as `Any` flow through untouched -- surfaced the moment
+# `Engine.use` stopped accepting anything at all.
+T = TypeVar("T", bound=Trait)
 
 
 class Model:

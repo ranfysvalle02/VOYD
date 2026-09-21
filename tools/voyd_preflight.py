@@ -316,8 +316,8 @@ async def inspect(uri: str, database: str,
     except ImportError as exc:                      # pragma: no cover
         return [], f"pymongo is not importable ({exc})"
 
-    client = AsyncMongoClient(uri, serverSelectionTimeoutMS=8000,
-                              connectTimeoutMS=8000)
+    client: Any = AsyncMongoClient(uri, serverSelectionTimeoutMS=8000,
+                                   connectTimeoutMS=8000)
     try:
         db = client[database]
         try:

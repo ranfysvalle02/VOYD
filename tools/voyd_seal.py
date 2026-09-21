@@ -107,9 +107,13 @@ class Vault:
         self.sealed: dict[str, tuple[tuple[str, ...], str]] = sealed
         self.custody = custody
         self.collection = collection
-        self._client = None
+        # Annotated rather than inferred from the initial `None`: a
+        # checker reading `self._client = None` concludes the attribute is
+        # always None and then flags every use of it, which is how these
+        # three stayed the only type errors in this file.
+        self._client: Any = None
         self._keyring: Keyring | None = None
-        self._ce = None
+        self._ce: Any = None
         # scope -> key id, per process. A key id is immutable and a shredded
         # key's id stays correct (it just stops resolving), so this is only
         # ever a saved round trip, never a stale verdict.

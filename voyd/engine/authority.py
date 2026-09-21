@@ -51,7 +51,7 @@ even where every caller is permitted everything.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 log = logging.getLogger("engine.authority")
@@ -228,35 +228,6 @@ class Anyone:
     def actor(self, caller: dict | None) -> str | None:
         who = (caller or {}).get(self.actor_claim)
         return str(who) if who is not None else None
-
-
-@dataclass
-class Recorded:
-    """Wraps an authority and keeps what it decided. For tests and review.
-
-    Every refusal is logged at WARNING by the handle, but a deployment
-    that wants to *count* attempted-and-denied operations -- which is the
-    signal that somebody is probing, exactly as a climbing ``not_cleared``
-    is -- needs somewhere to put them.
-    """
-
-    inner: Any
-    denied: list = field(default_factory=list)
-    allowed: int = 0
-
-    def permits(self, operation: str, caller: dict | None, *,
-                collection: str) -> bool:
-        ok = self.inner.permits(operation, caller, collection=collection)
-        if ok:
-            self.allowed += 1
-        else:
-            self.denied.append({"operation": operation,
-                                "collection": collection,
-                                "actor": self.actor(caller)})
-        return ok
-
-    def actor(self, caller: dict | None) -> str | None:
-        return self.inner.actor(caller)
 
 
 def _as_set(value: Any) -> set:

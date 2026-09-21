@@ -263,7 +263,16 @@ class Meter:
         object.__setattr__(self, name, value)
 
     def flush(self, guards: dict) -> None:
-        self.worker_flushes_total += 1
+        # A type checker cannot see these attributes, because they are set
+        # from `GLOBAL` rather than written out one per line. That is the
+        # trade this class made on purpose: the hand-written list drifted
+        # from `GLOBAL` and broke a worker's reporting, and static
+        # visibility is a smaller loss than that. The runtime guard in
+        # `__setattr__` is stronger than the checker would have been for
+        # writes -- it refuses a name that is not a series, which mypy
+        # never did -- and `tools/` is not type-checked today anyway. If it
+        # ever is, this is the class that needs the shim.
+        self.worker_flushes_total += 1                      # type: ignore[attr-defined]
         values = [0] * self.layout.size
         for field in GLOBAL:
             values[self.layout.index(field)] = getattr(self, field)

@@ -13,7 +13,7 @@ yet. They are marked.
 
 ## 1. The one that actually matters
 
-**Nobody has used this but its author.** 103 commits, one contributor, zero
+**Nobody has used this but its author.** 104 commits, one contributor, zero
 external users, zero pilots. Every claim in this repository is verified by
 somebody who also wrote the claim.
 
@@ -565,15 +565,29 @@ documents?"
 
 ## 4. Coverage
 
-369 tests, ~6,738 lines, against 8,152 lines of `voyd/` and 5,909 of
+369 tests, ~6,738 lines, against 8,220 lines of `voyd/` and 5,922 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
 
-557 lines are mentioned by no test file, and all of it is defensible now:
-`composition.py` is type-checked rather than executed by design,
-`trait.py` and `expiry.py` are small and exercised indirectly, `sealing.py`
-runs under the encryption tests even though a name-scan cannot see it.
+**189 lines across two files are mentioned by no test file**, and both are
+defensible: `composition.py` (124) declares the protocols a type checker
+reads and the runtime never imports, and `trait.py` (65) is the extension
+point -- whose `Trait` protocol is now what `Engine.use()` is annotated
+with, so it is enforced by `mypy` on every call site rather than merely
+described.
+
+That figure is a name-scan, not coverage, and it is re-measurable in four
+lines rather than quoted -- which it needed to be. It previously read "557
+lines" across four files, two of which (`expiry.py`, `sealing.py`) had since
+gained tests that name them. Wrong in the number *and* the list, and neither
+was going to fix itself:
+
+```python
+tests = "\n".join(p.read_text() for p in Path("tests").glob("*.py"))
+[(p, len(p.read_text().splitlines())) for p in Path("voyd").rglob("*.py")
+ if p.name not in tests and p.stem not in tests]
+```
 
 **Every claim is attached to a file, and that mapping is checked.**
 `CLAIMS.md` names each guarantee and the test that would go red if it stopped
@@ -630,12 +644,29 @@ somebody tried it that way.
 
 **`mypy` now reads `scanner/voyd_scan` too, and still not `tools/`.**
 Adding the scanner cost nothing: it was already clean. `tools/` is a
-different matter -- `voyd_wire.py` has **31 errors**, most of them a
-`Meter | None` that the runtime guards and the checker cannot see. That is
-real work rather than a config line, and blanket-ignoring them would leave
-the 1,716-line front door -- the hardest code here, with the concurrency and
-the failover handling -- checked by nobody while appearing to be checked.
-It stays open, with a number attached.
+different matter -- mostly a `Meter | None` the runtime guards and the
+checker cannot see. That is real work rather than a config line, and
+blanket-ignoring it would leave the front door -- the hardest code here,
+with the concurrency and the failover handling -- checked by nobody while
+appearing to be checked. It stays open.
+
+`voyd_seal.py`, `voyd_preflight.py` and `voyd_metrics.py` *are* clean as of
+this writing, which is three of the five files and the three most recently
+written; the debt is the two oldest and largest.
+
+**This entry used to end "with a number attached", and the number was
+wrong.** It said `voyd_wire.py` had 31 errors in a 1,716-line file. By the
+time anybody checked it was 59 errors in 3,180 lines, and the same stale 31
+was sitting in `pyproject.toml` as the stated reason for the exclusion. The
+count was a claim about code with no expiry and nobody responsible for it,
+which is the category §3 and `capabilities.py` both exist to complain about,
+written into this project's own build configuration and this page.
+
+Both numbers are gone rather than corrected. A figure nobody re-measures
+reads as current, which is strictly worse than no figure: `mypy tools/`
+takes four seconds and is always right. Attaching a number felt like rigour
+and was the opposite -- it moved the claim from "go and look" to "trust this
+sentence", and then the sentence rotted.
 
 `capabilities.py` was listed here as "the one with no real excuse" and now
 has seventeen. It was a bad gap specifically because that module decides
