@@ -104,13 +104,7 @@ Primary discovery. Failover by reading the server's own
 own 48MB ceiling. Bounded connections, closed rather than queued. A draining
 `SIGTERM`.
 
-### Open
-
-**One node, no topology.** It picks the primary at startup and re-resolves
-when the server says to. It does not load-balance reads, honour read
-preference, or retry a write the client already saw fail.
-
-`--advertise-self` rewrites `hello` so clients stay on the boundary rather
+**Clients cannot walk past it.** `--advertise-self` rewrites `hello` so clients stay on the boundary rather
 than following the cluster's host list, which is what makes this
 *enforcement* rather than a `directConnection=true` the caller has to
 remember. Two fields are deliberately passed through untouched:
@@ -120,6 +114,13 @@ opposite — that flag is the signal a driver uses to notice its upstream is
 no longer writable, and masking it means the client writes happily into an
 outage. `setName` is kept for the same class of reason: strip it and drivers
 treat the target as a standalone, which silently disables retryable writes.
+
+### Open
+
+**One node, no topology.** Clients are pinned here, but *here* is a single
+process: it does not load-balance reads, honour read preference, or retry a
+write the client already saw fail. Pinning and fanning out are different
+problems and only the first one is solved.
 
 **A failover costs the in-flight requests.** Re-resolution happens on the
 *next* connection. The request that received `NotWritablePrimary` is
