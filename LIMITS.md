@@ -225,6 +225,36 @@ treat the target as a standalone, which silently disables retryable writes.
 
 ### Open
 
+**A cumulative rule is enforced per batch, and the client picks the batch
+size.** This is the worst thing in this section, and it is a silent hole
+of exactly the shape the rest of this document is about, so it is first.
+
+`budget()` and `distinct()` are *cumulative*: they compare a document
+against the running total of the documents already on the page. The
+handle opens one tab per `reachable()` call, which on the wire is one
+call per cursor batch -- so the total resets on every `nextBatch`, and
+`batchSize` is a field in the client's own `find`. Measured, ten
+documents at 40 tokens each under a declared budget of 100:
+
+```
+one batch     -> 2 documents    correct
+batchSize=2   -> 10 documents   400 tokens served under a 100-token budget
+```
+
+Nothing errors and nothing is logged. The policy file says the rule is in
+force, the boundary says it is enforcing it, and a caller who sets a
+batch size defeats it without trying to. **Do not declare `budget()` or
+`distinct()` in a `voydfile.py` and rely on it** -- they are correct
+through the admission handle, where one read is one call, and they are
+not correct through the proxy.
+
+The fix is known and the hook exists: `proxy.py` already tracks cursor
+ids (`cursors`, `reduced_cursors`) for an unrelated reason, so the tab
+can be keyed by cursor rather than opened per batch. The reason it is
+written down before it is fixed is that this file's whole argument is
+that a guarantee nobody measured is a claim about one, and this one was
+found by measuring rather than by reading.
+
 **A worker that is alive but wedged is a metrics problem, not a
 supervision one.** The parent replaces workers that *die* — `SIGKILL` on
 one of three is detected, the slot is cleared, a replacement is forked and
