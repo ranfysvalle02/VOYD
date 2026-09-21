@@ -622,12 +622,19 @@ def _classify(reads: list[Read], marks: dict[str, list[Mark]]) -> None:
                 r.status = "leak"
                 if r.why == "no filter":
                     pass                    # ``find()``: already the whole story
-                elif len(missing) == 1 and missing[0].source == "declared":
+                elif (len(required) == 1 and missing[0].source == "declared"):
                     # The wording the declared path has always used: the mark
                     # is a known spelling, so naming it adds nothing a reader
                     # cannot see. Inferred marks are the opposite -- the
                     # finding is only as good as the evidence for the
                     # convention, so that evidence is printed with it.
+                    #
+                    # Conditioned on the collection carrying *one* mark, not
+                    # on one being missed. With two, "the mark" is a sentence
+                    # that does not say which, on a read that already names
+                    # the other one -- and a finding whose first question is
+                    # "which mark?" costs more to action than it saves to
+                    # print.
                     r.why = ("filter does not name the mark" if r.keys
                              else "empty filter")
                 else:

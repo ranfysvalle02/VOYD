@@ -49,7 +49,15 @@ jobs:
           uv run --no-sync pytest -q \
             tests/test_the_codec_round_trips.py \
             tests/test_the_boundary_refuses.py \
-            tests/test_the_policy_file_is_the_configuration.py
+            tests/test_the_policy_file_is_the_configuration.py \
+            tests/test_the_scanner_is_not_confidently_wrong.py
+
+      - name: The scanner runs on a machine with nothing installed
+        # It is the first thing a stranger runs and the only thing here that
+        # judges code nobody on this side has seen, so the claim that it
+        # needs no install is tested by uninstalling everything: a bare
+        # interpreter, no `uv sync`, no `pip install`, no PYTHONPATH.
+        run: python3 scanner/voyd_scan --strict voyd/ tools/ scanner/
 
       - name: Importing voyd is the policy vocabulary and one driver
         run: |

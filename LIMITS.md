@@ -20,12 +20,17 @@ somebody who also wrote the claim.
 That is not a coverage problem and no amount of code fixes it. The suite is
 good at holding claims somebody thought to state; it has never once been the
 thing that caught a problem a *user* hit, because there have been no users.
-Seven defects this month were found by running something new rather than by
-a test catching a regression: three from exercising paths nobody had
-exercised, and four more from the hostile pass in §4. Every one of them was
-found by *doing something different*, not by the suite going red — which is
-the honest description of where the value of an outside perspective would
-land. The suite is a ratchet, not a search.
+Nine defects this month, and the way they were found is the point. Seven
+came from running something new: three from exercising paths nobody had
+exercised, four more from the hostile pass in §4. One came from the
+benchmark contradicting a commit message that had already been pushed. One
+came from *writing a test* — the scanner's two-mark finding, in §4 — which
+is the first time this month the act of testing found something rather than
+recording something already known.
+
+Not one was found by the suite going red. That is the honest description of
+where an outside perspective would land: the suite is a ratchet, not a
+search, and everything above was a search.
 
 **What would change it:** one team, two weeks, their own corpus. Everything
 else on this page is second.
@@ -357,7 +362,7 @@ documents?"
 
 ## 4. Coverage
 
-174 tests, ~3,602 lines, against 8,078 lines of `voyd/` and 2,731 of
+201 tests, ~3,922 lines, against 8,078 lines of `voyd/` and 2,731 of
 `tools/`. Well-targeted rather than thorough: the coverage is by *claim*,
 which is the right axis, but it is not line coverage and should not be
 mistaken for it.
@@ -367,27 +372,47 @@ mistaken for it.
 `trait.py` and `expiry.py` are small and exercised indirectly, `sealing.py`
 runs under the encryption tests even though a name-scan cannot see it.
 
-**The scanner is 1,043 lines with no test at all.** `scanner/voyd_scan` is
-not in the count above and not in the suite: CI runs `ruff` over it and
-nothing else. It is the first thing a stranger runs, it makes a *judgement*
-about somebody else's repository, and a false negative there is this
-project's own failure mode wearing a different hat — a confident answer
-about facts that can leak, with nothing to page on. It is untested because
-it shipped as a dependency-free single file and the suite grew around the
-boundary instead. That is an explanation, not a defence.
+**The scanner had 1,043 lines and no test. It now has 27.** `voyd_scan` is
+the first thing a stranger runs and the only thing in this repository that
+passes judgement on code nobody here has seen, so a false all-clear there is
+this project's own failure mode aimed at somebody else. The suite asserts
+findings *and* the absence of them, and spends more of its length on the
+second: a false negative is the thesis turned on itself, but a false
+positive is spent on a stranger's codebase, and a tool that cries about
+clean reads is one nobody runs twice.
 
-**What would change it:** the tool's own inference is the testable part —
-a fixture repo with a known-leaky read and a known-clean one, asserting
-both the finding and the absence of one. Until then, treat its output as
-an argument, not a result.
+What it pins, beyond the obvious true positives: a lookup by `_id` is still
+a leak (the most specific-looking read is exactly the one that keeps serving
+a revoked fact); a field *every* read names is a schema rather than a
+convention and must not become a mark; two agreeing reads are not yet
+evidence and three is the documented floor; a `# voyd:` claim inside a
+string literal suppresses nothing, because an all-clear reachable from
+inside a doctest is not one you would let gate a build; one unparseable file
+does not turn a repository into an all-clear; and all three ways the tool
+can print "clean" without having established anything -- no files, no
+recognised reads, a missing path -- still say so.
 
-**`mypy` reads `voyd/` and nothing else.** `files = ["voyd"]` in
-`pyproject.toml`, so the 1,716-line wire proxy — the front door, the part
-with the concurrency and the failover handling — is type-checked by nobody.
-The justification is that `py.typed` ships in the wheel and `tools/` does
-not, so the promise to downstream checkers is only about `voyd/`. That is
-true and it is also the wrong axis: the reason to check the proxy is that
-it is the hardest code here, not that somebody imports it.
+**Writing them found one real defect.** On a collection carrying two
+declared marks, a read that named one was reported as "filter does not name
+the mark", which does not say which mark, on a read that visibly names the
+other. The generic wording was conditioned on one mark being *missed*; it is
+now conditioned on the collection carrying *one mark in total*, which is the
+case it was always arguing for. A finding whose first question is "which
+mark?" costs more to action than it saves to print.
+
+**CI now also runs it on a bare interpreter** -- no `uv sync`, no install,
+no `PYTHONPATH` -- against this repository's own source. The claim that it
+costs a stranger nothing to try is worth exactly as much as the last time
+somebody tried it that way.
+
+**`mypy` now reads `scanner/voyd_scan` too, and still not `tools/`.**
+Adding the scanner cost nothing: it was already clean. `tools/` is a
+different matter -- `voyd_wire.py` has **31 errors**, most of them a
+`Meter | None` that the runtime guards and the checker cannot see. That is
+real work rather than a config line, and blanket-ignoring them would leave
+the 1,716-line front door -- the hardest code here, with the concurrency and
+the failover handling -- checked by nobody while appearing to be checked.
+It stays open, with a number attached.
 
 `capabilities.py` was listed here as "the one with no real excuse" and now
 has seventeen. It was a bad gap specifically because that module decides
@@ -397,7 +422,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (170 tests, ~54 seconds) with
+**Consider:** the suite is fast by default (197 tests, ~52 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports

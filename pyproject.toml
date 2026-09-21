@@ -109,7 +109,13 @@ select = ["E4", "E7", "E9", "F"]
 "tests/*" = ["E402"]
 
 [tool.mypy]
-files = ["voyd"]
+# `scanner` is here because it ships as its own distribution and judges
+# somebody else's repository -- the one piece of this project that runs
+# against code nobody here has seen. `tools` is deliberately *not* here yet:
+# `voyd_wire.py` has 31 errors, mostly a `Meter | None` that the runtime
+# guards and the checker cannot see, and turning it on means fixing those
+# rather than blanket-ignoring them. Recorded in LIMITS.md, not forgotten.
+files = ["voyd", "scanner/voyd_scan"]
 # No `python_version` pin, deliberately. Pinning it to the 3.11 floor makes
 # mypy read every installed stub under 3.11 syntax, and a dependency resolved
 # for the 3.12 interpreter in this venv (numpy, via `voyageai`) then fails to
