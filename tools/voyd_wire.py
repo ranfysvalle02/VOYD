@@ -510,7 +510,9 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
 
 def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
          guards: dict[str, Guard], verbose: bool,
-         rewritten: set[int], lock: threading.Lock) -> None:
+         rewritten: set[int], lock: threading.Lock,
+         upstream: Upstream | None = None,
+         finished: threading.Semaphore | None = None) -> None:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -574,6 +576,17 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                 with lock:
                     was_delete = resp_to in rewritten
                     rewritten.discard(resp_to)
+
+                # The failover signal, read off the reply the client was
+                # getting anyway. No health check, no timer: the server is
+                # already telling us, on the one message that proves it.
+                if upstream is not None:
+                    head = decode_op_msg(raw)
+                    if head is not None:
+                        why = stepped_down(head[1])
+                        if why:
+                            upstream.invalidate(why)
+
                 raw = (delete_reply(raw, req_id, resp_to) if was_delete
                        else enforce(raw, req_id, resp_to, guards, verbose))
             dst.sendall(raw)
@@ -592,114 +605,255 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                 sock.close()
             except OSError:
                 pass
+        if finished is not None:
+            finished.release()
 
 
-def resolve_target(target: str) -> tuple[str, int, bool]:
-    """Where to connect, and whether it needs TLS.
+# What a replica set says when the node you are talking to is no longer the
+# one that may write. The boundary learns from these rather than polling: a
+# health check is a guess about the future, and this is the server telling
+# you about the present.
+STEPPED_DOWN = {
+    10107,   # NotWritablePrimary
+    13435,   # NotPrimaryNoSecondaryOk
+    13436,   # NotPrimaryOrSecondary
+    11602,   # InterruptedDueToReplStateChange
+    189,     # PrimarySteppedDown
+    91,      # ShutdownInProgress
+}
 
-    ``--target`` takes either a bare ``host:port`` or a full MongoDB URI --
-    and the URI form is not a convenience. Atlas is `mongodb+srv`, which
-    means three things a raw TCP dial cannot do: the hosts live in DNS SRV
-    records, the connection must be TLS, and the port is not in the string.
-    Without this the boundary could front a container on localhost and
-    nothing anybody actually runs, which made "point it at your database"
-    true only of the database nobody has in production.
 
-    One node is chosen deliberately rather than the whole replica set. This
-    is a boundary, not a driver: it does not do topology discovery, failover
-    or read preference, and a client should reach it with
-    ``directConnection=true`` so it does not try to follow the hosts Atlas
-    advertises in `hello` straight past it.
+class Upstream:
+    """Where the boundary forwards to, and how it stays right.
+
+    This used to be a ``(host, port, tls)`` tuple resolved once at startup,
+    and all three of the operability complaints against this proxy were the
+    same complaint about that tuple: it could not be re-resolved, so a
+    failover meant a restart.
+
+    A connection is a *lifecycle*, not an address:
+
+    - **resolved lazily**, so startup does not block on DNS and a cluster
+      that is briefly unreachable does not prevent the boundary from
+      listening;
+    - **cached**, because resolving a `mongodb+srv` URI costs a DNS round
+      trip and a topology scan, and doing that per connection would put the
+      driver's startup cost on every client;
+    - **invalidated by the server's own error**. When a reply carries
+      `NotWritablePrimary` -- or any of the codes above -- the cached
+      address is wrong *now*, and the next connection re-resolves. That is
+      how a driver learns about an election, and it is strictly better than
+      a timer: no window where the boundary knows and has not acted, and no
+      polling a healthy cluster forever to find out about an event that may
+      never happen.
+
+    What it still is not: a driver. It picks one node and forwards bytes; it
+    does not load-balance reads, follow read preference, or retry a write
+    the client already saw fail. A client should reach it with
+    ``directConnection=true`` so it does not chase the hosts the cluster
+    advertises straight past the boundary.
     """
-    if "://" not in target:
-        host, _, port = target.partition(":")
-        return host, int(port or 27017), False
-    try:
+
+    def __init__(self, target: str, *, verbose: bool = True):
+        self.target = target
+        self.verbose = verbose
+        self._addr: tuple[str, int, bool] | None = None
+        self._lock = threading.Lock()
+        self.generation = 0
+
+    def address(self) -> tuple[str, int, bool]:
+        with self._lock:
+            if self._addr is None:
+                self._addr = self._resolve()
+            return self._addr
+
+    def invalidate(self, why: str) -> None:
+        """Forget where the primary was. The next connection finds out."""
+        with self._lock:
+            if self._addr is None:
+                return
+            host, port, _ = self._addr
+            self._addr = None
+            self.generation += 1
+        print(f"voyd-wire: {host}:{port} is no longer writable ({why}); "
+              f"re-resolving on the next connection", flush=True)
+
+    def _resolve(self) -> tuple[str, int, bool]:
+        """A bare `host:port`, or a URI resolved the way a driver would.
+
+        Atlas is `mongodb+srv`, which means three things a raw TCP dial
+        cannot do: the hosts live in DNS SRV records, the connection must be
+        TLS, and the port is not in the string.
+        """
+        target = self.target
+        if "://" not in target:
+            host, _, port = target.partition(":")
+            return host, int(port or 27017), False
+
         from pymongo.uri_parser import parse_uri
-    except ImportError:  # pragma: no cover - pymongo is the one dependency
-        raise SystemExit("a URI target needs pymongo installed")
-    parsed = parse_uri(target)
-    tls = bool(parsed["options"].get("tls", target.startswith("mongodb+srv")))
+        parsed = parse_uri(target)
+        tls = bool(parsed["options"].get("tls",
+                                         target.startswith("mongodb+srv")))
+        try:
+            from pymongo import MongoClient
+            with MongoClient(target, serverSelectionTimeoutMS=15000) as probe:
+                # `ping` first: the driver connects lazily, and `.primary` on
+                # an undiscovered topology is `None` -- which silently
+                # selected the first DNS node and looked exactly like this
+                # not working.
+                probe.admin.command("ping")
+                primary = probe.primary
+            if primary:
+                if self.verbose:
+                    print(f"voyd-wire: primary is {primary[0]}:{primary[1]}",
+                          flush=True)
+                return primary[0], primary[1], tls
+        except Exception as exc:
+            print(f"voyd-wire: could not find the primary "
+                  f"({type(exc).__name__}); using the first node DNS "
+                  f"returned. Writes may come back `not primary`.", flush=True)
 
-    # The *primary*, not the first node DNS happened to return. A replica set
-    # answers reads on a secondary and rejects writes there with
-    # `NotWritablePrimary`, so fronting the wrong member gives a boundary
-    # that reads perfectly and fails every delete -- found exactly that way
-    # against a live cluster.
-    #
-    # Discovered once, at startup, with the driver that already knows how.
-    # This is a boundary and not a driver: it does not follow an election,
-    # and a failover means restarting it. That is a real limitation and it is
-    # better stated than discovered.
-    try:
-        from pymongo import MongoClient
-        with MongoClient(target, serverSelectionTimeoutMS=15000) as probe:
-            # `ping` first: the driver connects lazily, and `.primary` on an
-            # undiscovered topology is `None` -- which silently selected the
-            # first DNS node again and looked like this fix had not worked.
-            probe.admin.command("ping")
-            primary = probe.primary
-        if primary:
-            return primary[0], primary[1], tls
-    except Exception as exc:
-        print(f"voyd-wire: could not find the primary ({type(exc).__name__}); "
-              f"using the first node DNS returned. Writes may be refused by "
-              f"the server as `not primary`.", flush=True)
+        host, port = parsed["nodelist"][0]
+        return host, port, tls
 
-    host, port = parsed["nodelist"][0]
-    return host, port, tls
+    def connect(self) -> socket.socket:
+        host, port, tls = self.address()
+        sock = socket.create_connection((host, port), timeout=20)
+        sock.settimeout(None)
+        if not tls:
+            return sock
+        import ssl
+        ctx = ssl.create_default_context()
+        # `server_hostname` is what makes certificate validation mean
+        # anything against a named cluster; without it this is an encrypted
+        # channel to whoever answered.
+        return ctx.wrap_socket(sock, server_hostname=host)
 
 
-def connect_upstream(host: str, port: int, tls: bool) -> socket.socket:
-    sock = socket.create_connection((host, port), timeout=20)
-    sock.settimeout(None)
-    if not tls:
+def stepped_down(reply: dict) -> str | None:
+    """Did the server just say this node may not write?
+
+    Read from the reply the client was going to get anyway. A write error
+    inside a batch is nested under ``writeErrors``, which is where this
+    hides on exactly the command -- a delete -- that matters most here.
+    """
+    if reply.get("code") in STEPPED_DOWN:
+        return str(reply.get("codeName") or reply.get("code"))
+    for err in reply.get("writeErrors") or ():
+        if isinstance(err, dict) and err.get("code") in STEPPED_DOWN:
+            return str(err.get("codeName") or err.get("code"))
+    return None
+
+
+def listener(port: int, certfile: str | None,
+             keyfile: str | None) -> socket.socket:
+    """The socket clients reach, TLS-terminated when a certificate is given.
+
+    Without one this binds loopback only, and that is a decision rather than
+    a default: a plaintext boundary reachable from the network would carry
+    every document it just refused to refuse, in the clear, to anybody on
+    the path. With a certificate it binds all interfaces, because then it
+    can be one.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0" if certfile else "127.0.0.1", port))
+    sock.listen(64)
+    if not certfile:
         return sock
     import ssl
-    ctx = ssl.create_default_context()
-    # `server_hostname` is what makes certificate validation mean anything
-    # against a named cluster; without it this would be an encrypted channel
-    # to whoever answered.
-    return ctx.wrap_socket(sock, server_hostname=host)
+    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ctx.load_cert_chain(certfile, keyfile)
+    return ctx.wrap_socket(sock, server_side=True)
+
+
+def session(client: socket.socket, upstream: Upstream,
+            guards: dict[str, Guard], verbose: bool,
+            done: threading.Semaphore) -> None:
+    """One client connection, start to finish, on one thread pair.
+
+    A MongoDB connection is stateful -- authentication, sessions, cursors
+    and transactions all bind to it -- so an upstream connection is *per
+    client* rather than pooled. Sharing one would hand a cursor to whoever
+    asked second, which is the concurrency bug this whole package exists to
+    be careful about, committed by its own plumbing.
+
+    What is bounded instead is how many there are at once. The semaphore is
+    released exactly once, here, so a client that disconnects mid-handshake
+    cannot leak a slot.
+    """
+    up = None
+    try:
+        up = upstream.connect()
+    except OSError as exc:
+        host, port, _ = upstream.address()
+        print(f"voyd-wire: cannot reach {host}:{port}: {exc}", flush=True)
+        # A connection failure is as good a reason to re-resolve as an
+        # election: the node may simply be gone.
+        upstream.invalidate(type(exc).__name__)
+        client.close()
+        done.release()
+        return
+
+    rewritten: set[int] = set()
+    lock = threading.Lock()
+    finished = threading.Semaphore(0)
+    for src, dst, to_server in ((client, up, True), (up, client, False)):
+        threading.Thread(
+            target=pump, args=(src, dst),
+            kwargs={"to_server": to_server, "guards": guards,
+                    "verbose": verbose, "rewritten": rewritten, "lock": lock,
+                    "upstream": upstream, "finished": finished},
+            daemon=True).start()
+
+    # Both directions have to end before the slot is free, or a burst of
+    # short-lived clients would report a connection count that has nothing
+    # to do with the sockets actually open.
+    finished.acquire()
+    finished.acquire()
+    done.release()
 
 
 def serve(listen_port: int, target: str, guards: dict[str, Guard],
-          verbose: bool) -> None:
-    host, port, tls = resolve_target(target)
-    target_addr = (host, port)
+          verbose: bool, *, certfile: str | None = None,
+          keyfile: str | None = None, max_connections: int = 200) -> None:
+    upstream = Upstream(target, verbose=verbose)
+    server = listener(listen_port, certfile, keyfile)
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("127.0.0.1", listen_port))
-    server.listen(64)
-    print(f"voyd-wire: listening on 127.0.0.1:{listen_port} -> "
-          f"{target_addr[0]}:{target_addr[1]}"
-          + (" (TLS)" if tls else ""), flush=True)
+    where = "0.0.0.0" if certfile else "127.0.0.1"
+    print(f"voyd-wire: listening on {where}:{listen_port}"
+          + (" (TLS)" if certfile else " (plaintext, loopback only)")
+          + f" -> {target.split('@')[-1].split('/')[0]}", flush=True)
     for name, g in sorted(guards.items()):
         print(f"voyd-wire: guarding {name}: {g.spec.describe()}"
               + (", delete -> revoke" if g.on_delete == "revoke" else ""),
               flush=True)
-    print("voyd-wire: connect any driver to "
-          f"mongodb://localhost:{listen_port}/?directConnection=true\n",
+    print(f"voyd-wire: up to {max_connections} concurrent connections",
           flush=True)
+    print("voyd-wire: connect any driver to "
+          f"mongodb{'+tls' if certfile else ''}://localhost:{listen_port}/"
+          "?directConnection=true\n", flush=True)
 
+    slots = threading.Semaphore(max_connections)
     while True:
-        client, _ = server.accept()
         try:
-            upstream = connect_upstream(host, port, tls)
+            client, _ = server.accept()
         except OSError as exc:
-            print(f"voyd-wire: cannot reach {host}:{port}: {exc}")
+            # A failed TLS handshake is one client's problem, not the
+            # listener's. Refusing to keep serving because somebody sent
+            # garbage would make this trivially deniable.
+            print(f"voyd-wire: rejected a connection: {exc}", flush=True)
+            continue
+        if not slots.acquire(blocking=False):
+            # Closing beats queueing: a driver retries, and an unbounded
+            # backlog is how a proxy turns a busy minute into an outage.
+            print("voyd-wire: at the connection limit; refused one",
+                  flush=True)
             client.close()
             continue
-        rewritten: set[int] = set()
-        lock = threading.Lock()
-        for src, dst, to_server in ((client, upstream, True),
-                                    (upstream, client, False)):
-            threading.Thread(target=pump, args=(src, dst),
-                             kwargs={"to_server": to_server, "guards": guards,
-                                     "verbose": verbose,
-                                     "rewritten": rewritten, "lock": lock},
-                             daemon=True).start()
+        threading.Thread(target=session,
+                         args=(client, upstream, guards, verbose, slots),
+                         daemon=True).start()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -722,6 +876,20 @@ def main(argv: list[str] | None = None) -> int:
                          "what it was told to refuse")
     ap.add_argument("--at-field", default="expire_at")
     ap.add_argument("--mark-field", default="forgotten")
+    ap.add_argument("--tls-cert", metavar="PEM",
+                    help="terminate TLS from clients with this certificate. "
+                         "Without it the listener binds loopback only, "
+                         "because a plaintext boundary reachable from the "
+                         "network would carry in the clear every document it "
+                         "just refused to serve")
+    ap.add_argument("--tls-key", metavar="PEM",
+                    help="the private key for --tls-cert, if it is not in "
+                         "the same file")
+    ap.add_argument("--max-connections", type=int, default=200, metavar="N",
+                    help="concurrent client connections; further ones are "
+                         "closed rather than queued, because a driver "
+                         "retries and an unbounded backlog turns a busy "
+                         "minute into an outage")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -747,7 +915,12 @@ def main(argv: list[str] | None = None) -> int:
         guards.setdefault(c, Guard.defaults(
             c, at_field=args.at_field, mark_field=args.mark_field))
     try:
-        serve(args.listen, args.target, guards, not args.quiet)
+        if args.tls_key and not args.tls_cert:
+            print("voyd-wire: --tls-key needs --tls-cert", file=sys.stderr)
+            return 2
+        serve(args.listen, args.target, guards, not args.quiet,
+              certfile=args.tls_cert, keyfile=args.tls_key,
+              max_connections=args.max_connections)
     except KeyboardInterrupt:
         refused = sum(g.refused for g in guards.values())
         revoked = sum(g.revoked for g in guards.values())

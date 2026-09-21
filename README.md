@@ -42,7 +42,22 @@ python tools/voyd_wire.py --config voydfile.py --target localhost:27017
 # or Atlas -- SRV is resolved, TLS is used, the primary is found
 python tools/voyd_wire.py --config voydfile.py \
     --target "mongodb+srv://user:pass@cluster0.xxxxx.mongodb.net/"
+
+# reachable across a network, with TLS terminated for clients too
+python tools/voyd_wire.py --config voydfile.py --target "$ATLAS" \
+    --tls-cert server.pem --tls-key server.key --max-connections 500
 ```
+
+**Without `--tls-cert` it binds loopback only.** That is a decision, not a
+default: a plaintext boundary reachable from the network would carry in the
+clear every document it had just refused to serve.
+
+**It follows a failover.** The upstream is resolved lazily and cached, and
+invalidated by the server's own `NotWritablePrimary` — including the one
+nested inside a batch's `writeErrors`, which is where it hides on exactly
+the command this rewrites. The next connection re-resolves. A health check is
+a guess about the future; that error is the server describing the present, on
+the message that proves it, which the client was getting anyway.
 
 Then change one connection string. **That is the whole integration.** No
 import is added to your application, no handle replaces a collection, no read
@@ -199,12 +214,14 @@ refusal itself each turns it red.
 
 Known gaps, stated rather than discovered:
 
-- The proxy does **not** terminate TLS from the client — that leg is
-  plaintext, so run it beside the application rather than across a network.
-  It speaks TLS *upstream*, which is what Atlas requires.
-- It finds the primary once, at startup. It does not follow an election, so
-  a failover means restarting it. A boundary is not a driver.
-- One thread per direction and no connection pooling.
+- It picks **one node** and forwards bytes. It does not load-balance reads,
+  honour read preference, or retry a write the client already saw fail —
+  reach it with `directConnection=true` so your driver does not chase the
+  hosts the cluster advertises straight past it.
+- An upstream connection is **per client**, not pooled, and deliberately: a
+  MongoDB connection carries authentication, sessions, cursors and
+  transactions, so sharing one would hand a cursor to whoever asked second.
+  What is bounded is how many exist at once (`--max-connections`).
 - `on_delete="revoke"` covers both delete verbs and refuses the three that
   cannot be rewritten. An `update` that *overwrites* a fact is still an
   ordinary update — that is mutation rather than forgetting, and treating it
