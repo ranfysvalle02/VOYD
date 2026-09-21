@@ -246,7 +246,7 @@ checks links, anchors, source paths named in prose, and any "N tests" claim —
 the last one-directionally, since `@parametrize` means the real number is
 always at least the count of `def test_` functions.
 
-Counted nouns in prose — *"fourteen runnable programs"*, *"six steps"* — are
+Counted nouns in prose — *"fifteen runnable programs"*, *"six steps"* — are
 checked **exactly**, against the directory and the headings they describe.
 That guard exists because this paragraph used to say those two were "on you,
 and both were stale within one commit of being written." They then went stale

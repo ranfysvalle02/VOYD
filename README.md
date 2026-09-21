@@ -379,7 +379,7 @@ front door, the on-ramp and the pilot; everything else is reference material in
 | [`policy-engines.md`](docs/policy-engines.md) | the converse of the one idea: a retrieval rule no index filter and no policy engine can express, checked against a live Casbin enforcer |
 | [`PORTABILITY.md`](docs/PORTABILITY.md) | the guarantee is portable; its *enforcement* is not. Three engines measured, and the rung most vector databases cannot reach |
 | [`drift/`](drift/README.md) | the counter-argument, executable — including the whole thesis ported to pgvector with no MongoDB in the file |
-| [`examples/`](examples/) | fourteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
+| [`examples/`](examples/) | fifteen runnable programs, most in under ten seconds — start with [`quickstart.py`](examples/quickstart.py), then [`rosetta.py`](examples/rosetta.py) for the abstraction |
 | [`scanner/`](scanner/README.md) | `voyd-scan`: one stdlib file, zero dependencies, pointed at *your* repository — the count this whole argument is about |
 
 **What is wrong with it, and what happens next** — read this before trusting any of the above.

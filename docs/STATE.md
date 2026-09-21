@@ -132,6 +132,42 @@ decision, not a default).
 
 The identity is the handle. These wait on evidence that a stranger keeps it.
 
+**What has passed the freeze since, and why.** The same bar the policy
+compiler cleared: one example, one test file, a paragraph of doc, and not one
+line added to `voyd`.
+
+*Set-relative rules are a category with more than two members.* `AHA.md` step
+5 argued the category from `Budget` and `Distinct`, which is a category
+asserted from the two examples that happen to ship.
+[`examples/portfolio.py`](../examples/portfolio.py) writes three more against
+the public protocol — a provenance quota, a per-source ceiling, a mixed-tier
+cost budget — and they compose on one handle. It got through because it is
+not surface: it is evidence that a stranger can write one, and a test asserts
+the rules stay in `examples/` for exactly that reason. The reframing it
+suggests is the part worth having: a prompt is a **regulated set**, not a
+ranked list.
+
+*Answer-level revocation already works.* An answer written back with
+`derive()` naming the context it was built from is unreachable the moment any
+source is revoked — every RAG cache in production is a pile of derived
+documents with no erasure story, and this one has had the machinery the whole
+time. Nothing was built; a test now says so.
+
+**And one thing that turned out not to be buildable, which is worth more than
+either.** An admission boundary on an agent's *session state* — a fact revoked
+at turn 40 not surviving into turn 41 — cannot work, because refusal binds a
+read and not a value. A copy taken before the mark was written is not the
+document; it is what the document used to say, and `reachable()` correctly
+admits it. That is the in-memory instance of the position `perimeter.py`
+already takes, and the remedy that needs no code is re-reading the carried ids
+through the handle at the top of each turn. Pinned in both directions in
+`tests/test_refusal_binds_a_read_not_a_value.py`.
+
+The version that *would* need code is a store-backed liveness check —
+`still_reachable(ids)` asking the database rather than the copy. That is new
+surface on the frozen side of the line, and it should wait for a pilot that
+asks for it.
+
 ### The frontier — things that change what can be *claimed*
 
 **The perimeter, past propagation.** `holds=SEALED` is a check rather than a

@@ -75,6 +75,29 @@ says so where it lives:
 > query clause — every hit from `$vectorSearch`, where the deadline is
 > deliberately not an index filter.
 
+### What egress does not reach: a value that has left the read path
+
+The check is per document, on the way out, which means it is a property of a
+**read** and not of a value. Once a caller holds the fields, they are outside
+it — and a copy taken before a mark was written is not the document, it is
+what the document used to say. `reachable()` admits such a copy and is right
+to: it refuses what it is shown.
+
+That matters most where it is least expected, in a long-lived agent. A fact
+revoked at turn 40 does not vanish from the context the agent carried forward
+itself. The fix is not a cleverer boundary — it is re-reading the carried ids
+through the handle at the top of each turn, which already works, because that
+context is a cache and this is the cache invalidating. Both directions are
+pinned in
+[`tests/test_refusal_binds_a_read_not_a_value.py`](../tests/test_refusal_binds_a_read_not_a_value.py).
+
+This is the in-memory instance of a position
+[`perimeter.py`](../voyd/engine/perimeter.py) already takes: who else holds a
+copy is enumerable and auditable, never enforceable. An agent holding its own
+context is a perimeter member nobody registered.
+
+---
+
 ## Step 4 — any pushed-down rule must also exist on egress
 
 This is the invariant, and it is the sharpest thing in the repo.
@@ -126,13 +149,41 @@ And there is more than one. `Distinct` refuses a near-duplicate of
 something already in the page — `redundant` — which is set-relative for
 the same reason and equally unpushable. The two compose on one handle,
 each with its own per-read state, which makes this a **category** rather
-than one awkward example:
+than one awkward example.
+
+Two members chosen by the person making the argument is thin evidence for a
+category, so [`examples/portfolio.py`](../examples/portfolio.py) writes three
+more against the public protocol, with nothing added to the package: a
+**provenance quota** (at most 30% of this context from unverified sources), a
+**per-source ceiling** (no more than two documents from one publisher), and a
+**mixed-tier cost budget** (a premium source spends more of one limit). They
+compose on one handle beside the deadline and the revocation mark, and
+[`tests/test_a_set_relative_rule_is_a_category_not_two_examples.py`](../tests/test_a_set_relative_rule_is_a_category_not_two_examples.py)
+asserts the defining property directly: *the same document is admitted alone
+and refused in company.*
 
 | | decided by | has a query half |
 |---|---|---|
 | deadline, revoked, clearance, policy | the document | yes |
 | `over_budget` | how much room is left | no |
 | `redundant` | what is already in the room | no |
+| `over_unverified_quota` | what the rest of the page is made of | no |
+| `source_over_represented` | who else is already speaking | no |
+| `over_tiered_budget` | what the page has cost so far | no |
+
+The reframing those three suggest is worth naming: a prompt is a **regulated
+set**, not a ranked list. Relevance orders candidates; admission decides what
+the assembled set is allowed to be. Every constraint in the lower half of that
+table is a portfolio rule on the context window, and none of them is available
+to anyone whose only enforcement point is the index.
+
+**And the boundary of that, stated here rather than discovered.** Admission is
+a veto. It can refuse a document for what is already on the page; it cannot
+*require* that something be on it. So a diversity **floor** — "must include a
+dissenting document" — is not expressible as a rule, and pretending otherwise
+would be exactly the overreach this derivation exists to avoid. A floor is a
+retrieval objective and belongs to the ranker; a ceiling is an admission rule
+and belongs here.
 
 And a third thing cannot see them either, which is worth stating because
 this repository ships one. A **source scanner** finds a forgotten rule by

@@ -1,7 +1,7 @@
 """The front page's first instruction is `uv run python examples/...`.
 
-Fourteen runnable programs are advertised, and until this file existed **eight
-of them were executed by nothing**. CI linted them, which catches a syntax
+Fifteen runnable programs are advertised, and until this file existed eight
+of the then fourteen were executed by nothing. CI linted them, which catches a syntax
 error and an unused import and no rename in the engine they call. The one
 thing a stranger does first was the one thing nothing checked.
 
