@@ -463,7 +463,16 @@ class SearchEngine:
 
     async def query(self, collection: str, vector: list[float], *,
                     text: str | None = None, limit: int = 5,
-                    filters: dict | None = None) -> list[dict]:
+                    filters: dict | None = None,
+                    candidates: int | None = None) -> list[dict]:
+        """Rank documents. ``candidates`` sizes the pool `$vectorSearch`
+        draws from before returning ``limit``.
+
+        Left alone it is the old constant, `max(50, limit * 10)`. The caller
+        who should set it is the admission boundary, because it is the only
+        component that knows what fraction of a ranked page it is about to
+        throw away -- see ``Receipts.over_fetch``.
+        """
         spec = self.specs[collection]
         try:
             flt = require_scope(spec.collection, spec.tenant_field, filters)
@@ -481,8 +490,10 @@ class SearchEngine:
         if self._usable:
             try:
                 if self.capabilities.rank_fusion and text:
-                    return await self._hybrid(spec, vector, text, flt, limit)
-                return await self._vector(spec, vector, flt, limit, text=text)
+                    return await self._hybrid(spec, vector, text, flt,
+                                              limit, candidates)
+                return await self._vector(spec, vector, flt, limit,
+                                          text=text, candidates=candidates)
             except OperationFailure as exc:
                 self.degraded += 1
                 log.error(
@@ -496,7 +507,8 @@ class SearchEngine:
 
         return await self._cosine(spec, vector, flt, limit)
 
-    def _vector_stage(self, spec, vector, text, flt, limit) -> dict:
+    def _vector_stage(self, spec, vector, text, flt, limit,
+                      candidates: int | None = None) -> dict:
         """The ``$vectorSearch`` stage, in whichever form this index takes.
 
         When the server owns the embedding there is no query vector to send:
@@ -521,31 +533,35 @@ class SearchEngine:
                     f"index this process never computed.")
             return {"$vectorSearch": {
                 "index": spec.vector_index, "path": spec.text_paths[0],
-                "query": text, "numCandidates": max(50, limit * 10),
+                "query": text, "numCandidates": candidates or max(50, limit * 10),
                 "limit": limit, "filter": flt,
             }}
         return {"$vectorSearch": {
             "index": spec.vector_index, "path": spec.vector_path,
-            "queryVector": vector, "numCandidates": max(50, limit * 10),
+            "queryVector": vector,
+            "numCandidates": candidates or max(50, limit * 10),
             "limit": limit, "filter": flt,
         }}
 
-    async def _vector(self, spec, vector, flt, limit, text=None) -> list[dict]:
+    async def _vector(self, spec, vector, flt, limit, text=None,
+                      candidates: int | None = None) -> list[dict]:
         pipeline = [
-            self._vector_stage(spec, vector, text, flt, limit),
+            self._vector_stage(spec, vector, text, flt, limit, candidates),
             {"$addFields": {"score": {"$meta": "vectorSearchScore"},
                             "source": spec.collection}},
         ]
         cur = await self.db[spec.collection].aggregate(pipeline)
         return [d async for d in cur]
 
-    async def _hybrid(self, spec, vector, text, flt, limit) -> list[dict]:
+    async def _hybrid(self, spec, vector, text, flt, limit,
+                      candidates: int | None = None) -> list[dict]:
         """Vector + lexical, fused server-side. One round trip, no hand-rolled
         score normalisation, no reranking in Python."""
         must = [{"equals": {"path": k, "value": v}} for k, v in flt.items()]
         pipeline = [
             {"$rankFusion": {"input": {"pipelines": {
-                "vector": [self._vector_stage(spec, vector, text, flt, limit)],
+                "vector": [self._vector_stage(spec, vector, text, flt, limit,
+                                              candidates)],
                 "lexical": [
                     {"$search": {"index": spec.text_index, "compound": {
                         "must": must,

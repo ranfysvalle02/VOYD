@@ -146,6 +146,28 @@ refused in company. No index filter and no policy engine can express that —
 A policy file that is wrong fails when it is *loaded*, not when a query comes
 back with the wrong rows.
 
+### It sizes its own fetch
+
+`$vectorSearch` draws `numCandidates` and returns `limit`. Ask for a pool
+sized for `limit` on a collection where half of what the index ranks is
+already forgotten, and you get half a page back and pay for another round
+trip to find out.
+
+**No other component can compute the right number.** The index does not know
+your deadline, so it cannot know what fraction of what it ranks is already
+gone. The driver does not. The only thing that knows the refusal rate is the
+thing doing the refusing — and on the search path its count is *exact*,
+because a `$vectorSearch` hit passes through no query, so every candidate is
+either admitted or counted.
+
+So the boundary sizes the pool from measurement: `1 / (1 - refusal rate)`,
+which is the expected over-fetch exactly rather than a heuristic. It only
+ever raises the ask, it needs a minimum sample before it infers anything,
+and it is capped — because a scope refusing 99% should not ask for a pool
+the size of the collection. Refill still guarantees the page; this just
+stops it needing three trips to get there. `receipts()["over_fetch"]` shows
+the number.
+
 ## In-process, if you want it
 
 The declarative form compiles to the same objects the library exposes, so
@@ -179,7 +201,7 @@ the hash-chain ledger and the context index are gone, along with ~817 tests
 and ~35,000 words of documentation that described them. What is left is the
 boundary, the policy file, and the wire.
 
-The suite is **55 tests**, and it is the foundation rather than a census —
+The suite is **101 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie:
 
@@ -192,6 +214,9 @@ above it a lie:
 | the write path forgets without deleting | the deadline moves *earlier only*; a quarantine stays pinned; a revocation cannot be lifted |
 | encryption is the answer refusal cannot give | plaintext is not on disk, shredding one tenant leaves the others readable |
 | a refusal travels | revoke a source, the summary and the answer and the embedding go with it |
+| the boundary sizes its own fetch | `numCandidates` from the measured refusal rate, not a constant |
+| it is operable | TLS termination, a capped message size, keepalive, a draining `SIGTERM` |
+| the suite does not leak databases | a stale search index starves the next index build |
 | **the server embeds and refusal still holds** | against a **live Atlas cluster**, because this one cannot run anywhere else |
 
 That last row is worth its ninety seconds. Atlas Local registers no embedding
@@ -202,7 +227,12 @@ computes a vector at all, the index owns the encoding, and the expired hit is
 still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
-Three of the eight files need no MongoDB, and that is not a convenience. A
+```bash
+pytest              # 97 tests, 14 seconds -- the inner loop
+pytest -m ""        # everything, including the real index builds
+```
+
+Most files need no MongoDB, and that is not a convenience. A
 per-document check that cannot run without a database is one that cannot move
 to a wire — so if that ever stops being true, the architecture has quietly
 changed, and CI runs those three in a step with no database to make it
@@ -214,6 +244,15 @@ refusal itself each turns it red.
 
 Known gaps, stated rather than discovered:
 
+- Messages are capped at MongoDB's own 48MB ceiling and malformed framing
+  closes the connection. A length field arrives from the wire and this
+  process allocates on it.
+- TCP keepalive on both legs, and deliberately **no read timeout**: a
+  MongoDB connection idles legitimately on an awaitData cursor, and a
+  deadline would kill healthy connections and look like the cluster
+  flapping.
+- `SIGTERM` **drains**: stop accepting, let open connections finish, print
+  what the process did. A second signal exits immediately.
 - It picks **one node** and forwards bytes. It does not load-balance reads,
   honour read preference, or retry a write the client already saw fail —
   reach it with `directConnection=true` so your driver does not chase the

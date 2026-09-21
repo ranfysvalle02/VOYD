@@ -1,11 +1,11 @@
-"""One fixture, and a small suite on purpose.
+"""One fixture, a sweeper, and a small suite on purpose.
 
 The previous suite ran 817 checks and is in `git log`. This is not that. It
 is the foundation the rewrite stands on: the smallest set of claims that, if
 any one of them broke, would make everything above it a lie.
 
-Three of the four files here need no MongoDB at all, which is the point --
-the per-document check and the wire codec are pure, and a boundary whose core
+Most of the files here need no MongoDB at all, which is the point -- the
+per-document check and the wire codec are pure, and a boundary whose core
 cannot be tested without a database is a boundary that will not move to
 another one.
 """
@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import socket
+import time
 import uuid
 
 import pytest
+
 
 def _load_dotenv() -> None:
     """Read `.env` if it is there, without overriding the real environment.
@@ -50,6 +53,86 @@ MONGO_URI = os.environ.get(
 # would be asserting the opposite of what it claims.
 ATLAS_URI = os.environ.get("VOYD_ATLAS_URI")
 
+# ---------------------------------------------------------------------------
+# Leaked databases, and why this exists.
+#
+# A search index is not free. `mongot` is shared across every database on a
+# deployment, so a laptop carrying a dozen abandoned test databases builds
+# new indexes slowly enough that a healthy test times out -- which is how
+# this got written: nine leftover databases, 24 search indexes, and an index
+# test that failed for a reason that had nothing to do with refusal.
+#
+# The previous suite had a sweeper for exactly this and the rewrite deleted
+# it. Restoring it, with the one subtlety that version had already learned
+# the hard way.
+# ---------------------------------------------------------------------------
+
+# The suite's own databases. Timestamped so the sweep can tell a run that is
+# *happening* from one that was abandoned.
+TEST_PREFIX = "voyd_test_"
+# The examples' databases. Not timestamped -- they are standalone teaching
+# files and a clock in the name would be noise -- so they are only ever swept
+# at session start, before any example in this session could have created
+# one. Sweeping those mid-run is precisely the bug that once deleted a
+# running demo's data out from under it.
+EXAMPLE_PREFIX = "voyd_example_"
+ABANDONED_AFTER = 15 * 60
+
+
+def throwaway_name() -> str:
+    """A database name a sweep can reason about.
+
+    The timestamp is the whole point. Without it the only way to decide
+    whether a database is abandoned is to guess, and the guess that seems
+    obvious -- "I do not recognise this, drop it" -- deletes the data of a
+    second test run happening at the same time.
+    """
+    return f"{TEST_PREFIX}{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
+
+def _abandoned(name: str, *, now: float) -> bool:
+    match = re.fullmatch(rf"{TEST_PREFIX}(\d+)_[0-9a-f]+", name)
+    if not match:
+        return False            # not ours, or not a shape we can date: leave it
+    return (now - int(match.group(1))) > ABANDONED_AFTER
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _sweep_leaked_databases():
+    """Drop what previous runs left behind, then report what this one does.
+
+    Two sweeps with different rules, because "might be in use right now" is
+    true of one prefix and cannot be true of the other.
+    """
+    pymongo = pytest.importorskip("pymongo")
+    try:
+        client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
+        client.admin.command("ping")
+    except Exception:
+        yield                   # no database: nothing to sweep, nothing to leak
+        return
+
+    now = time.time()
+    swept = [n for n in client.list_database_names()
+             if _abandoned(n, now=now) or n.startswith(EXAMPLE_PREFIX)]
+    for name in swept:
+        client.drop_database(name)
+    if swept:
+        print(f"\nswept {len(swept)} leaked database(s) from earlier runs")
+
+    yield
+
+    # Not a failure -- a report. A leak is worth knowing about and is not
+    # worth turning somebody's green run red, and the next session's sweep
+    # will collect it anyway.
+    left = [n for n in client.list_database_names()
+            if n.startswith((TEST_PREFIX, EXAMPLE_PREFIX))]
+    if left:
+        print(f"\n{len(left)} test database(s) survived this run: "
+              f"{', '.join(sorted(left)[:5])}"
+              f"{' …' if len(left) > 5 else ''}")
+    client.close()
+
 
 def free_port() -> int:
     with socket.socket() as s:
@@ -72,7 +155,7 @@ def db():
         client.admin.command("ping")
     except Exception:
         pytest.skip(f"no MongoDB at {MONGO_URI}")
-    name = f"voyd_test_{uuid.uuid4().hex[:10]}"
+    name = throwaway_name()
     try:
         yield client[name]
     finally:
@@ -92,7 +175,7 @@ def atlas():
         client.admin.command("ping")
     except Exception as exc:
         pytest.skip(f"Atlas unreachable: {type(exc).__name__}")
-    name = f"voyd_test_{uuid.uuid4().hex[:10]}"
+    name = throwaway_name()
     try:
         yield ATLAS_URI, name
     finally:

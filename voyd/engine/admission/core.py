@@ -775,11 +775,21 @@ class AdmissionCore:
                       f"so this is the only place the tenant can be checked"))
         self._begin_read()
         tab = self._open_tab()
-        kept = [d for d in docs
+        # Materialised because `docs` may be any iterable and the count is
+        # needed after it is consumed.
+        candidates = list(docs)
+        _seen = len(candidates)
+        kept = [d for d in candidates
                 if self._admit(d, when=when, tab=tab) is not None]
         # Redactions are counted into ``receipts()`` by ``_admit`` already;
         # this path returns a bare list, so the per-read number has nowhere
         # to go and the mark is simply taken off.
+        # Both entry points for a batch that arrived from elsewhere record
+        # the same arithmetic, because both are exact for the same reason:
+        # nothing here passed through a query that could have dropped it
+        # first. `saturate` sees the search path; this sees a batch the
+        # caller assembled -- and a proxy is entirely the second kind.
+        self.receipts_log.observe(_seen, len(kept))
         cleaned, _ = self._harvest(kept)
         return cleaned
 

@@ -39,10 +39,13 @@ MIT. That file logs traffic; this one rewrites it.
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import socket
 import struct
 import sys
 import threading
+import time
 import traceback
 
 try:
@@ -115,20 +118,42 @@ class Guard:
         return self.handle.receipts().get("refused_by_reason", {})
 
 
+# MongoDB's own ceiling (`maxMessageSizeBytes`). A length field arrives from
+# the wire and this process allocates on it, so it is attacker-controlled
+# input in the most literal sense: without a cap, one malformed header asking
+# for two gigabytes is a memory blowup, and a *negative* one silently skips
+# the read loop and desynchronises the stream into garbage that looks like
+# the database going away.
+MAX_MESSAGE = 48_000_000
+HEADER = 16
+
+
+class ProtocolError(Exception):
+    """The framing is wrong. Close the connection rather than guess.
+
+    A proxy that tries to resynchronise a broken stream is a proxy that will
+    eventually forward half of one message and the tail of another, which is
+    a far worse failure than hanging up.
+    """
+
+
 def read_exact(sock: socket.socket, n: int) -> bytes:
-    buf = b""
+    buf = bytearray()
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
         if not chunk:
             raise ConnectionError("disconnected")
         buf += chunk
-    return buf
+    return bytes(buf)
 
 
 def read_message(sock: socket.socket) -> tuple[bytes, int, int, int, int]:
-    hdr = read_exact(sock, 16)
+    hdr = read_exact(sock, HEADER)
     msg_len, req_id, resp_to, opcode = struct.unpack("<iiiI", hdr)
-    return hdr + read_exact(sock, msg_len - 16), msg_len, req_id, resp_to, opcode
+    if not HEADER <= msg_len <= MAX_MESSAGE:
+        raise ProtocolError(
+            f"message length {msg_len} outside [{HEADER}, {MAX_MESSAGE}]")
+    return hdr + read_exact(sock, msg_len - HEADER), msg_len, req_id, resp_to, opcode
 
 
 def _decompress(compressor_id: int, data: bytes) -> bytes | None:
@@ -590,6 +615,8 @@ def pump(src: socket.socket, dst: socket.socket, *, to_server: bool,
                 raw = (delete_reply(raw, req_id, resp_to) if was_delete
                        else enforce(raw, req_id, resp_to, guards, verbose))
             dst.sendall(raw)
+    except ProtocolError as exc:
+        print(f"  voyd: dropped a connection: {exc}", flush=True)
     except (ConnectionError, OSError):
         # A closed socket is how a client disconnects, and both directions
         # notice. `OSError` is here beside `ConnectionError` because the
@@ -719,6 +746,13 @@ class Upstream:
     def connect(self) -> socket.socket:
         host, port, tls = self.address()
         sock = socket.create_connection((host, port), timeout=20)
+        # No *read* timeout, deliberately. A MongoDB connection legitimately
+        # idles for minutes -- an awaitData cursor, a change stream, a client
+        # between requests -- so a read deadline would kill healthy
+        # connections and look like the cluster flapping. TCP keepalive is
+        # the right tool: it notices a peer that went away without
+        # penalising one that is merely quiet.
+        keepalive(sock)
         sock.settimeout(None)
         if not tls:
             return sock
@@ -745,6 +779,18 @@ def stepped_down(reply: dict) -> str | None:
     return None
 
 
+def keepalive(sock: socket.socket) -> None:
+    """Notice a peer that vanished, without punishing one that is idle."""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 15),
+                           ("TCP_KEEPCNT", 4)):
+            if hasattr(socket, opt):        # Linux; macOS spells one of them
+                sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), value)
+    except OSError:
+        pass                                 # best effort, never fatal
+
+
 def listener(port: int, certfile: str | None,
              keyfile: str | None) -> socket.socket:
     """The socket clients reach, TLS-terminated when a certificate is given.
@@ -767,9 +813,31 @@ def listener(port: int, certfile: str | None,
     return ctx.wrap_socket(sock, server_side=True)
 
 
+class Live:
+    """How many client connections are open right now.
+
+    Its own object rather than a semaphore read, because "is anybody still
+    connected?" and "may another connect?" are different questions and
+    answering the first by interrogating the second is what broke shutdown.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+        self._lock = threading.Lock()
+
+    def __enter__(self):
+        with self._lock:
+            self.count += 1
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        with self._lock:
+            self.count -= 1
+
+
 def session(client: socket.socket, upstream: Upstream,
             guards: dict[str, Guard], verbose: bool,
-            done: threading.Semaphore) -> None:
+            done: threading.Semaphore, live: Live) -> None:
     """One client connection, start to finish, on one thread pair.
 
     A MongoDB connection is stateful -- authentication, sessions, cursors
@@ -782,6 +850,7 @@ def session(client: socket.socket, upstream: Upstream,
     released exactly once, here, so a client that disconnects mid-handshake
     cannot leak a slot.
     """
+    live.__enter__()
     up = None
     try:
         up = upstream.connect()
@@ -793,6 +862,7 @@ def session(client: socket.socket, upstream: Upstream,
         upstream.invalidate(type(exc).__name__)
         client.close()
         done.release()
+        live.__exit__()
         return
 
     rewritten: set[int] = set()
@@ -812,11 +882,28 @@ def session(client: socket.socket, upstream: Upstream,
     finished.acquire()
     finished.acquire()
     done.release()
+    live.__exit__()
+
+
+def summarise(guards: dict[str, Guard]) -> None:
+    """What this process actually did. A guarantee nobody counted is a
+    claim about one."""
+    served = sum(g.admitted for g in guards.values())
+    refused = sum(g.refused for g in guards.values())
+    revoked = sum(g.revoked for g in guards.values())
+    reasons: dict[str, int] = {}
+    for g in guards.values():
+        for reason, n in g.reasons().items():
+            reasons[reason] = reasons.get(reason, 0) + n
+    print(f"voyd-wire: served {served}, refused {refused} {reasons or '{}'}, "
+          f"turned {revoked} delete(s) into revocations", flush=True)
+    print("voyd-wire: documents deleted by this process: 0", flush=True)
 
 
 def serve(listen_port: int, target: str, guards: dict[str, Guard],
           verbose: bool, *, certfile: str | None = None,
-          keyfile: str | None = None, max_connections: int = 200) -> None:
+          keyfile: str | None = None, max_connections: int = 200,
+          drain_seconds: float = 20.0) -> None:
     upstream = Upstream(target, verbose=verbose)
     server = listener(listen_port, certfile, keyfile)
 
@@ -835,15 +922,54 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           "?directConnection=true\n", flush=True)
 
     slots = threading.Semaphore(max_connections)
-    while True:
+    live = Live()
+    stopping = threading.Event()
+
+    def drain(signum, _frame):
+        """Stop accepting, let existing connections finish, then report.
+
+        A proxy killed mid-flight drops whatever was in the air, and the
+        client sees a connection reset rather than an answer. Draining costs
+        a few seconds and turns a deploy into a non-event.
+        """
+        if stopping.is_set():
+            os._exit(1)                  # second signal: they mean it
+        stopping.set()
+        print("\nvoyd-wire: draining; not accepting new connections",
+              flush=True)
+        try:
+            server.close()               # unblocks accept()
+        except OSError:
+            pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, drain)
+        except ValueError:
+            pass                         # not the main thread; fine
+
+    while not stopping.is_set():
         try:
             client, _ = server.accept()
-        except OSError as exc:
-            # A failed TLS handshake is one client's problem, not the
-            # listener's. Refusing to keep serving because somebody sent
-            # garbage would make this trivially deniable.
-            print(f"voyd-wire: rejected a connection: {exc}", flush=True)
+        except Exception as exc:
+            # Two very different things arrive here and telling them apart
+            # is load-bearing. `drain` closes the listener to wake this up,
+            # which raises -- that is the shutdown path. Everything else is
+            # *one client's* problem: a failed TLS handshake, a port scan, a
+            # plain-TCP probe against a TLS listener.
+            #
+            # `ssl.SSLError` subclasses `OSError`, so an earlier version of
+            # this caught the handshake failure in the shutdown branch and
+            # re-raised -- killing the listener for every other client
+            # because one of them spoke the wrong protocol. Trivially
+            # deniable, and found by a test that probed the port before
+            # connecting properly.
+            if stopping.is_set():
+                break
+            print(f"voyd-wire: rejected a connection: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
             continue
+        keepalive(client)
         if not slots.acquire(blocking=False):
             # Closing beats queueing: a driver retries, and an unbounded
             # backlog is how a proxy turns a busy minute into an outage.
@@ -852,8 +978,23 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
             client.close()
             continue
         threading.Thread(target=session,
-                         args=(client, upstream, guards, verbose, slots),
+                         args=(client, upstream, guards, verbose, slots, live),
                          daemon=True).start()
+
+    # Wait for the connections that were already open. Bounded, because a
+    # client holding a cursor open forever must not hold up a deploy.
+    #
+    # A plain counter rather than draining the semaphore: acquiring N slots
+    # to prove nobody holds one leaks every slot acquired before the first
+    # failure, so the check could never succeed and every shutdown burned
+    # the full timeout looking patient.
+    deadline = time.monotonic() + drain_seconds
+    while time.monotonic() < deadline and live.count:
+        time.sleep(0.1)
+    if live.count:
+        print(f"voyd-wire: {live.count} connection(s) still open after "
+              f"{drain_seconds}s; closing anyway", flush=True)
+    summarise(guards)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -922,12 +1063,7 @@ def main(argv: list[str] | None = None) -> int:
               certfile=args.tls_cert, keyfile=args.tls_key,
               max_connections=args.max_connections)
     except KeyboardInterrupt:
-        refused = sum(g.refused for g in guards.values())
-        revoked = sum(g.revoked for g in guards.values())
-        served = sum(g.admitted for g in guards.values())
-        print(f"\nvoyd-wire: {served} document(s) served, {refused} refused, "
-              f"{revoked} delete(s) turned into revocations.")
-        print("voyd-wire: documents deleted by this process: 0")
+        summarise(guards)
     return 0
 
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import time
@@ -167,7 +168,7 @@ def test_a_tls_client_gets_the_same_refusal(db, tmp_path):
          "--tls-cert", str(cert), "--tls-key", str(key)],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
-        _wait(port, proc)
+        _wait(port, proc)   # a plain-TCP probe: the listener must survive it
         client = pymongo.MongoClient(
             f"mongodb://localhost:{port}/?directConnection=true&tls=true"
             "&tlsAllowInvalidCertificates=true",
@@ -223,3 +224,93 @@ def test_connections_past_the_limit_are_closed_rather_than_queued(db, tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+# --------------------------------------------------------------------------
+# Hardening. A length field arrives from the wire and this process allocates
+# on it, which makes it attacker-controlled input in the most literal sense.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("length,why", [
+    (-1, "negative: skips the read loop and desynchronises the stream"),
+    (2_000_000_000, "two gigabytes: one header is a memory blowup"),
+    (4, "smaller than the header it claims to contain"),
+    (w.MAX_MESSAGE + 1, "one byte past MongoDB's own ceiling"),
+], ids=["negative", "huge", "undersized", "just-over"])
+def test_a_malformed_length_is_refused_rather_than_allocated(length, why):
+    a, b = socket.socketpair()
+    try:
+        a.sendall(struct.pack("<i", length) + struct.pack("<iiI", 1, 0, 2013))
+        with pytest.raises(w.ProtocolError):
+            w.read_message(b)
+    finally:
+        a.close()
+        b.close()
+
+
+def test_a_well_formed_message_still_reads():
+    """The cap must not be so eager it rejects real traffic."""
+    a, b = socket.socketpair()
+    try:
+        raw = w.encode_sections(7, 0, 0, {"find": "notes"})
+        a.sendall(raw)
+        got, _length, req_id, _resp_to, opcode = w.read_message(b)
+        assert got == raw and req_id == 7 and opcode == w.OP_MSG
+    finally:
+        a.close()
+        b.close()
+
+
+def test_keepalive_is_set_rather_than_a_read_timeout():
+    """A MongoDB connection idles legitimately -- an awaitData cursor, a
+    change stream, a client between requests. A read deadline would kill
+    healthy connections and look like the cluster flapping. Keepalive
+    notices a peer that vanished without punishing one that is quiet."""
+    a, b = socket.socketpair()
+    try:
+        w.keepalive(a)
+        assert a.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+        assert a.gettimeout() is None, "a read timeout would be the wrong tool"
+    finally:
+        a.close()
+        b.close()
+
+
+def test_the_boundary_drains_on_sigterm_and_says_what_it_did(db, tmp_path):
+    """A proxy killed mid-flight drops whatever was in the air and the
+    client sees a reset rather than an answer. Draining costs seconds and
+    turns a deploy into a non-event -- and the summary is the audit line."""
+    import signal
+
+    db.notes.insert_many([{"tenant_id": "acme", "text": "a"},
+                          {"tenant_id": "acme", "text": "b"}])
+    policy = tmp_path / "voydfile.py"
+    policy.write_text("from voyd import guard, deadline, revocable, tenant\n"
+                      "@guard('notes')\n"
+                      "class N:\n"
+                      "    expire_at = deadline()\n"
+                      "    forgotten = revocable()\n"
+                      "    tenant_id = tenant()\n")
+    port = free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "tools/voyd_wire.py", "--config", str(policy),
+         "--listen", str(port), "--target", mongo_host()],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        _wait(port, proc)
+        client = pymongo.MongoClient(
+            f"mongodb://localhost:{port}/?directConnection=true",
+            serverSelectionTimeoutMS=8000)
+        try:
+            assert len(list(client[db.name].notes.find({"tenant_id": "acme"}))) == 2
+        finally:
+            client.close()
+
+        proc.send_signal(signal.SIGTERM)
+        out = proc.communicate(timeout=30)[0]
+        assert "draining" in out
+        assert "documents deleted by this process: 0" in out
+        assert "served 2" in out, out[-400:]
+    finally:
+        if proc.poll() is None:
+            proc.kill()

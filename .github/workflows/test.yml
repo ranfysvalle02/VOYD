@@ -88,7 +88,9 @@ jobs:
         # would assert the opposite of what it claims.
         env:
           VOYD_TEST_MONGO_URI: mongodb://localhost:27018/?directConnection=true
-        run: uv run --no-sync pytest -q tests/
+        # `-m ""` clears the default deselection. The fast run is for a
+        # laptop; CI is the place the index builds actually happen.
+        run: uv run --no-sync pytest -q -m "" tests/
 
       - name: Server-side embedding, against a real Atlas cluster
         # The one claim that cannot be checked anywhere else. Gated on the

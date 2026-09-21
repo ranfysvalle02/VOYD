@@ -90,9 +90,25 @@ class ReadPath(_Composed):
         me = self._scoped_for(filters)
 
         async def fetch(n: int) -> list[dict]:
+            # Size the candidate pool from what this collection has actually
+            # been throwing away, rather than from a constant somebody
+            # guessed. `$vectorSearch` draws `numCandidates` and returns
+            # `limit`; if half of what it ranks here is already forgotten,
+            # a pool sized for `limit` comes back half empty and `saturate`
+            # pays for another round trip to discover that.
+            #
+            # This is the one number no other component can compute. The
+            # index does not know the deadline. The driver does not. Only
+            # the thing doing the refusing knows the refusal rate, which
+            # makes pool size a boundary concern rather than a tuning knob.
+            #
+            # It only ever raises the ask, and refill is still what makes
+            # the page correct -- this just stops it needing three trips.
+            over = me.receipts_log.over_fetch()
+            pool = max(50, int(n * 10 * over))
             return await me.engine.search(me.collection, vector,
                                           text=text, limit=n,
-                                          filters=filters)
+                                          filters=filters, candidates=pool)
 
         return await me.saturate(fetch, limit=limit, when=when,
                                  rounds=rounds)
@@ -198,6 +214,10 @@ class ReadPath(_Composed):
             for reason, n in sealed_tally.items():
                 tally[reason] = tally.get(reason, 0) + n
         self.receipts_log.record_many(tally)
+        # Exact here, unlike `find`: a `$vectorSearch` hit passed through no
+        # query, so every candidate was either admitted or counted. This is
+        # what `over_fetch()` reads back on the next search.
+        self.receipts_log.observe(examined, len(hits))
         page = Page(hits, refused=tally, examined=examined, redacted=redacted,
                     spent=tab.spent if tab is not None else 0,
                     starved=len(kept) < want and not exhausted and not budget_done,

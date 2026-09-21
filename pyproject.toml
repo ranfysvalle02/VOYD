@@ -149,6 +149,17 @@ follow_imports = "skip"
 # The engine is async; `auto` means a test does not have to say so twice.
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# The default run is the 14-second one, because an inner loop nobody waits
+# for is an inner loop nobody runs. Everything excluded here needs a real
+# search index to build -- 90 seconds on an idle laptop, minutes on a busy
+# one, and it is the cluster's clock rather than ours.
+#
+# CI runs `-m ""` to include them, and a test asserts that it does, so
+# "fast by default" cannot quietly become "never".
+addopts = "-m 'not slow'"
+markers = [
+    "slow: needs a real search index to build, or a live Atlas cluster",
+]
 # `scanner` is a second distribution with no dependencies and no import of
 # `voyd`; putting it on the path is what lets a test reach it without the
 # two packages depending on each other.

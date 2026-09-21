@@ -198,7 +198,8 @@ class Engine:
     # ---- access --------------------------------------------------------
 
     async def search(self, collection: str, vector, *, text=None,
-                     limit: int = 5, filters=None) -> list[dict]:
+                     limit: int = 5, filters=None,
+                     candidates: int | None = None) -> list[dict]:
         """Rank documents. **This is the primitive, not a read path.**
 
         It returns what the index ranked, which on a collection that refuses
@@ -219,7 +220,7 @@ class Engine:
         in this package does the former by accident.
         """
         return await self.search_engine.query(
-            collection, vector, text=text, limit=limit, filters=filters)
+            collection, vector, text=text, limit=limit, filters=filters, candidates=candidates)
 
     @property
     def search_tier(self) -> str:

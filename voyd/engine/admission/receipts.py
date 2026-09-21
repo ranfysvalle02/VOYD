@@ -47,6 +47,17 @@ class Receipts:
     # aside. ``including_refused()`` is break-glass, and a break-glass read
     # that logs nothing is a break-glass read nobody reviews.
     bypassed: int = 0
+    # What the search path actually threw away, and the only place in this
+    # package where the refusal count is *exact* rather than a floor: a
+    # `$vectorSearch` hit passes through no query, so every candidate is
+    # counted here or admitted.
+    #
+    # Kept apart from ``refused`` because these two numbers answer different
+    # questions. ``refused`` is "is something wrong?". These are "how much
+    # does this collection over-fetch?", which is the input to sizing the
+    # candidate pool -- see ``over_fetch()``.
+    examined: int = 0
+    admitted: int = 0
     last_bypass_actor: str | None = None
     last_bypass_at: datetime | None = None
     last_reason: str | None = None
@@ -108,6 +119,46 @@ class Receipts:
     def total(self) -> int:
         return sum(self.refused.values())
 
+    def observe(self, examined: int, admitted: int) -> None:
+        """Record one search's arithmetic. Called by the read path only."""
+        self.examined += max(0, int(examined))
+        self.admitted += max(0, int(admitted))
+
+    def over_fetch(self, *, floor: float = 1.0, ceiling: float = 12.0,
+                   minimum_sample: int = 50) -> float:
+        """How many candidates to ask for per document you want back.
+
+        The number nobody else can compute. An index cannot: it does not know
+        your deadline, so it cannot know what fraction of what it ranks is
+        already gone. A driver cannot. The **only** component that knows how
+        many candidates get thrown away is the one throwing them away, which
+        makes sizing the candidate pool a boundary concern rather than a
+        tuning parameter somebody guesses in a config file.
+
+        Refuse half of what arrives and you must ask for twice as many to
+        come back with a full page -- so the factor is ``1 / (1 - rate)``,
+        which is the expected over-fetch exactly and not an approximation.
+
+        Three guards, each against a way this could make things worse:
+
+        - **a minimum sample**, because one refusal in the first read would
+          otherwise triple the pool for a collection that is perfectly
+          healthy;
+        - **a ceiling**, because a scope where almost everything is forgotten
+          would otherwise ask for a pool the size of the collection, turning
+          a cheap wrong answer into an expensive one;
+        - **a floor of 1.0**, because this may only ever *raise* the ask. It
+          is an optimisation on top of refill, never a replacement for it:
+          refill is what makes the page correct, and this is what stops it
+          needing three round trips to get there.
+        """
+        if self.examined < minimum_sample or self.admitted <= 0:
+            return floor
+        rate = 1.0 - (self.admitted / self.examined)
+        if rate <= 0:
+            return floor
+        return max(floor, min(ceiling, 1.0 / (1.0 - rate)))
+
     def as_dict(self) -> dict:
         return {
             # A lower bound: the query prunes most of these server-side.
@@ -123,6 +174,13 @@ class Receipts:
             # Exact: how many times the guarantee was deliberately set aside
             # through ``including_refused()``. Not prevented, but visible.
             "including_refused_total": self.bypassed,
+            # The search path's own arithmetic, and the input to sizing the
+            # candidate pool. Exposed because a caller who sees a climbing
+            # over-fetch is looking at the cost of their own refusal rate,
+            # which is a tuning conversation rather than a bug.
+            "search_examined": self.examined,
+            "search_admitted": self.admitted,
+            "over_fetch": round(self.over_fetch(), 2),
             "last_including_refused_actor": self.last_bypass_actor,
             "last_including_refused_at": (
                 self.last_bypass_at.isoformat()
