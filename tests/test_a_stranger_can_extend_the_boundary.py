@@ -135,9 +135,9 @@ class Notes:
 
 @pytest.mark.parametrize("drop", ["reason", "refuses", "clause"])
 def test_a_rule_missing_a_member_of_the_protocol_fails_at_load(tmp_path, drop):
-    """The assertion that matters. Each of these used to load cleanly,
-    announce the rules it *did* understand, and serve everything the
-    missing one was there to refuse."""
+    """The assertion that matters. Without it each of these loads cleanly,
+    announces the rules it *did* understand, and serves everything the
+    missing one is there to refuse."""
     body = JURISDICTION
     if drop == "reason":
         body = body.replace('    reason: str = "wrong_region"\n', "")
@@ -259,8 +259,8 @@ def test_the_boundary_enforces_a_rule_it_has_never_heard_of(regions):
 
 def test_it_is_announced_at_boot_and_counted_by_its_own_reason(regions):
     """A rule the operator cannot see in the startup line or on the
-    counters is one they cannot tell is running -- which is the state this
-    whole file exists because the loader used to leave them in."""
+    counters is one they cannot tell is running, which is the state this
+    whole file exists to keep the loader out of."""
     with _wire(POLICY) as (port, proc):
         client = pymongo.MongoClient(
             f"mongodb://localhost:{port}/?directConnection=true",

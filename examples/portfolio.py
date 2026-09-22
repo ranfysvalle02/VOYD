@@ -186,13 +186,9 @@ CORPUS = [
 def _handle(db, collection: str, *rules) -> Admission:
     """One collection, one rule set, built from the parts.
 
-    A handle per rule set rather than a collection per rule set. The old
-    version of this file seeded `notes0`, `notes1`, `notes2` because the
-    engine deduplicated handles by collection and refused to redeclare one
-    with different rules -- correct, since two rule sets for one collection
-    is how they drift, and an artefact of a registry that is no longer in
-    the way. Constructing the handle directly, two rule sets over one
-    corpus is just two objects.
+    A handle per rule set rather than a collection per rule set. Two rule
+    sets over one corpus are two objects over one collection, so the
+    scenario needs no `notes0`, `notes1`, `notes2` to keep them apart.
     """
     return Admission(db, AdmissionSpec(
         collection, rules=rules).with_defaults())

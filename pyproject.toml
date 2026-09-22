@@ -39,45 +39,25 @@ dependencies = [
 crypto = [
     "pymongo[encryption]>=4.9",
 ]
-# Everything optional. One thing, now: nothing here computes an embedding.
-# There was a `voyage` extra, and it was residue -- its own comment described
-# `remember()`, a method the cut removed, and no module in this repository
-# imported `voyageai` at all. `auto_embed` is why: the index owns the vector
-# and the server produces it, so a client-side embedding library is not a
-# dependency this package has an opinion about.
+# Everything optional, which is one thing. Nothing here computes an
+# embedding: `auto_embed` means the index owns the vector and the server
+# produces it, so a client-side embedding library is not a dependency this
+# package has an opinion about.
 all = [
     "voyd[crypto]",
 ]
+# Every tool the suite and CI actually invoke, declared rather than inherited.
+# A linter or type checker that arrives transitively is advisory -- it holds
+# only on a machine that happens to have it -- and a rule you have to
+# remember to run is a suggestion, which is this project's whole complaint
+# about conventions. `py.typed` makes it worse than advisory: it is a promise
+# other people's builds act on, so the checker that keeps it has to be here.
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "httpx>=0.27",
-    # Configured in [tool.ruff] below and run in CI. It was configured and
-    # *not* declared for a while, which made the lint rules advisory: they
-    # held only on a machine that happened to have the tool. A rule you have
-    # to remember to run is a suggestion, which is this project's whole
-    # complaint about conventions.
     "ruff>=0.5",   # rule set is pinned in [tool.ruff.lint], so the tool may float
-    # `tests/test_every_documented_command_is_real.py` reads the compose file
-    # to check that a documented `docker compose up -d --wait <service>` names
-    # a service that exists. It arrives transitively today (uvicorn[standard]),
-    # which is exactly how `ruff` and `mypy` were undeclared above -- a tool
-    # the suite depends on, present by luck, until the day a transitive
-    # dependency drops it and a test that was never about YAML fails on an
-    # import. Declared, so the suite owns what it uses.
-    #
-    # And for a while that paragraph was the whole of it: the test it names
-    # did not exist, nothing in the repository imported `yaml`, and this was
-    # a dependency justified by a file nobody had written -- in the block
-    # whose own subject is tools that are present by luck. The same defect
-    # the block is about, one level up, in the prose explaining it.
-    "pyyaml>=6.0",
-    # The package ships `py.typed`, which tells every downstream type checker
-    # that these annotations are load-bearing. That promise was made in the
-    # wheel and checked nowhere -- the same failure the ruff comment above
-    # describes, one level worse: an undeclared linter is advisory, but an
-    # unchecked `py.typed` is a claim other people's builds act on.
     "mypy>=1.11",
+    "pyyaml>=6.0", # tests/test_every_documented_command_is_real.py reads the compose file
 ]
 
 [project.urls]
@@ -104,16 +84,15 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-# Selected explicitly, not inherited. Leaving this out means the rule set is
-# whatever the installed ruff currently defaults to -- and that moves: the
-# same code linted clean under 0.5 and produced 115 findings under 0.16,
-# without a line changing. A build that changes under you is the thing this
-# codebase pins settings to avoid everywhere else (see `voyd-wire`, which
-# fixes its own clock and codecs rather than inheriting the caller's).
+# Selected explicitly, not inherited. Leaving this out makes the rule set
+# whatever the installed ruff currently defaults to, and that moves: the same
+# code lints clean under 0.5 and produces 115 findings under 0.16 without a
+# line changing. A build that changes under you is what this codebase pins
+# settings to avoid everywhere else -- `voyd-wire` fixes its own clock and
+# codecs rather than inheriting the caller's, for the same reason.
 #
-# This is the historical default -- pyflakes plus the pycodestyle errors that
-# are actually errors -- and adding a rule should be a deliberate commit that
-# also fixes what it finds.
+# This is pyflakes plus the pycodestyle errors that are actually errors.
+# Adding a rule should be a deliberate commit that also fixes what it finds.
 select = ["E4", "E7", "E9", "F"]
 
 [tool.ruff.lint.per-file-ignores]
@@ -124,41 +103,28 @@ select = ["E4", "E7", "E9", "F"]
 "tests/*" = ["E402"]
 
 [tool.mypy]
-# Everything this repository ships or runs, the boundary included.
+# Everything this repository ships or runs, the boundary included -- the
+# concurrency, the failover and the byte-level protocol rewriting are the
+# hardest code here and so the least safe to leave unchecked.
 #
-# `scanner` is here because it ships as its own distribution and judges
-# somebody else's repository -- the one piece of this project that runs
-# against code nobody here has seen.
-#
-# The proxy was excluded for a long time, and the exclusion outlived its
-# reason. It was justified by a count -- "31 errors" -- which had reached
-# 59 by the time anybody re-measured, in the file holding the concurrency,
-# the failover and the byte-level protocol rewriting. The hardest code in
-# the repository was the least statically checked, and the stale number
-# was the argument for leaving it that way.
-#
-# It is zero now, and the 59 were not 59 problems. Seventeen were one
-# dynamic-attribute decision in `Meter`; sixteen were one unannotated dict
-# splatted into `**kwargs`. Two root causes were a third of the total.
+# `scanner` is included because it ships as its own distribution and judges
+# somebody else's repository, which is the one piece of this project that
+# runs against code nobody here has seen.
 files = ["voyd", "scanner/voyd_scan"]
 # No `python_version` pin, deliberately. Pinning it to the 3.11 floor makes
-# mypy read every installed stub under 3.11 syntax, so any dependency
-# resolved for a newer interpreter can fail to *parse* -- which is fatal, and
-# kills the run before it checks a line of `voyd`. Letting mypy follow the
+# mypy read every installed stub under 3.11 syntax, so a dependency resolved
+# for a newer interpreter can fail to *parse* -- which is fatal, and kills
+# the run before it checks a line of `voyd`. Letting mypy follow the
 # interpreter means CI, which installs 3.11, checks the floor against a 3.11
-# dependency set, and a 3.12 laptop checks 3.12.
+# dependency set, and a 3.12 laptop checks 3.12. Both are real
+# configurations; the pinned pair is not.
 #
-# The concrete trigger was numpy, arriving via a `voyageai` extra, whose
-# stubs use 3.12 `type` statements. Both are gone now -- nothing here
-# computes an embedding -- so the decision stands on the general argument
-# above rather than on that dependency. Said plainly because "we did this
-# because of numpy" would now be a reason nobody can verify.
-# Both are real configurations; the pinned pair was not.
-# Deliberately not `strict`. Strict on a codebase this size produces a number
-# nobody acts on, and a check nobody acts on is the thing this repository
-# complains about everywhere else. These are the rules that catch the errors
-# `py.typed` makes downstream users trust us about: a signature that lies, a
-# None that is not declared, an annotation that silently means `Any`.
+# Deliberately not `strict`, either. Strict on a codebase this size produces
+# a number nobody acts on, and a check nobody acts on is the thing this
+# repository complains about everywhere else. These are the rules that catch
+# the errors `py.typed` makes downstream users trust us about: a signature
+# that lies, a None that is not declared, an annotation that silently means
+# `Any`.
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
@@ -168,13 +134,8 @@ check_untyped_defs = true
 
 # Third parties without stubs. Listed one by one rather than with a blanket
 # `ignore_missing_imports = true`, so adding a dependency that *does* ship
-# types cannot quietly land untyped.
-#
-# `voyageai` and `numpy` used to be here too, with a paragraph explaining
-# that numpy's stubs are a syntax error under the pinned floor and had to be
-# skipped at the extra's edge. Both entries outlived the dependency: mypy
-# reported `unused section(s): module = ['voyageai.*']` on every single run,
-# which is the tool saying so out loud for however long nobody read it.
+# types cannot quietly land untyped. `warn_unused_configs` above is what
+# keeps this list honest when a dependency goes away.
 [[tool.mypy.overrides]]
 module = ["pymongocrypt.*", "snappy.*", "zstandard.*"]
 ignore_missing_imports = true
@@ -183,30 +144,22 @@ ignore_missing_imports = true
 # The engine is async; `auto` means a test does not have to say so twice.
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# The default run is the 14-second one, because an inner loop nobody waits
-# for is an inner loop nobody runs. Everything excluded here needs a real
-# search index to build -- 90 seconds on an idle laptop, minutes on a busy
-# one, and it is the cluster's clock rather than ours.
+# `pytest` is the inner loop at ~110 seconds. What `slow` excludes needs a
+# real search index to build -- 90 seconds more on an idle laptop, minutes on
+# a busy one, and it is the cluster's clock rather than ours.
 #
 # CI runs `-m ""` to include them, and a test asserts that it does, so
 # "fast by default" cannot quietly become "never".
 addopts = "-m 'not slow'"
 markers = [
     "slow: needs a real search index to build, or a live Atlas cluster",
-    # Applied only where a file is *mixed*. The "core needs no database" CI
-    # step used to work by naming four files that happened to be entirely
-    # pure, which is fine until somebody adds a file that is mostly pure --
-    # and then the honest choice is a marker rather than a `-k` expression
-    # matching test names, which silently stops matching when a test is
-    # renamed.
+    # Applied only where a file is *mixed*, so the "core needs no database"
+    # CI step can name files that are mostly pure. The alternative is a `-k`
+    # expression matching test names, which silently stops matching when a
+    # test is renamed.
     "needs_mongo: drives a real mongod through a real proxy",
 ]
 # `scanner` is a second distribution with no dependencies and no import of
 # `voyd`; putting it on the path is what lets a test reach it without the
 # two packages depending on each other.
 pythonpath = [".", "scanner"]
-
-[dependency-groups]
-dev = [
-    "pytest-xdist>=3.6",
-]

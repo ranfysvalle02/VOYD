@@ -469,12 +469,9 @@ STEPPED_DOWN = {
 class Upstream:
     """Where the boundary forwards to, and how it stays right.
 
-    This used to be a ``(host, port, tls)`` tuple resolved once at startup,
-    and all three of the operability complaints against this proxy were the
-    same complaint about that tuple: it could not be re-resolved, so a
-    failover meant a restart.
-
-    A connection is a *lifecycle*, not an address:
+    A connection is a *lifecycle*, not an address, and the difference is
+    the whole class of operability complaint: an address resolved once at
+    startup cannot be re-resolved, so a failover means a restart.
 
     - **resolved lazily**, so startup does not block on DNS and a cluster
       that is briefly unreachable does not prevent the boundary from

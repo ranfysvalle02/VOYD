@@ -208,9 +208,9 @@ def test_a_client_that_stops_reading_does_not_grow_the_boundary(wired):
 
 
 def test_a_storm_of_resets_costs_connections_and_not_the_listener(wired):
-    """`ssl.SSLError` subclasses `OSError`, and an earlier version caught a
-    handshake failure in the shutdown branch and killed the listener for
-    everybody. Same shape, ruder: fifty clients that vanish mid-reply."""
+    """`ssl.SSLError` subclasses `OSError`, so a handshake failure caught in
+    the shutdown branch takes the listener down for everybody. Same shape,
+    ruder: fifty clients that vanish mid-reply."""
     listen, proxy = wired(docs=200, pad=500)
     for _ in range(50):
         sock = socket.create_connection(("127.0.0.1", listen), 10)

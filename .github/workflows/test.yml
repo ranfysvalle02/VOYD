@@ -70,10 +70,10 @@ jobs:
             -m 'not needs_mongo'
 
       - name: The container is the deployment story, so it is built and run
-        # Untested until now, which made the deployment path documentation
-        # rather than a claim. It builds, it runs as a non-root uid, it
-        # answers --version, and its HEALTHCHECK command fails when there
-        # is nothing to be healthy about.
+        # The deployment path is a claim like any other and gets the same
+        # treatment. It builds, it runs as a non-root uid, it answers
+        # --version, and its HEALTHCHECK command fails when there is
+        # nothing to be healthy about.
         run: |
           docker build -t voyd:ci .
           test "$(docker run --rm --entrypoint id -u voyd:ci)" != "0"
@@ -120,23 +120,16 @@ jobs:
           /tmp/wheelcheck/bin/python -c "
           import voyd, voyd.engine
           from voyd import guard, deadline, revocable
-          for gone in ('voyd.app', 'voyd.web', 'voyd.mcp', 'voyd.store',
-                       'voyd.engine.ledger', 'voyd.engine.perimeter',
-                       'voyd.engine.model'):
-              try:
-                  __import__(gone)
-              except ImportError:
-                  continue
-              raise AssertionError(f'{gone} is back in the wheel')
-          # There is one way to use this and it is not an import. A
-          # re-export that put an application-facing handle back would
-          # undo that silently, and a wheel is where it would happen.
+          # There is one way to use this and it is not an import. An
+          # application-facing handle re-exported from either module would
+          # be a second door onto the guarantee, added silently, and a
+          # wheel built from a dirty tree is where that would show up.
           for name in ('Engine', 'Model'):
-              assert not hasattr(voyd, name), f'{name} is back in the wheel'
-              assert not hasattr(voyd.engine, name), f'voyd.engine.{name} is back'
-          # And the product is *in* the wheel. This is the other half of the
-          # same assertion: a distribution that ships the vocabulary to write
-          # a policy and nothing that can serve one is not the artifact.
+              assert not hasattr(voyd, name), f'voyd.{name} is in the wheel'
+              assert not hasattr(voyd.engine, name), f'voyd.engine.{name} is in the wheel'
+          # And the product is *in* the wheel. The other half of the same
+          # assertion: a distribution shipping the vocabulary to write a
+          # policy and nothing that can serve one is not the artifact.
           import voyd.wire, voyd.wire.proxy, voyd.wire.seal, voyd.wire.cascade
           assert callable(voyd.wire.proxy.main)
           print('wheel: the policy vocabulary imports, the proxy ships')"

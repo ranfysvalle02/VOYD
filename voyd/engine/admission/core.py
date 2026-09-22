@@ -705,13 +705,11 @@ class AdmissionCore:
         # collection declaring `subjects` they are different objects: the
         # returned one has had its refused embedded subjects removed.
         #
-        # This line used to be a comprehension over `candidates` that kept
-        # `d` and used `_admit` only as a predicate, so a refused chapter
-        # was counted in `receipts()` and served anyway -- and this is the
-        # only read path the proxy uses. The comment that stood here
-        # explained that the redaction *count* has nowhere to go on a path
-        # returning a bare list, which is true, and had been read as
-        # meaning the redaction itself was optional.
+        # A comprehension that kept `doc` and used `_admit` as a bare
+        # predicate would count a refused chapter in `receipts()` and serve
+        # it anyway, on the only read path the proxy uses. The redaction
+        # *count* genuinely has nowhere to go on a path returning a bare
+        # list; the redaction itself is not optional.
         kept = []
         for doc in candidates:
             admitted = self._admit(doc, when=when, tab=tab)

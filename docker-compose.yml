@@ -1,10 +1,10 @@
 services:
   mongo:
     # Atlas Local: a real single-node Atlas deployment -- mongod + mongot in one
-    # container. This is deliberately not `mongo:7`. VOYD's search, GC and TTL
-    # behaviour all depend on Atlas features, so developing against a plain
-    # mongod meant the default experience silently exercised fallback paths and
-    # never ran $vectorSearch at all.
+    # container. Deliberately not `mongo:7`. The search and TTL behaviour this
+    # boundary enforces against depends on Atlas features, and a plain mongod
+    # would let the default experience pass without ever running
+    # $vectorSearch at all.
     #
     # Gives us, with no Atlas account and no network:
     #   $vectorSearch + $search   (mongot, bundled)
@@ -108,8 +108,8 @@ services:
           // A third identity with the *same name* as the first, in a
           // different auth database. admin.voyd and elsewhere.voyd are two
           // principals, and an identity check comparing only usernames
-          // would hand one of them the other connection. That hole was
-          // real for one commit; this is what keeps it closed.
+          // would hand one of them the other connection. This is what
+          // keeps that closed.
           try {
             db.getSiblingDB("elsewhere").createUser({user: "voyd",
               pwd: "voyd", roles: [{role: "readWrite", db: "elsewhere"}]})
@@ -135,6 +135,5 @@ services:
 volumes:
   # Declared because it is referenced above. Without this stanza `docker
   # compose up` fails with "invalid compose project" and never starts
-  # mongod -- which took the integration half of CI with it, silently, for
-  # as long as nobody read past the first failing line.
+  # mongod, which takes the integration half of CI with it.
   voyd-atlas:

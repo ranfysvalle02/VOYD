@@ -438,13 +438,18 @@ everything in [CLAIMS.md](CLAIMS.md) holds through the port, and the
 mapping test enforces it: a cited test must drive the boundary or touch no
 database at all.
 
-The one thing you do run in your own process is a **measurement**, and only
-because a boundary would defeat the point of it: `examples/shadow.py`
+The one thing you do run in your own process is a **measurement**, and
+only because a boundary would defeat the point of it: `examples/shadow.py`
 counts how many documents your existing read path serves that your own
 database has already marked as gone, and changes nothing while it does.
-When that number convinces somebody, the same rules become a policy file.
-[SHADOW_MODE.md](SHADOW_MODE.md) argues that measurement is the thing to
-ship first, and names the result that would mean this project should stop.
+The rules it takes are written in the same vocabulary a `voydfile.py` uses,
+so the artefact that measures the problem is the artefact that fixes it.
+
+That count is exact, for a reason worth knowing: everywhere else the
+refusal is partly pushed into the query and MongoDB drops most forgotten
+documents server-side, so the boundary under-reports. Here the documents
+come from your own unfiltered read and are judged one at a time, so
+nothing is dropped early and nothing goes uncounted.
 
 ## The server owns the encoding
 
@@ -840,9 +845,10 @@ external users, zero pilots, every claim here verified by the person who
 wrote it. The defects are not found by the suite going red — they come from
 *running* something, or from somebody asking why a paragraph said what it
 said. One team, two weeks, their own corpus is worth more than anything
-else that could be built next — see [SHADOW_MODE.md](SHADOW_MODE.md).
+else that could be built next; `examples/shadow.py` is how to get there
+without installing the boundary at all.
 
-The suite is **588 tests**, and it is a foundation rather than a census —
+The suite is **589 tests**, and it is a foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie. Each one and the file that holds it up is
 **[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim
@@ -886,7 +892,7 @@ The Atlas test runs on its own because four index builds on one shared
 cluster outlast the poll budget. The examples loop exits non-zero on
 purpose: a gate that echoes `FAIL` and returns zero is not a gate.
 
-**309 of those tests need no MongoDB at all**, and that is not a
+**310 of those tests need no MongoDB at all**, and that is not a
 convenience. A per-document check that cannot run without a database is one
 that cannot move to a wire — so CI runs them in a step with no `services:`
 and nothing listening, naming the files explicitly rather than trusting a

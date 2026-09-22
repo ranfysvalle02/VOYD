@@ -82,7 +82,7 @@ def live(doc: dict, at_field: str = "expire_at", *, when: datetime | None = None
 
     A missing or null deadline is pinned. An unreadable deadline is dead --
     fail closed. Never raise: a TypeError here is how a forgotten fact
-    used to skip the filter.
+    skips the filter.
 
     ``OverflowError`` is in that list because a datetime can be a *valid*
     datetime and still be unreadable: ``datetime.max`` carrying a negative

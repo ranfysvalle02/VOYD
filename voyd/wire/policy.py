@@ -545,9 +545,9 @@ def expressible_clauses(guard: Guard,
     clauses: list[dict] = []
     for rule in guard.spec.rules:
         if getattr(rule, "needs_caller", False):
-            # This process used to be nobody. It can now ask the server who
-            # the client authenticated as -- see `CallerIdentity` -- so the
-            # rule gets its claims and answers as a query like any other.
+            # The boundary asks the server who the client authenticated
+            # as -- see `CallerIdentity` -- so the rule gets its claims and
+            # answers as a query like any other.
             # Still `None` when the identity is unknown: a reduction over
             # rows whose permission nobody established is the leak, not a
             # degraded version of preventing it.

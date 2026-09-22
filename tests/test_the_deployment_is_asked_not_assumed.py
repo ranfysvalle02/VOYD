@@ -1,14 +1,13 @@
-"""`capabilities.py` was the one module LIMITS said had no excuse.
+"""What the deployment can do is asked, never inferred.
 
-It is 130 lines that decide which tier of search every read above them
-uses, and nothing exercised it. That is a bad place for a gap: this
-module's entire reason for existing is that the engine used to *infer*
-what a deployment could do, and the two times it inferred, it was wrong
-for months without a single log line.
+`capabilities.py` is 130 lines that decide which tier of search every read
+above them uses, and its whole reason for existing is that an inference --
+Atlas-ness from a connection string, a stage from a version number -- is
+wrong silently and stays wrong until somebody thinks to check.
 
-Both of those bugs are in its docstrings as history. Here they are as
-tests, because a regression that is only described is a regression that
-can come back.
+Both inferences are described in its docstrings. Here they are as tests,
+because a regression that is only described is a regression that can
+happen.
 
 No database. The probes are three commands and their failure modes, so
 the honest test is a fake that answers the way each deployment answers --

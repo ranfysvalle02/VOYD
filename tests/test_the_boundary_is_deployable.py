@@ -185,10 +185,11 @@ def test_the_help_names_the_command_and_not_the_file():
 
 
 def test_the_module_form_does_not_warn():
-    """`voyd/wire/__init__.py` used to import `main`, so `-m
-    voyd.wire.proxy` loaded the package and then re-executed the module,
-    and Python said so on stderr -- the first line of every container's
-    log, read by somebody who is already worried."""
+    """An import of `main` in `voyd/wire/__init__.py` makes `-m
+    voyd.wire.proxy` load the package and then re-execute the module, and
+    Python says so on stderr -- the first line of every container's log,
+    read by somebody who is already worried. So there are no imports in
+    that file at all."""
     for form in ("voyd.wire", "voyd.wire.proxy"):
         out = subprocess.run([sys.executable, "-m", form, "--version"],
                              cwd=ROOT, capture_output=True, text=True,

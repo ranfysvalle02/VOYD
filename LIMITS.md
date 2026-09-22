@@ -37,9 +37,12 @@ common case, and a test that built its input by hand.** Expect more of
 them in the corners nobody has exercised.
 
 One team, two weeks, their own corpus is worth more than anything else
-that could be built next. [SHADOW_MODE.md](SHADOW_MODE.md) is the cheapest
-way to get there and names the result that would mean this project should
-stop.
+that could be built next, and `examples/shadow.py` is the cheapest way to
+get there: it counts how many documents an existing read path serves that
+the database has already marked as gone, changing nothing while it does.
+**If that number is zero across the first few repositories it is pointed
+at, stop.** Not reposition — stop. It would mean the window this project
+closes is not one teams fall into.
 
 ## 2. What refusal structurally cannot do
 
@@ -161,7 +164,7 @@ which decoding lazily does not help.
 
 ## 4. Coverage
 
-588 tests, ~9,900 lines, against 14,000 lines of `voyd/` — 7,300 of policy
+589 tests, ~9,900 lines, against 14,000 lines of `voyd/` — 7,300 of policy
 and admission, 6,800 of boundary under `voyd/wire/`. Well-targeted rather
 than thorough: coverage is by *claim*, which is the right axis, and it is
 not line coverage.
@@ -183,7 +186,7 @@ at all, or sit on a short list with its reason written down.
 **There is a no-database subset and it is smaller than the marker
 suggests.** `needs_mongo` is applied per file and only to mixed ones, so
 `-m "not needs_mongo"` over the whole suite still selects plenty that
-starts a proxy. The honest set is the one CI names file by file: **309
+starts a proxy. The honest set is the one CI names file by file: **310
 tests in 20 seconds**, no `services:`, nothing listening. That step is the
 evidence for the property the proxy rests on — the per-document check is
 pure — so it names its files explicitly rather than trusting a label.
@@ -429,9 +432,9 @@ has to be kept honest forever.
   requirement, the honest version is a routing decision *inside* the one
   loop, with the measurements that justify it first.
 - **A hosted proxy.** It would hold every customer's database credentials
-  and put every document they retrieve through our infrastructure, which
-  breaks both claims above. [SHADOW_MODE.md](SHADOW_MODE.md) is the
-  product that does not.
+  and put every document they retrieve through somebody else's
+  infrastructure. The sidecar shape in §6 is the strongest thing this can
+  be, and it is strongest precisely because nobody else is in the path.
 
 Two things are kept on purpose, so nobody re-derives "no callers" and
 deletes them:

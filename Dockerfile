@@ -14,9 +14,9 @@ COPY pyproject.toml uv.lock* README.md ./
 # the wheel it then installs.
 COPY voyd/ voyd/
 
-# The boundary needs the engine and a MongoDB driver. `all` adds embeddings
-# and cryptographic erasure, which are library-only today -- see the README --
-# and are here so a container can also be used as the in-process runtime.
+# The boundary needs a MongoDB driver and nothing else. `all` adds the one
+# extra there is -- `crypto`, for the `sealed()` and `--key-vault` path -- so
+# the image can serve a policy that seals a field without being rebuilt.
 RUN uv sync --extra all --frozen --no-dev || uv sync --extra all --no-dev
 
 # The policy file, the proxy and the examples. Last, because they change most

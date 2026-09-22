@@ -3,8 +3,8 @@
 
 Counters printed on shutdown answer "what did that process do?" after it
 is too late to do anything. An operator needs the other question --
-*what is it doing now?* -- and `LIMITS.md` has said for a while that this
-is the first thing anybody running it would ask for.
+*what is it doing now?* -- which is the first thing anybody running this
+asks for.
 
 **The shape of the problem is `--workers`.** Counters live in N address
 spaces. Three ways to put them back together, and only one of them is

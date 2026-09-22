@@ -162,9 +162,9 @@ async def main() -> None:
         print("\n  application lines changed by this measurement: 0")
         print("  users affected:                                 0")
         print("  documents deleted:                              0\n")
-        print("  The number above is the pilot. If it is zero after two weeks")
-        print("  on your own data, you do not have this problem -- and")
-        print("  SHADOW_MODE.md says so before you start, on purpose.\n")
+        print("  The number above is the whole result. If it is zero after")
+        print("  two weeks on your own data, you do not have this problem,")
+        print("  and LIMITS.md says so before you start, on purpose.\n")
     finally:
         await client.drop_database(name)
         await client.close()

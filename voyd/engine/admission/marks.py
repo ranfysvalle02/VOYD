@@ -428,9 +428,6 @@ class MarkWrites(_Composed):
             # recovering recognisable source text from one. Pinned by
             # ``tests/test_the_vector_dies_with_the_fact.py``, which also
             # checks the wire's separate spelling of this update agrees.
-            #
-            # This comment used to point at ``_destroy_derived``, a
-            # function that has never existed in this package.
             for name in self.spec.derived_fields:
                 mark_set[name] = None
             update = [{"$set": {

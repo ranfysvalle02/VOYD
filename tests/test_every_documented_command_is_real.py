@@ -8,14 +8,7 @@ README whose first command fails is a statement of intent like any other.
 It is cheap on purpose. It does not run Docker and it does not check that
 the service works -- it checks that the name in the prose is a key in the
 compose file, which is the failure that actually happens: a service gets
-renamed and the four places that name it do not.
-
-This file is also why `pyyaml` is a declared dependency. It was listed in
-`pyproject.toml` as being *for this test* while this test did not exist,
-and nothing in the repository imported `yaml` at all -- a dependency
-justified by a file that was never written, sitting in the block whose own
-comment is about tools that were present by luck. Found by reading the
-dependency block against the test directory.
+renamed and the places that name it do not.
 """
 
 from __future__ import annotations
@@ -31,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "docker-compose.yml"
 
 # Where a reader could meet one of these commands.
-DOCS = ("README.md", "LIMITS.md", "CLAIMS.md", "SHADOW_MODE.md",
+DOCS = ("README.md", "LIMITS.md", "CLAIMS.md",
         "scanner/README.md", ".github/workflows/test.yml")
 
 # `docker compose up ... <service>` with any flags in between. The service
@@ -49,12 +42,21 @@ def documented() -> list[tuple[str, str]]:
     """Every `(where, service)` a document tells somebody to start."""
     found = []
     for name in DOCS:
-        path = ROOT / name
-        if not path.exists():
-            continue
-        for _flags, service in INVOCATION.findall(path.read_text()):
+        for _flags, service in INVOCATION.findall((ROOT / name).read_text()):
             found.append((name, service))
     return found
+
+
+def test_every_document_this_reads_is_still_there():
+    """`DOCS` is a hard-coded list of paths, so a renamed or deleted document
+    drops out of every check below and takes its `docker compose up` lines
+    with it. Silently, and in the direction of passing -- which is the shape
+    of defect this file exists to catch, one level up."""
+    missing = [name for name in DOCS if not (ROOT / name).exists()]
+    assert not missing, (
+        f"DOCS names documents that no longer exist: {missing}. Either "
+        f"restore them or drop them from the list, but do not leave this "
+        f"test reading a shorter set of files than it says it does")
 
 
 def test_the_compose_file_is_readable_and_has_services():

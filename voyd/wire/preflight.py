@@ -8,16 +8,10 @@ one of those can be false, and when one is false nothing says so -- the
 boundary keeps enforcing a policy that the storage underneath it is not
 holding up.
 
-`capabilities.py` exists because of exactly this shape of mistake, and its
-docstring is the argument for this file:
-
-    Atlas support used to be inferred from the connection string ... Every
-    local run silently used a fallback path and `$vectorSearch` never
-    executed at all, for months, without a single log line. Asking the
-    server is the only honest question.
-
-    A version floor is a claim about software this package does not ship,
-    with no expiry and nobody responsible for it.
+`capabilities.py` makes the same argument about the same shape of mistake:
+a capability inferred rather than asked is wrong silently, and the silence
+lasts as long as nobody thinks to check. Asking the server is the only
+honest question.
 
 `auto_embed("voyage-4")` in a voydfile is a claim about software this package
 does not ship, with no expiry and nobody responsible for it. So it is asked

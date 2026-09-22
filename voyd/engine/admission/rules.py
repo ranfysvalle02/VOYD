@@ -106,13 +106,13 @@ class Rule(Protocol):
     deadline so the reaper collects the row, a quarantine must not, because
     the row is the evidence.
 
-    That coupling used to live in the caller of ``revoke()``, which meant the
-    next ``Marked`` reason somebody added got whichever half its author
-    happened to remember. This module's own complaint, two hundred lines up,
-    is that a guarantee which must be remembered is not enforced but
-    suggested. So the reason declares its own reversibility, the verb reads
-    it, and "can this be taken back?" is answerable by looking at the rule
-    instead of by reading the method that writes it.
+    Putting that coupling in the caller of ``revoke()`` would hand the next
+    ``Marked`` reason whichever half its author happened to remember, and
+    this module's own complaint, two hundred lines up, is that a guarantee
+    which must be remembered is suggested rather than enforced. So the reason
+    declares its own reversibility, the verb reads it, and "can this be taken
+    back?" is answerable by looking at the rule instead of at the method that
+    writes it.
 
     The four attributes above and ``why()`` below are optional extensions
     discovered with ``getattr``. They are deliberately *not* members of this

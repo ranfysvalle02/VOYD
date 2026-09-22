@@ -331,12 +331,11 @@ def test_the_metrics_port_is_loopback_unless_somebody_says_otherwise():
     and who has been probing it. `deadline` climbing is the system
     working; `not_cleared` climbing is somebody trying doors.
 
-    That is a reason to make exposing it *explicit*, and for a while it
-    was a reason to make it impossible -- which made the whole surface
-    unreachable in Kubernetes, where the scrape comes from another pod. So
-    the default is what it was and the flag exists, and this test moved
-    from "there is no way to ask for anything else" to "nothing asks for
-    it by accident".
+    That is a reason to make exposing it *explicit*, not a reason to make
+    it impossible: impossible leaves the whole surface unreachable in
+    Kubernetes, where the scrape comes from another pod. So loopback is the
+    default, the flag exists, and what this asserts is that nothing asks
+    for anything wider by accident.
 
     Asserted on the bound address rather than by failing to reach it from
     outside: a host with no routable address of its own would make that

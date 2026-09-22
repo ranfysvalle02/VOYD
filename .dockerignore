@@ -10,12 +10,12 @@
 #
 # Everything the build actually needs is copied explicitly before this point
 # (pyproject.toml, uv.lock, README.md, voyd/) or is source that `COPY . .` is
-# there to pick up (examples/, tests/, bench/, drift/).
+# there to pick up (voydfile.py, examples/, tests/, scanner/).
 
-# Secrets. The example is deliberately NOT excluded: it is documentation.
+# Secrets. Every suffixed variant, because the one that leaks is always the
+# one nobody thought to list.
 .env
 .env.*
-!.env.example
 
 # Environments and build output -- recreated inside the image.
 .venv/

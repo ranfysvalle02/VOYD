@@ -3,11 +3,11 @@
 Every other part of the engine degrades against what this probe reports: pick
 the best available tier, announce it, never pretend.
 
-It exists because the opposite bit us. Atlas support used to be inferred from
-the connection string -- ``"mongodb.net" in uri`` -- which calls the Atlas Local
-container, reached at ``mongodb://localhost``, "not Atlas". Every local run
-silently used a fallback path and ``$vectorSearch`` never executed at all, for
-months, without a single log line. Asking the server is the only honest question.
+It asks rather than infers, and the difference is not stylistic. Inferring
+Atlas support from the connection string -- ``"mongodb.net" in uri`` -- calls
+the Atlas Local container, reached at ``mongodb://localhost``, "not Atlas":
+every local run takes a fallback path, ``$vectorSearch`` never executes, and
+nothing logs a line about it. Asking the server is the only honest question.
 """
 
 from __future__ import annotations
@@ -19,19 +19,17 @@ from pymongo.errors import OperationFailure
 
 log = logging.getLogger("engine.capabilities")
 
-# Deliberately no version floor here. There was one -- ``(8, 1)`` -- and it
-# was wrong by a minor release: the stage is available from 8.0, so every 8.0
-# deployment was probed, found search-capable, told it could not fuse ranks,
-# and silently served the worse tier. No error, no log line, and ``health()``
-# reported "vector" and was believed, because it is supposed to be the honest
-# answer.
+# Deliberately no version floor here, and the reason is the same one the
+# docstring above gives. A floor of ``(8, 1)`` on ``$rankFusion`` is wrong by
+# a minor release -- the stage is available from 8.0 -- so every 8.0
+# deployment gets probed, found search-capable, told it cannot fuse ranks,
+# and served the worse tier. No error, no log line, and ``health()`` reports
+# "vector" and is believed, because it is supposed to be the honest answer.
 #
-# The bug is not the digit. It is that this module -- whose opening paragraph
-# exists because Atlas support used to be *inferred* instead of asked -- then
-# inferred a capability from a number somebody typed. A version floor is a
-# claim about software this package does not ship, with no expiry and nobody
-# responsible for it, which is precisely the category described in
-# ``assumptions.py``. So it is gone, and the stage is asked for directly.
+# The defect is not the digit. A version floor is a claim about software this
+# package does not ship, with no expiry and nobody responsible for it, which
+# makes it the same inference this module exists to refuse. So the stage is
+# asked for directly.
 
 
 @dataclass(frozen=True)

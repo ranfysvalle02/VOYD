@@ -70,8 +70,8 @@ class Hangup(ConnectionError):
 
     Distinguished from every other disconnect because a client that half
     closes is *not* abandoning the replies it already asked for -- it is
-    saying "no more requests". Treating the two the same is why a
-    `shutdown(SHUT_WR)` used to cost the caller its last answer.
+    saying "no more requests". Treating the two the same costs the caller
+    its last answer on every `shutdown(SHUT_WR)`.
     """
 
 

@@ -1,33 +1,25 @@
-"""A deploy is a `SIGTERM`, and this one used to be a `SIGKILL`.
+"""A deploy is a `SIGTERM`, and a drain that never returns is a `SIGKILL`.
 
 Draining exists so a rolling restart is a non-event: requests already in
-flight finish, and the client sees answers rather than resets. That is the
-claim `voyd-wire`'s shutdown path has always made. It was false in the
-most complete way available -- **a `SIGTERM` with a single connected
-client never returned at all**, so every deploy waited out its grace
-period and took the kill it was trying to avoid, which is the exact
-failure the feature was added for.
+flight finish, and the client sees answers rather than resets. There are
+two ways to lose that, and this file pins both.
 
-Two causes, both the same shape. Since Python 3.12, `Server.wait_closed()`
-waits for every *handler* to finish, not only for the listening socket to
-shut -- and `async with server:` awaits it on the way out. So the block
-that was supposed to end at `stopping.wait()` never ended, and the bounded
-drain underneath it was unreachable. The timeout that was meant to cap
-this could not run.
+**`async with server:` awaits `wait_closed()`**, which since Python 3.12
+waits for every *handler* to finish rather than only for the listening
+socket to shut. A single connected client is enough: the block meant to end
+at `stopping.wait()` never ends, the bounded drain underneath it is
+unreachable, and the timeout meant to cap the whole thing cannot run. Every
+deploy waits out its grace period and takes the kill draining exists to
+avoid.
 
-The second is the interesting one, because fixing the first only turned
-"never" into "the full drain window, every time". A client sitting idle
-between requests is not work in flight; it is a keepalive socket, and
-every other proxy hangs up on those at once. Being blocked on *read the
-next request* is the definition of idle, so the read is raced against the
-shutdown. A connection mid-request is not blocked there -- it is waiting
-on a reply -- and still gets the whole drain.
+**An idle connection is not work in flight.** It is a keepalive socket, and
+every other proxy hangs up on those at once -- otherwise closing takes the
+full drain window, every time, whatever is actually happening. Being
+blocked on *read the next request* is the definition of idle, so that read
+is raced against the shutdown. A connection mid-request is not blocked
+there -- it is waiting on a reply -- and still gets the whole drain.
 
-Measured on this laptop, one connected and idle `pymongo` client:
-
-    before   never exited (still alive at 60s)
-    after    0.07s
-
+One connected and idle `pymongo` client exits in **0.07s** on this laptop.
 The numbers below are asserted as ceilings rather than equalities, because
 this is a timing test and the thing worth failing on is a regression to
 tens of seconds, not a slow CI box taking three.

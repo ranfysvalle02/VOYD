@@ -182,9 +182,9 @@ class Sealing(_Composed):
         """
         ce = encryption or await keyring.encryption()
         fields = tuple(fields)
-        # Materialised once. ``documents`` is an Iterable, and the count
-        # below used to re-walk it -- which is 0 for a generator, so
-        # ``examined`` silently under-reported on exactly the callers that
+        # Materialised once. ``documents`` is an Iterable, so the count
+        # below cannot re-walk it -- that is 0 for a generator, and
+        # ``examined`` would under-report on exactly the callers that
         # stream. A cost figure that reads 0 under load is worse than no
         # cost figure.
         documents = list(documents)

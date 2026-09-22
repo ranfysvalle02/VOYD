@@ -1,11 +1,9 @@
 """A policy file is a set of claims about a cluster nobody verified.
 
-`capabilities.py` exists because the engine used to *infer* what a deployment
-could do, and both times it inferred it was wrong for months with no log line.
-Its docstring is the argument this file is built on:
-
-    A version floor is a claim about software this package does not ship,
-    with no expiry and nobody responsible for it.
+`capabilities.py` makes the argument this file is built on: a capability
+inferred rather than asked is wrong silently, and a version floor is a claim
+about software this package does not ship, with no expiry and nobody
+responsible for it.
 
 `auto_embed("voyage-4")` in a voydfile is a claim about software this package
 does not ship, with no expiry and nobody responsible for it. So is *there is

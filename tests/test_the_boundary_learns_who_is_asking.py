@@ -207,10 +207,10 @@ def test_the_claims_are_the_servers_account_not_the_clients(tmp_path, cast,
 
 def test_a_reduction_is_scoped_to_the_caller_too(tmp_path, cast,
                                                  replica_set):
-    """`count_documents` is a read, and it used to be refused outright on a
-    caller-scoped collection because the push-down could not be built
-    without claims. With an identity it can: the count is over the rows
-    this caller may see, not over the collection."""
+    """`count_documents` is a read, and on a caller-scoped collection the
+    push-down cannot be built without claims -- so with no identity it is
+    refused outright. With one it is built: the count is over the rows this
+    caller may see, not over the collection."""
     database, tag, _users = cast
     with _wire(tmp_path, "localhost:27021") as port:
         seller = _as(port, f"seller_{tag}", database)

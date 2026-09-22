@@ -32,9 +32,9 @@ libmongocrypt caches data keys, so a process that decrypted a scope a moment
 ago keeps decrypting it until that cache turns over -- about a minute, which
 is very nearly the TTL window this repository opens by complaining about. A
 shred on its own therefore opens a second delete-is-a-wish window inside the
-feature that exists to close the first one. Measured, not theorised: the
-first working version of this did exactly that, and served a shredded
-tenant's plaintext for thirty seconds afterwards.
+feature that exists to close the first one -- measured at thirty seconds of a
+shredded tenant's plaintext still being served. Revoking first is what closes
+it, and this is the test that holds the ordering.
 
 Skips cleanly without `pymongocrypt`, and says so.
 """
@@ -267,11 +267,11 @@ def test_an_erased_document_does_not_fail_the_page_it_is_on(sealed_wire):
     That is the "fewer rows, or an error" shape this codebase refuses
     everywhere else, and it is the entire reason `unseal` is per document.
 
-    Getting a mixed batch takes some care, and an earlier version of this
-    test did not: within one scope the key is shared, so a shred is
-    all-or-nothing, and a *cross*-scope read is refused wholesale by the
-    off-scope rule before decryption is even reached. Either way the batch
-    is uniform and the claim goes unchecked.
+    Getting a mixed batch takes some care, and the two obvious ways do not
+    work: within one scope the key is shared, so a shred is all-or-nothing,
+    and a *cross*-scope read is refused wholesale by the off-scope rule
+    before decryption is reached. Either way the batch is uniform and the
+    claim goes unchecked.
 
     What does mix, inside one scope and one batch: rows that carry the
     sealed field and rows that do not. A note with no body is an ordinary
@@ -292,8 +292,8 @@ def test_an_erased_document_does_not_fail_the_page_it_is_on(sealed_wire):
     # decryptable -- that `$match` cannot ask, so the boundary refuses a
     # count here rather than pushing down a filter that is narrower than
     # the guarantee and returning a confident, too-high number. See
-    # `test_a_derived_read_cannot_launder_a_forgotten_fact.py`. This line
-    # used to be a `count_documents` and it was measuring the leak.
+    # `test_a_derived_read_cannot_launder_a_forgotten_fact.py`. A
+    # `count_documents` here would be measuring the leak.
     before = list(notes.find({"tenant_id": "carol"}))
     assert len(before) == 40, "the control: all forty are reachable first"
 

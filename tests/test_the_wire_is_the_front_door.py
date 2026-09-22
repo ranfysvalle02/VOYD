@@ -305,15 +305,12 @@ def test_an_ordinary_aggregation_is_untouched(seeded, boundary):
 # --------------------------------------------------------------------------
 # What a driver still gets to do through the boundary.
 #
-# This page used to say the proxy "does not honour read preference, or retry
-# a write the client already saw fail." Both halves were written from
-# reasoning rather than measurement, and both were pessimistic -- which is
-# the same failure as being optimistic, pointed the other way, and a worse
-# one to ship in a README because it talks a reader out of the tool.
-#
-# The claims below are the measured behaviour. They are here rather than in
-# prose because an optimistic claim nobody tests is exactly what this
-# project exists to complain about.
+# Measured, not reasoned about. A pessimistic guess -- "it does not honour
+# read preference, it cannot retry a write" -- is the same failure as an
+# optimistic one pointed the other way, and the worse one to put in a README
+# because it talks a reader out of the tool. These are here rather than in
+# prose because a claim about the wire that nobody tests is exactly what
+# this project exists to complain about.
 # --------------------------------------------------------------------------
 
 def test_a_strict_secondary_read_fails_instead_of_silently_reading_a_primary(
