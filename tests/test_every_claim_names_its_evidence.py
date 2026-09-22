@@ -12,6 +12,13 @@ good intentions, in both directions:
   dangerous and more common: a file that quietly became the only thing
   standing between this project and a regression nobody has named.
 
+It also checks **which door** each cited test drives, which is the hole
+that let a headline claim go unqualified for months: the mapping said
+lineage was held up by a named file, and the file drove a library handle
+while the README pointed readers at a connection string. A claim that is
+true of an artifact nobody is using is the exact gap this project exists
+to make visible. Attachment was checked; *relevance* was not.
+
 **What this deliberately does not do** is judge whether a test is any good.
 It cannot, and pretending otherwise would be the exact failure it exists to
 catch. `LIMITS.md` §1 has the case in full: a test on this map had a
@@ -184,3 +191,118 @@ def test_every_test_file_says_what_it_is_for(path):
     assert doc and len(doc.strip()) > 40, (
         f"{path} has no module docstring worth the name. Say what breaks if "
         f"this file is wrong")
+
+
+# --------------------------------------------------------------------------
+# Which door. A claim is about the artifact people are told to use.
+# --------------------------------------------------------------------------
+
+# Fixtures that hand a test a live database.
+DATABASE_FIXTURES = {"db", "adb", "rs_db", "atlas", "replica_set"}
+
+# Cited files that touch a database without going through the boundary,
+# and are allowed to. Each entry is a reason, not a waiver: the point of
+# writing it down is that adding a fourth should feel like a decision.
+THROUGH_THE_HANDLE = {
+    "tests/test_encryption_is_the_answer_refusal_cannot_give.py":
+        "a sealed collection is read through a client that decrypts, and "
+        "decryption happens in a process holding the keys. There is no "
+        "wire path that unseals into Python, so a test that could not "
+        "read what it sealed would not be a test",
+    "tests/test_the_write_path_forgets_without_deleting.py":
+        "it pins the shape `_forget_pipeline` mirrors. The proxy does not "
+        "call this code -- it emits the same update itself -- and the "
+        "whole value of the file is that both have to leave the same row",
+    "tests/test_the_suite_does_not_leak_databases.py":
+        "it is about this suite's own housekeeping, not about the "
+        "boundary. The database it touches is the subject, not the route",
+}
+
+
+def _fixtures_defined_in(tree: ast.AST) -> dict[str, set[str]]:
+    """Fixture name -> the fixtures it asks for, for this module only."""
+    out: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for deco in node.decorator_list:
+            attr = getattr(deco, "attr", None) or getattr(
+                getattr(deco, "func", None), "attr", None)
+            if attr == "fixture":
+                out[node.name] = {a.arg for a in node.args.args}
+                break
+    return out
+
+
+def which_door(path: str) -> str:
+    """``wire``, ``pure``, or ``handle`` for one cited test file.
+
+    Deliberately crude, and crude in the safe direction. Spawning the
+    proxy is unmistakable; constructing a driver client is unmistakable;
+    everything else is a test with no database in it, which cannot be
+    driving the wrong door because it is not driving a door at all.
+
+    It cannot tell a *good* wire test from a token one. It is not meant
+    to. It tells you a file cited for a guarantee about a connection
+    string never opens one, which is the thing nobody noticed for months.
+    """
+    source = (ROOT / path).read_text()
+    if "voyd.wire.proxy" in source and "subprocess" in source:
+        return "wire"
+    if re.search(r"\b(Async)?MongoClient\(", source):
+        return "handle"
+    tree = ast.parse(source)
+    local = _fixtures_defined_in(tree)
+
+    def wants_a_database(names: set[str], seen: tuple = ()) -> bool:
+        return any(
+            name in DATABASE_FIXTURES
+            or (name in local and name not in seen
+                and wants_a_database(local[name], (*seen, name)))
+            for name in names)
+
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test_")
+                and wants_a_database({a.arg for a in node.args.args})):
+            return "handle"
+    return "pure"
+
+
+@pytest.mark.parametrize("path", sorted(evidence_files()))
+def test_every_claim_is_held_up_through_the_door_readers_are_sent_to(path):
+    """A cited test drives the boundary, or touches no database at all.
+
+    Anything else is a claim about a route the README does not recommend,
+    and the README is what a reader believes. `CLAIMS.md` carried
+    "revoking a source reaches the summary built on it" as a headline for
+    months while the only thing holding it up imported a handle no
+    application was told to use -- true, and true of the wrong thing.
+
+    The escape is deliberate and narrow: a file on `THROUGH_THE_HANDLE`
+    with a reason beside it. Three entries is a short enough list that a
+    fourth is a conversation.
+    """
+    door = which_door(path)
+    if door in ("wire", "pure"):
+        return
+    assert path in THROUGH_THE_HANDLE, (
+        f"{path} is cited as evidence, touches a database, and never "
+        f"starts the boundary -- so it holds its claim up through a route "
+        f"no reader is pointed at. Drive it through `voyd.wire.proxy`, or "
+        f"add it to THROUGH_THE_HANDLE with the reason it cannot be")
+
+
+def test_no_reason_outlives_the_file_it_excuses():
+    """An allowlist is a second place for a stale name to hide.
+
+    The same failure as a claim citing a deleted test, one level up: an
+    entry here for a file that has since moved to the wire would go on
+    excusing nothing, and the next reader would believe the list.
+    """
+    cited = set(evidence_files())
+    for path in THROUGH_THE_HANDLE:
+        assert path in cited, f"{path} is excused here and cited nowhere"
+        assert which_door(path) == "handle", (
+            f"{path} no longer needs excusing -- it drives the boundary "
+            f"now, or touches no database. Take it off the list")

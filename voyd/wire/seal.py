@@ -56,9 +56,6 @@ same thing for the same reason, calling the same
 was *destroyed* (an erasure) or merely *unreachable* (an outage). Those look
 identical at the driver and mean opposite things, and a deployment that
 reported one as the other would be paging on a success or ignoring a failure.
-
-Deliberately outside `voyd/`, like `fanout.py`: nothing here is
-importable package surface.
 """
 
 from __future__ import annotations

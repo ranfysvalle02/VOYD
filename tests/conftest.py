@@ -53,15 +53,15 @@ MONGO_URI = os.environ.get(
 # would be asserting the opposite of what it claims.
 ATLAS_URI = os.environ.get("VOYD_ATLAS_URI")
 
-# A real three-node replica set (`docker compose up rs`). Fan-out is the one
-# claim the default deployment cannot test: Atlas Local is a single-node set,
-# so it has a primary and nothing to fan out to, and every routing assertion
-# against it would pass by having nowhere else to go.
+# A real three-node replica set (`docker compose up rs`). Caller identity
+# is the one claim the default deployment cannot test, because Atlas Local
+# runs without `--auth`: the boundary asks the server who authenticated,
+# and a deployment where nobody did answers every rule the same way.
 #
-# It authenticates, and that is load-bearing rather than tidy: fan-out has
-# to open a connection of its own to a secondary and prove an identity on
-# it, so a rig without `--auth` would exercise the one path that needs no
-# SCRAM at all.
+# It authenticates, and that is load-bearing rather than tidy: a boundary
+# that forwards SCRAM is only tested by a deployment that demands it, and
+# a rig without `--auth` would exercise the one path where nobody has to
+# prove anything.
 RS_URI = os.environ.get(
     "VOYD_TEST_RS_URI",
     "mongodb://voyd:voyd@localhost:27021,localhost:27022,localhost:27023"
@@ -189,7 +189,7 @@ def replica_set():
     try:
         client.admin.command("ping")
         if len(client.secondaries) < 2:
-            pytest.skip("the replica set has no secondaries to rank on")
+            pytest.skip("the replica set is not a set yet; give it a moment")
     except Exception:
         pytest.skip(f"no replica set at {RS_URI} -- `docker compose up -d rs`")
     finally:

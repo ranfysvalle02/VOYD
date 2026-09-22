@@ -78,11 +78,6 @@ GLOBAL = (
     "messages_from_client_total",
     "messages_from_upstream_total",
     "worker_flushes_total",
-    "fanout_reads_total",
-    "fanout_verified_total",
-    "fanout_unverified_total",
-    "fanout_withdrawn_total",
-    "fanout_retried_on_primary_total",
     # Sealing. The read half already reports itself through
     # `refused_by_reason_total{reason="unrecoverable"}`, because the tally
     # lives on the guard rather than beside it. These four are the parts
@@ -261,11 +256,6 @@ class Meter:
     messages_from_client_total: int
     messages_from_upstream_total: int
     worker_flushes_total: int
-    fanout_reads_total: int
-    fanout_verified_total: int
-    fanout_unverified_total: int
-    fanout_withdrawn_total: int
-    fanout_retried_on_primary_total: int
     sealed_writes_total: int
     sealed_reads_total: int
     seal_refused_writes_total: int
@@ -347,32 +337,6 @@ HELP = {
         "Flushes summed over every worker. For liveness use "
         "voyd_worker_flush_age_seconds instead: this total keeps climbing "
         "while one worker is wedged, because the healthy ones carry it."),
-    "fanout_reads_total": (
-        "counter", "Reads ranked on a secondary instead of the primary."),
-    "fanout_verified_total": (
-        "counter",
-        "Guarded batches whose marks were re-read from the primary before "
-        "release. This is the number that says the rank/permit split is "
-        "actually running; if it stays at zero while fanout_reads_total "
-        "climbs, reads are being spread but nothing guarded is among them."),
-    "fanout_unverified_total": (
-        "counter",
-        "Guarded batches refused whole because the primary could not "
-        "confirm their marks. Any sustained value here is a primary that "
-        "is failing the lookups, and the boundary is failing closed -- "
-        "correct, and costing every fanned-out read on that collection."),
-    "fanout_withdrawn_total": (
-        "counter",
-        "Collections withdrawn from fan-out because confirming their marks "
-        "on the primary stopped being cheaper than the ranking it bought. "
-        "Not an error: it is the boundary declining to pay a round trip "
-        "for nothing. Climbing on a collection you expected to benefit "
-        "means the read is less selective than you think."),
-    "fanout_retried_on_primary_total": (
-        "counter",
-        "Reads a secondary refused, re-sent to the primary so the client "
-        "sees an answer rather than an error the boundary caused by "
-        "choosing that route. Climbing means a sick secondary."),
     "admitted_total": ("counter", "Documents a prompt was allowed to see."),
     "refused_total": ("counter", "Documents refused on the read path."),
     "revoked_total": ("counter", "Deletes rewritten as revocations."),

@@ -457,41 +457,6 @@ def test_the_boundary_says_that_it_now_holds_keys(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Sealing and fan-out: the narrow case where they must not compose
-# --------------------------------------------------------------------------
-
-def test_a_sealed_collection_is_never_ranked_on_a_secondary():
-    """A correctness stop, not a performance one, so it is asserted.
-
-    Fan-out takes the *marks* from the primary and the *documents* from a
-    secondary, which is exactly right for a verdict that reads marks and
-    wrong for one that has to decrypt the document it was handed. The
-    secondary's copy would be decrypted and released while the primary was
-    only ever asked about `expire_at`, so a scope shredded a moment ago, or
-    a field re-sealed under a new key, would be resolved against whichever
-    copy the replica happened to have.
-
-    A pure unit test with no database anywhere near it, which is the point:
-    this is a routing decision taken from the request, before it is sent.
-    """
-    from voyd.wire import fanout
-
-    from voyd.engine.admission import AdmissionSpec
-
-    class _Guard:
-        spec = AdmissionSpec("notes")
-
-    guards = {"notes": _Guard()}
-    body = {"aggregate": "notes", "pipeline": [{"$vectorSearch": {}}]}
-
-    assert fanout.routes_to_secondary(body, guards) is not None, (
-        "the control: an unsealed collection still fans out, or this test "
-        "would pass for the wrong reason")
-    assert fanout.routes_to_secondary(
-        body, guards, sealed=frozenset({"notes"})) is None
-
-
-# --------------------------------------------------------------------------
 # Custody: the two claims LIMITS.md §5 makes about it
 # --------------------------------------------------------------------------
 

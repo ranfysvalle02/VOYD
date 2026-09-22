@@ -16,7 +16,6 @@ forgotten -- in any driver, in any language, with no import and no code.
     ensure      `--ensure`: build what the policy declares
     preflight   `--verify`: ask the cluster whether it matches the policy
     metrics     `--metrics`: Prometheus, over shared memory across workers
-    fanout      `--fan-out`: rank on a secondary, confirm on the primary
     bench       what the boundary costs, measured rather than asserted
 
 The per-document check these all rest on lives in `voyd.engine.admission`

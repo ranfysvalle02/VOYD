@@ -23,9 +23,9 @@ thing that caught a problem a *user* hit, because there have been no users.
 Twenty defects this month, and the way they were found is the point.
 Eleven came from running something new: three from exercising paths nobody
 had exercised, four from the hostile pass in §4, two more from the
-hostile pass against fan-out in §3 -- a cheap query pattern withdrawing
-the expensive one it shared a collection with, and a secondary's error
-becoming the client's -- and two from pointing an ordinary driver at
+hostile pass against the secondary-read path since deleted (§8) -- a cheap
+query pattern withdrawing the expensive one it shared a collection with,
+and a secondary's error becoming the client's -- and two from pointing an ordinary driver at
 `--key-vault` and reading what came back: an erasure that destroyed the key
 without first revoking the documents, leaving them readable for the length
 of a key cache (§5), and a delete clause read from the command body when a
@@ -34,10 +34,11 @@ every erasure request it was sent. One came from the benchmark contradicting a c
 message that had already been pushed. Five came from *writing a test*: the scanner's two-mark finding in §4; the
 read-preference claim in §3, where the defect was in the prose and three
 files had spent weeks talking a reader out of something the proxy could
-already do; and fan-out's identity check, which looked for a standalone
-`saslStart`, never fired against a real driver's speculative handshake, and
-was fail-open while it did not — the most serious of the twenty, and the
-only one a user could have been harmed by rather than merely misled; and two
+already do; and the secondary path's identity check, which looked for a
+standalone `saslStart`, never fired against a real driver's speculative
+handshake, and was fail-open while it did not — the most serious of the
+twenty, and the only one a user could have been harmed by rather than
+merely misled; and two
 from the sealing work -- an erasure that revoked rows its key had never
 protected, making unencrypted documents of the same tenant unreachable as a
 side effect of a key deletion, which is the boundary inventing policy out of
@@ -278,234 +279,6 @@ the parent leaves the children accepting connections with nobody to drain
 them. `SIGTERM` and `SIGINT` are both handled and both drain cleanly, so
 this needs somebody to reach for `-9` specifically. **Consider:** a
 supervisor that reaps by process group will not find them.
-
-**Fan-out exists, and it cost the boundary a property.** `--fan-out URI`
-ranks reads on secondaries and re-reads each guarded batch's marks from the
-primary before releasing it. The secondary ranks, the primary permits;
-`test_the_boundary_ranks_on_a_replica_and_asks_the_primary.py` freezes
-replication with `stopReplProducer`, revokes a document on the primary only,
-and asserts the boundary still refuses it -- with a control assertion that
-first proves the secondary really was behind, because otherwise that test
-passes on a deployment where nothing was ever at risk.
-
-What it gave up is stated here rather than in the README's margin:
-
-- **It carries its own credential.** Every other upstream connection this
-  proxy makes is the client's; this one cannot be. Authentication is per
-  connection and SCRAM is a challenge-response bound to a nonce, so the
-  client's handshake cannot be replayed onto a second socket without the
-  password. "Holds no credentials" was true of every version of this file
-  before fan-out and is now true only when fan-out is off.
-- **Authenticated fan-out works, and it did not at first.** The boundary
-  authenticates its own secondary connection by driving pymongo's SCRAM
-  through a shim rather than implementing the exchange. The earlier version
-  of this refused to, on the grounds that a security primitive should not
-  be written by somebody who did not have to -- right reasoning, wrong
-  conclusion: the choice was never "write SCRAM or skip authentication",
-  it was "write SCRAM or drive the implementation already installed". The
-  test rig runs with `--auth` and a keyfile for this reason, because an
-  open rig would exercise the one path that needs no SCRAM at all.
-- **Identity is checked, and the first version of that check never fired.**
-  A client authenticating as a different user than the fan-out URI names
-  has fan-out switched off for its connection. The check originally looked
-  only for a standalone `saslStart`, and every modern driver folds the
-  first round into the handshake as `speculativeAuthenticate` -- so against
-  a real driver it matched nothing and fan-out stayed on. It was fail-open
-  as well as wrong, which is the pair of mistakes that makes a privilege
-  change invisible. It now starts *off* on any deployment whose
-  secondaries need a credential and is enabled only by a client proving the
-  matching identity, so a mechanism this boundary cannot read -- X.509,
-  AWS, OIDC -- is "not us" rather than "probably fine".
-  **Consider:** the check compares *usernames*. Two identities with the
-  same name in different auth databases would pass it.
-- **One extra round trip per guarded batch**, and a whole-document fetch
-  rather than a projection whenever a rule cannot be introspected.
-  `verdict_fields` returns `None` for any third-party rule, which is the
-  case that matters, because this module cannot have been written with one
-  in mind.
-
-**The cost argument is now measured rather than assumed.** It assumes the
-scan dominates the lookup -- obviously true for a `$vectorSearch` returning
-10 of 100,000, obviously false for a `find` returning most of a small
-collection, and nothing about the request distinguishes them. An operator
-flag naming a threshold would have been asking somebody to guess a number
-this process can measure, so `Payoff` compares how long the secondary took
-to rank against how long the primary took to confirm, per collection, and
-withdraws the collection when confirming stops being the cheaper half.
-
-The measurement is keyed by the read's *shape* -- collection, whether it
-carries a search stage, and the requested size rounded to a power of two --
-and keying it by collection alone was one of the two defects a hostile pass
-found. See below.
-
-**Consider:** withdrawal is one-way inside a process. There is no path back
-until a restart, deliberately -- re-admitting on a favourable sample is how
-a boundary oscillates, and the cost of staying on the primary is a slower
-read rather than a wrong one.
-
-**Consider:** two `find`s of very different selectivity that ask for the
-same number of documents still share a bucket. The shape is read off the
-request, and the request does not say how much work the filter implies.
-
-**Consider:** the ratio reads backwards at a glance. A *larger*
-`--fan-out-give-up` is more tolerant, because it is how much the check is
-allowed to cost relative to what it bought. The end-to-end test for this was
-written against the wrong direction first and passed for the wrong reason
-until the assertion was tightened to watch the secondary's own counters.
-
-### What a hostile pass found in fan-out
-
-Same method as §4 and the same justification: the feature was written in a
-day and had a day of exercise, which is the wrong amount for anything
-concurrent. Causing the failures on purpose -- a primary that will not
-answer the mark lookup, secondaries that refuse reads, twenty clients
-paging at once, invented cursor ids, garbage on the port -- found **two
-real defects**, and both are now tests.
-
-**One cheap query pattern withdrew the expensive one it shared a
-collection with.** The payoff measurement was keyed by collection. Every
-RAG deployment runs `$vectorSearch` and ordinary `find`s against the same
-collection; the finds are cheap to rank and expensive to confirm, so they
-withdrew the collection, and the vector search -- the only reason fan-out
-was switched on -- never fanned out again. Measured on a 301-document
-collection: a selective read went from ranking on a secondary 5 times out
-of 5 to 0 out of 5 after twelve full-collection finds. It is keyed by
-shape now.
-
-**A secondary's error became the client's error.** The boundary chose to
-route the read; when the secondary answered with a failure, that failure
-went straight to the caller. So fan-out could turn a read the primary
-would have served perfectly into an error the application could do nothing
-about, because it sees one node and cannot retry elsewhere. An
-optimisation is not allowed to reduce availability. The read is now re-sent
-to the primary, fan-out goes off for that connection, and
-`voyd_fanout_retried_on_primary_total` counts it. The retry goes through
-ordinary enforcement, which is asserted rather than assumed.
-
-What the same pass did *not* break, worth recording too: twenty concurrent
-clients doing five paged reads each returned the right 301 documents every
-time; a primary made to fail every mark lookup produced `refused 101 of
-101` and zero documents served rather than one unverified one; an invented
-cursor id, a half close, garbage on the port and thirty abrupt resets each
-cost one connection and not the listener.
-
-**Two of the probes initially reported a false pass**, and the reason is
-worth more than the probes. The payoff measurement had already withdrawn
-the collection, so the reads under test were quietly running on the
-primary and the secondary failures being injected touched nothing. A
-hostile pass against a boundary that adapts has to pin the adaptation
-first; `--fan-out-give-up 0` exists partly for that.
-
-The other two were wrong, and wrong in the direction that talks a reader out
-of the tool. This page said the boundary does not "honour read preference, or
-retry a write the client already saw fail." Both were reasoned rather than
-measured. Measured:
-
-- **Read preference is honoured against a topology of one.** The
-  `*Preferred` modes and `nearest` are served by the primary, which is what
-  the spec prescribes when no secondary exists, and the refusal still
-  applies to every one of them. A `secondaryPreferred` read carrying a tag
-  set that matches nothing falls back to the primary ignoring the tags,
-  again per spec.
-- **Strict `secondary` is an error, not a quiet primary read.** That is the
-  one case that could have handed a caller a correct-looking answer to a
-  question nobody asked, and it fails client-side before a byte is sent,
-  because `secondary` is passed through the `hello` rewrite untouched.
-- **Retryable writes are armed.** `txnNumber` is attached and the driver
-  sees `ReplicaSetWithPrimary` -- a *richer* topology than the same driver
-  gets connecting directly with `directConnection=true`, which sees
-  `Single`. That is the `setName`-is-kept decision above paying off. The
-  proxy does not retry because the driver does; §3's `replSetStepDown` test
-  already walks that whole path.
-- **Sessions and multi-statement transactions cross intact**, and a read
-  inside a transaction still refuses.
-
-Every line of that is now an assertion in
-`tests/test_the_wire_is_the_front_door.py`. Restating a claim in prose and
-leaving it untested would have replaced a pessimistic guess with an
-optimistic one, which is not an improvement.
-
-**A failover costs the in-flight requests.** Re-resolution happens on the
-*next* connection. The request that received `NotWritablePrimary` is
-returned to the client, which retries — correct, and worth knowing before
-somebody reports it as a bug.
-
-This is now measured rather than reasoned about. `replSetStepDown` with
-`force` on the single-node replica set Atlas Local already is holds a real
-election, so the whole path has a test: the client sees two
-`NotPrimaryError`s, the boundary reads the server's own error and
-invalidates, the driver retries, and a `delete` issued across the election
-still lands as a revocation with the mark on it and every row still on
-disk. The claim that this "cannot be caused on demand" was an excuse, and
-it is gone.
-
-**No upstream pooling, deliberately.** A MongoDB connection carries
-authentication, sessions, cursors and transactions; sharing one would hand a
-cursor to whoever asked second. One upstream per client is the right shape;
-what is bounded is how many exist. Connection count still scales 1:1 with
-clients -- that part is permanent and correct.
-
-What is no longer true is the cost of one. This used to be two OS threads
-per connection, and this page used to say that past a few hundred it wanted
-"an event loop or a different language." The second half was wrong: every
-byte-rewriting function here is `bytes -> bytes` over a pure `reachable()`,
-so nothing about the *boundary* was ever tied to the transport. Only the
-shell was, and replacing it was a contained change rather than a rewrite.
-
-Measured on this laptop, idle connections held open, old versus new:
-
-| connections | threads | RSS | accept |
-|---|---|---|---|
-| 400 | 1,201 -> 19 | 87.6MB -> 50.7MB | 0.12s -> 0.03s |
-| 1,500 | 4,501 -> 19 | 210.0MB -> 68.2MB | 0.85s -> 0.11s |
-| 3,000 | 9,001 -> 19 | 364.5MB -> 92.0MB | 3.39s -> 0.25s |
-
-The 19 is a fixed executor pool, not per connection; it does not grow.
-
-**One event loop is still one core.** A single worker sits at exactly
-**1.00 cores** under load -- the per-message cost is BSON decode in
-`decode_sections` and `enforce`, and no event loop spreads that.
-`--workers N` pre-forks N processes over one inherited listening socket,
-which is the knob that uses the other cores.
-
-It scales close to linearly. `voyd/wire/bench.py`, 14 cores, 100 documents
-per batch with one in ten revoked:
-
-| | docs/s admitted | cores | us/doc | vs 1 worker |
-|---|---|---|---|---|
-| no proxy (control) | 12,434,609 | | | |
-| `--workers 1` | 444,215 | 1.00 | 2.25 | 1.00x |
-| `--workers 2` | 861,098 | 2.00 | 2.32 | **1.94x** |
-| `--workers 4` | 1,587,041 | 3.98 | 2.51 | **3.57x** |
-| `--workers 8` | 2,655,548 | 6.91 | 2.60 | **5.98x** |
-
-**Refusal costs about 2.3 microseconds per document**, and that is the
-whole price of the boundary. The per-document cost drifts up ~15% from one
-worker to eight, which is memory bandwidth, not contention in the code --
-there is nothing shared between workers to contend on.
-
-**This page previously claimed `--workers 4` bought 1.42x.** That number
-was wrong, and it was wrong in an instructive way: it was measured against
-a real `mongod` with a `pymongo` load generator on the same laptop, so the
-proxy was never the bottleneck and the experiment could not see the thing
-it claimed to measure. An earlier attempt said 1.18x, because that load
-generator was Python threads holding the GIL against itself. The fix was
-not a better proxy, it was a harness that removes both ends: a synthetic
-upstream that answers with one pre-encoded reply, and raw-socket clients
-that never decode one.
-
-**The control is the part to check first.** `--workers 0` runs the clients
-straight at the upstream. At 12.4M docs/s it is 4.7x the best proxied
-result, which is what makes the rows below it measurements of the proxy
-rather than of the harness. The benchmark prints that ratio and says so
-when it drops under 1.5x.
-
-**And it verifies it was still refusing.** A proxy that got fast by quietly
-forwarding everything would post the best numbers on this page, so each row
-also reports the refused share read back from the worker summary. It is
-10.0% in every row above, which is the one document in ten the batch was
-built with. A row that says `LEAKED` is a row whose throughput means
-nothing.
 
 ### What the proxy stopped paying for, and what it started paying
 
@@ -853,7 +626,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (506 tests, ~150 seconds) with
+**Consider:** the suite is fast by default (497 tests, ~95 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
@@ -1081,13 +854,6 @@ be told so rather than handed a flag that quietly changes what an erasure
 request means. The full trade, with the error message, is in
 `voyd/engine/keyring.py`.
 
-**A sealed collection is never ranked on a secondary.** Fan-out takes the
-marks from the primary and the documents from a secondary, which is right
-for a verdict that reads marks and wrong for one that must decrypt what it
-was handed. Sealing and fan-out otherwise compose; this is the narrow case
-where they must not, so it is a routing rule with a test rather than a
-discovery.
-
 **Ephemeral custody with `--workers N` is a data-loss shape, and is avoided
 by construction rather than by care.** The master key is built in the parent
 before the fork and inherited, so every worker has the same one. Built per
@@ -1209,16 +975,6 @@ revocation hid it for weeks' worth of tests by being absent-tolerant.
 Replies to a pushed-down read are now recognised and left alone, and the
 cursor is matched on the `getMore` *request*, because the batch that
 drains a cursor comes back with `id: 0` and has nothing left to match on.
-
-**Both request loops answer the same way, and that took moving one.**
-`Conversation` carried its own copy of "ask on the client's own
-connection" and no identity at all, so a `--fan-out` connection to a
-caller-scoped collection saw empty claims and refused everything -- safe,
-and *different from the default path*, which is the part that matters. One
-boundary meaning two things depending on a flag is the drift this package
-is about. Both now share one `Backchannel` and one `CallerIdentity`, and
-`test_the_fan_out_path_learns_the_same_identity` is what keeps them
-sharing it.
 
 **Closed, and it was the blocker: lineage on the wire.** `derive()` and
 the cascade behind it -- revoking a source and having the refusal reach
@@ -1388,6 +1144,44 @@ Reasons recorded so they are not relitigated every six months.
   erroring.
 - **Ledgering reads.** A write per refused hit, for a property the read path
   enforces anyway.
+- **Reading from a secondary.** This one was built, measured, exercised
+  hostilely for a day, and then deleted, so the reasoning is worth more
+  than the usual entry.
+
+  `--fan-out` ranked reads on secondaries and re-read each guarded batch's
+  marks from the primary before releasing it -- the secondary ranks, the
+  primary permits, so replication lag never became a second
+  delete-is-a-wish window. That part worked: a test froze replication with
+  `stopReplProducer`, revoked a document on the primary only, and the
+  boundary still refused it.
+
+  **What it cost was the shape of the thing, not its correctness.** It was
+  a second request loop. Every enforcement entry point -- the delete
+  rewrite, the cascade, the insert closure, the push-down, the erasure
+  sequencing, the verdict itself -- had to be called from both, and
+  *eleven* call sites existed twice. Nothing held them in step. Two
+  defects of exactly that kind landed within an hour of each other while
+  the per-cursor budget was being added: a parameter threaded through one
+  of two `enforce` calls, and a cursor cleanup added to one loop and not
+  the other. Both were caught by accident.
+
+  This repository's whole argument is that two front doors onto one
+  guarantee is a gap you cannot see from either side. Having removed that
+  from the library, keeping it in the proxy was indefensible -- and the
+  thing it bought was *performance on a read pattern nobody here has
+  measured at scale*, traded against the one property the boundary exists
+  to have.
+
+  It also carried the only credential this process ever held, since a
+  secondary connection cannot replay a client's SCRAM handshake. "Holds no
+  credentials of its own" is true again.
+
+  Roughly 1,300 lines: `fanout.py`, `Secondaries`, `Conversation`,
+  `route`, `replies`, `fanned_session`, the secondary authentication shim,
+  five Prometheus series and a test file. If ranking on a replica becomes
+  a real requirement, the honest version is a routing decision *inside*
+  the one loop rather than a second one beside it -- and the measurements
+  that justify it should come first this time.
 
 ---
 

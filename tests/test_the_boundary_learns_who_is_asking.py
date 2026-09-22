@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import RS_URI, free_port
+from .conftest import free_port
 
 pymongo = pytest.importorskip("pymongo")
 ROOT = Path(__file__).resolve().parents[1]
@@ -222,32 +222,6 @@ def test_a_reduction_is_scoped_to_the_caller_too(tmp_path, cast,
         f"the seller may see two memos and the count said {n} -- a count "
         f"that disagrees with the page it summarises is the leak this "
         f"boundary is named after")
-
-
-def test_the_fan_out_path_learns_the_same_identity(tmp_path, cast,
-                                                   replica_set):
-    """`--fan-out` is a second request loop, and it had a second answer.
-
-    `Conversation` carried its own copy of "ask on the client's own
-    connection" and no identity at all, so a fanned-out connection to a
-    caller-scoped collection saw empty claims and refused everything --
-    safe, and wrong for the operator, and *different from the default
-    path*, which is the part that matters. One boundary that means two
-    things depending on a flag is the drift this package is about.
-
-    Both loops now share one `Backchannel` and one `CallerIdentity`, and
-    this is what stops that from being a claim in a docstring.
-    """
-    database, tag, _users = cast
-    with _wire(tmp_path, "localhost:27021", "--fan-out", RS_URI) as port:
-        seller = _as(port, f"seller_{tag}", database)
-        try:
-            seen = sorted(d["_id"] for d in seller[database].memos.find({}))
-        finally:
-            seller.close()
-    assert seen == [2, 3], (
-        f"the same credential sees {seen} through --fan-out and [2, 3] "
-        f"without it; the boundary means two different things")
 
 
 # --- the claim the wire cannot supply --------------------------------------

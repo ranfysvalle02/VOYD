@@ -43,7 +43,7 @@ project has found in itself:
 |---|---|---|
 | `delete` removes the fact | ~60s of TTL monitor lag | the premise above |
 | a destroyed key makes it unreadable | ~60s of libmongocrypt key cache | `voyd/wire/seal.py` |
-| a replica's copy is current | unbounded replication lag | `voyd/wire/fanout.py` |
+| a replica's copy is current | unbounded replication lag | `LIMITS.md` §8 |
 | the index embeds with the declared model | nobody had ever asked it | `voyd/wire/preflight.py` |
 | this test proves the claim in its name | it asserted a page of one | `LIMITS.md` §1 |
 | this counter is on a dashboard | it was never flushed | `voyd/wire/metrics.py` |
@@ -155,9 +155,9 @@ path is rewritten, and nobody has to remember anything.
 What your driver keeps, because this is the question that decides whether
 the sentence above is true for *you*: sessions, multi-statement transactions
 and retryable writes all cross the boundary intact, and every satisfiable
-read preference is served and still refused. What it loses is fan-out --
-every read lands on one upstream. The details, and the tests that hold them,
-are [below](#known-gaps). Run it with `--advertise-self` or reach it with
+read preference is served and still refused. Every read lands on the one
+upstream you pointed it at. The details, and the tests that hold them, are
+[below](#known-gaps). Run it with `--advertise-self` or reach it with
 `directConnection=true`; without one of the two your driver reads the
 cluster's own host list and connects straight past the boundary.
 
@@ -550,14 +550,10 @@ voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database connection of its
   `$inc` on ciphertext. There is no safe fallback: an error is loud,
   harmless and fixable, and a forwarded plaintext row is none of those and
   is already in the backup.
-- **A sealed collection is never ranked on a secondary**, because fan-out
-  takes the marks from the primary and the documents from a replica — right
-  for a verdict that reads marks, wrong for one that must decrypt what it
-  was handed.
 
-**What it buys is the sentence the library version cannot say.** In-process,
-`schema_map` encrypts below the *application*, so no writer in that Python
-process can forget. On the wire it encrypts below the *driver*, so no writer
+**What it buys is where the encryption sits.** A driver's own `schema_map`
+encrypts below the *application*, so no writer in that one process can
+forget. On the wire it encrypts below the *driver*, so no writer
 in any language can — not the Node service, not the migration script, not
 the shell, not the notebook, not the one written next year by somebody who
 has not read this file. That is the same upgrade the wire gave `delete`,
@@ -630,103 +626,6 @@ declaration. That one stays with the library, deliberately — the detection
 half is a query and the creation half is a schema change against a cluster
 this process does not own. [LIMITS.md](LIMITS.md) §5.
 
-## Fan-out
-
-`$vectorSearch` scans `numCandidates` across the corpus. Doing that on the
-primary, beside every write, is the cost a read replica exists to remove:
-
-```bash
-voyd-wire --config voydfile.py --target "$RS" --fan-out "$RS"
-```
-
-**The obvious version of this is unsafe, and it is unsafe in exactly the way
-this README opens with.** Refusal is a function of the marks on the document
-it is shown. A secondary that has not yet replicated a revocation hands the
-boundary a document that still looks live, and the boundary admits it —
-confidently, with a receipt saying it was allowed. Replication lag becomes a
-second delete-is-a-wish window, opened by the thing that exists to close the
-first one.
-
-So the read is split in half:
-
-```
-client --find--> boundary --> SECONDARY   numCandidates scan, 100k documents
-                    |
-                    |  returned _ids: [a, b, c ... j]   (10)
-                    v
-                 PRIMARY   projection {_id, expire_at, forgotten}
-                    |
-                    v
-             refuse() on the authoritative marks --> client
-```
-
-**The secondary ranks. The primary permits.** The expensive part moves; the
-verdict does not. Ranking is not permission — here that is a routing rule
-rather than a slogan.
-
-What it costs, stated rather than discovered:
-
-- **One round trip per guarded batch.** Unguarded collections fan out with
-  no verification, because there is no verdict to be wrong about.
-- **A projection when the rules allow one.** `verdict_fields` works out
-  which fields the verdict reads. A rule it cannot introspect — `Distinct`
-  hashing content, a `Budget` with a custom cost callable, any third-party
-  rule — costs a whole-document fetch. Unknown means expensive, never
-  means skipped.
-- **Reads that cannot be correlated never leave the primary.** Matching a
-  batch against the primary's answer needs `_id`, so a `projection` that
-  drops it, or an aggregation with a stage that could rewrite it, is
-  decided *before* the query is sent.
-- **If the primary cannot confirm a batch, the batch is refused whole.**
-  `voyd_fanout_unverified_total` counts it. Failing closed is the only
-  behaviour available: the alternative is serving documents whose
-  permission nobody established.
-- **It gives up on a collection that is not benefiting.** Fan-out pays when
-  the work it moves off the primary exceeds the work it adds back — true
-  for a `$vectorSearch` scanning 100,000 candidates to return ten, false
-  for a `find` returning most of a small collection, and nothing about the
-  request says which. So it is measured rather than guessed: the time the
-  secondary took to rank against the time the primary took to confirm,
-  per collection. When confirming stops being cheaper than the ranking it
-  bought, that collection goes back to the primary and says so once.
-  `--fan-out-give-up RATIO` tunes it (default `1.0`; `0` measures without
-  acting), and `voyd_fanout_withdrawn_total` counts it. Withdrawal is
-  one-way inside a process — re-admitting on a favourable sample is how a
-  boundary oscillates — and keyed by the read's *shape*, not its
-  collection, so ordinary `find`s cannot withdraw the `$vectorSearch` they
-  share a collection with.
-- **A secondary's error does not become yours.** The boundary picked that
-  route, so it owns the retry: a read a secondary refuses is re-sent to
-  the primary, fan-out goes off for that connection, and the retried read
-  goes through ordinary enforcement.
-  `voyd_fanout_retried_on_primary_total` counts it.
-
-**It needs a credential of its own, and that is a real change.** Every other
-upstream connection this proxy makes is the client's. A secondary connection
-cannot be — authentication is per connection and SCRAM is a challenge-response
-bound to a nonce, so the client's handshake cannot be replayed onto a second
-socket without knowing the password, which this deliberately does not. The
-boundary therefore authenticates that connection itself, driving *pymongo's*
-SCRAM rather than a hand-written one: the client proof, the salting and the
-server-signature check stay in the library, and what this file supplies is a
-way to send a document and get one back.
-
-Reads served from a secondary run as the `--fan-out` URI's identity, so:
-
-- **A client authenticating as anyone else gets fan-out switched off for its
-  connection**, and its reads stay on the primary. Serving them over a
-  connection authenticated as somebody else is a privilege change wearing
-  the shape of an optimisation.
-- **It fails closed.** On a deployment whose secondaries need a credential,
-  fan-out starts *off* and is enabled only by a client proving the matching
-  identity. An authentication mechanism this boundary cannot read —
-  X.509, AWS, OIDC — is "not us", never "probably fine".
-- **A credential that does not work is not an outage.** Wrong password,
-  unreachable secondary, a mechanism other than SCRAM: reads stay on the
-  primary and the answers do not change.
-
-See [LIMITS.md](LIMITS.md) §3.
-
 ## When you do not need this
 
 The fastest way to understand what this is for is to know what it is not
@@ -774,10 +673,9 @@ Stated rather than discovered:
   flapping.
 - `SIGTERM` **drains**: stop accepting, let open connections finish, print
   what the process did. A second signal exits immediately.
-- **`--fan-out URI` ranks reads on secondaries and takes permission from
-  the primary.** See [below](#fan-out). Without it, reads land on one
-  upstream. What survives the crossing either way is asserted in
-  `tests/test_the_wire_is_the_front_door.py` rather than reasoned about:
+- **One upstream per client, and one request loop.** What survives the
+  crossing is asserted in `tests/test_the_wire_is_the_front_door.py`
+  rather than reasoned about:
 
   | a driver asks for | through the boundary |
   |---|---|
@@ -849,7 +747,7 @@ from somebody asking why a paragraph said what it said. One
 team, two weeks, their own corpus is worth more than anything else that
 could be built next.
 
-The suite is **510 tests**, and it is the foundation rather than a census —
+The suite is **501 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie. Each one and the file that holds it up is
 **[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim with
@@ -871,7 +769,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 506 tests, ~150 seconds -- the inner loop
+pytest              # 497 tests, ~95 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 

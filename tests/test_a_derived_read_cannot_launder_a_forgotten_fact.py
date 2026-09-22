@@ -283,7 +283,7 @@ def test_a_later_stage_cannot_hide_behind_an_earlier_one():
 
 def test_a_stage_the_boundary_cannot_read_is_handled_not_forwarded():
     """Malformed, multi-key, or not a document at all. The fail-open
-    version of this line is how the fan-out identity check was wrong for
+    version of this line is how a caller identity check was wrong for
     weeks: unreadable must not mean allowed."""
     for pipeline in ([{"$match": {}, "$group": {}}], ["nonsense"], [{}]):
         out, why = through({"aggregate": GUARDED, "pipeline": pipeline})

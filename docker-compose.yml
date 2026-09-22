@@ -30,9 +30,9 @@ services:
 
   # A real three-node replica set, for the one claim Atlas Local cannot test.
   #
-  # Atlas Local is a single-node set: it has a primary and no secondary, so
-  # every fan-out assertion against it would pass by having nothing to fan
-  # out to. That is the shape of test this repository exists to distrust.
+  # Atlas Local runs without `--auth`, so every caller-identity assertion
+  # against it would pass by having nobody to identify. That is the shape
+  # of test this repository exists to distrust.
   #
   # All three mongods live in *one* container on 27021-27023, which is the
   # only arrangement where the member hostnames work from both sides: peers
@@ -57,10 +57,10 @@ services:
       - -c
       - |
         set -e
-        # Internal auth needs a shared key, and turning `--auth` on is not a
-        # detail of the rig: fan-out has to open a connection of its own to
-        # a secondary and authenticate it, and an unauthenticated rig would
-        # test the one path that needs no SCRAM at all.
+        # Internal auth needs a shared key, and turning `--auth` on is not
+        # a detail of the rig: the boundary asks the *server* who
+        # authenticated, and a deployment where nobody did answers every
+        # caller-aware rule the same way.
         openssl rand -base64 756 > /data/keyfile
         chmod 400 /data/keyfile
         chown mongodb /data/keyfile || true
@@ -95,10 +95,9 @@ services:
             db.getSiblingDB("admin").createUser({user: "voyd", pwd: "voyd",
               roles: [{role: "root", db: "admin"}]})
           } catch (e) { if (!/already exists/.test(e.message)) throw e }'
-        # A second identity, and the reason it exists: fan-out serves reads
-        # over a connection this proxy authenticated, so a client arriving
-        # as somebody else must not be served over it. That check needs two
-        # users to be a test rather than an assertion about one. Created
+        # A second identity, and the reason it exists: a caller-aware rule
+        # is only tested by two callers. One user proves the boundary can
+        # read an identity; two prove it reads the *right* one. Created
         # authenticated, because the localhost exception covers only the
         # first user on a deployment.
         mongosh --quiet --port 27021 -u voyd -p voyd --authenticationDatabase admin --eval '
@@ -119,8 +118,8 @@ services:
         tail -f /data/rs27021/mongod.log
     healthcheck:
       # Not "is mongod up" but "is there a primary and are both secondaries
-      # reporting" -- a fan-out test that starts before the set has elected
-      # would be flaky in a way that looks like a routing bug.
+      # reporting" -- a test that starts before the set has elected is
+      # flaky in a way that looks like a defect in the boundary.
       test:
         - CMD-SHELL
         - >-
