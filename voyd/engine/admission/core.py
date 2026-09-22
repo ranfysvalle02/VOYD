@@ -447,7 +447,7 @@ class AdmissionCore:
             return for_caller(self._caller) if for_caller else None
         return rule.clause()
 
-    def _open_tab(self) -> Tabs | None:
+    def open_tab(self) -> Tabs | None:
         """A fresh budget for one read, or ``None`` if no cumulative rule.
 
         One tab per read, never stored on the handle: the handle is shared
@@ -641,7 +641,8 @@ class AdmissionCore:
         return out, total
 
     def reachable(self, docs: Iterable[dict], *,
-                  when: datetime | None = None) -> list[dict]:
+                  when: datetime | None = None,
+                  tab: Any = _UNSET) -> list[dict]:
         """Filter documents that arrived from somewhere else.
 
         This is the search path's entry point: ``$vectorSearch`` and
@@ -649,7 +650,14 @@ class AdmissionCore:
         be, so they are admitted one at a time, here.
 
         A budget applies: this is a set being assembled for a prompt, so a
-        fresh tab spans the whole list and cuts it at the token ceiling.
+        tab spans the list and cuts it at the token ceiling.
+
+        **Pass ``tab`` when this list is one instalment of a larger read.**
+        A cumulative rule compares a document against the running total of
+        the page so far, and "the page" is not always one call: a cursor
+        delivers a page in batches, and a fresh tab per batch means a
+        budget of 100 admits 100 *per batch*. Whoever knows the read is
+        one read owns the tab and hands it in. ``open_tab()`` builds one.
         """
         if self.tenant and self._scope is _UNSET:
             # The hole this guard closes. `find({})` has always raised here;
@@ -668,7 +676,8 @@ class AdmissionCore:
                       f"-- a batch of search hits never went through a query, "
                       f"so this is the only place the tenant can be checked"))
         self._begin_read()
-        tab = self._open_tab()
+        if tab is _UNSET:
+            tab = self.open_tab()
         # Materialised because `docs` may be any iterable and the count is
         # needed after it is consumed.
         candidates = list(docs)
@@ -706,7 +715,7 @@ class AdmissionCore:
         pure rules still run first so reason accounting is identical to
         ``find`` and ``reachable``.
         """
-        tab = self._open_tab()
+        tab = self.open_tab()
         tally: dict[str, int] = {}
         kept: list[dict] = []
         for doc in docs:

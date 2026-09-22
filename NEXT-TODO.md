@@ -1,6 +1,6 @@
 # NEXT-TODO — what the next level needs, measured
 
-Written at `798cd76`, tree clean. 477 tests, all passing: 476 in the
+Written at the batch-size fix, tree clean. 492 tests, all passing: 491 in the
 default run plus the Atlas one, which is run isolated.
 
 Everything below is measured at that commit. Where a previous note
@@ -8,35 +8,7 @@ guessed, it was wrong; the habit that caused it is recorded at the bottom.
 
 ---
 
-## 1. A cumulative rule is enforced per batch, and the client picks the size
-
-**The most serious thing here.** `budget()` and `distinct()` compare a
-document against the running total of the page so far. The tab is opened
-once per `reachable()` call, and on the wire that is once per *cursor
-batch* — so the total resets on every `nextBatch`, and `batchSize` is a
-field in the client's own `find`. Measured: ten documents at 40 tokens
-each, declared budget 100.
-
-```
-one batch     -> 2 documents    correct
-batchSize=2   -> 10 documents   400 tokens under a 100-token budget
-```
-
-Nothing errors. The policy says the rule is in force and a caller defeats
-it without trying. Recorded in `LIMITS.md` §3 under Open.
-
-The hook exists: `voyd/wire/proxy.py` already tracks cursor ids
-(`cursors`, `reduced_cursors`) for an unrelated reason, so the tab can be
-keyed by cursor id instead of opened per batch. Two things to get right —
-the tab has to be discarded when the cursor is killed or drained, or a
-long-lived client leaks one per query; and `getMore` on a collection with
-no cumulative rule must stay on the path that allocates nothing.
-
-Until it is fixed, `budget()` and `distinct()` are honest through the
-admission handle and not through the proxy, which is the one shape this
-project is not allowed to ship quietly.
-
-## 2. `Clearance` — declared nowhere, suppliable nowhere
+## 1. `Clearance` — declared nowhere, suppliable nowhere
 
 Smaller than it looks and worth doing in one sitting. `declare.py` exports
 no `clearance()`, so an ordered clearance cannot be written in a policy
@@ -58,7 +30,7 @@ class Notes:
 Do not invent the spelling before somebody needs it. The example already
 tells a reader exactly what they would be asking for.
 
-## 3. The bijection does not check *which door* a test drives
+## 2. The bijection does not check *which door* a test drives
 
 This is the hole that let the lineage claim go unqualified for as long as
 it did. `tests/test_every_claim_names_its_evidence.py` asserts that every
@@ -73,7 +45,7 @@ on this list with a reason".
 
 Do it before the next claim is added, not after.
 
-## 4. `voyd/wire/proxy.py` is 4,382 lines
+## 3. `voyd/wire/proxy.py` is 4,382 lines
 
 The single biggest structural risk in the repository, and it holds every
 enforcement decision. Splitting framing / codec / dispatch / policy would
@@ -93,7 +65,7 @@ Two specific hazards, both load-bearing:
   assertions catch a drift while you are editing; nothing catches one at
   rest.
 
-## 5. The cascade is not on a dashboard, and its cost is unmeasured
+## 4. The cascade is not on a dashboard, and its cost is unmeasured
 
 `Guard.cascaded` is counted per collection, summed in `tally`, merged
 across workers and printed by `summarise`. It is **not** in
@@ -112,7 +84,7 @@ insert naming a parent is a find before it. `voyd-bench` measures the
 ordinary paths and not this one, so "one extra round trip" is an
 assumption rather than a number.
 
-## 6. The no-database subset is neither, and one cause is a shutdown bug
+## 5. The no-database subset is neither, and one cause is a shutdown bug
 
 Its whole premise is that it is pure and fast. Measured: **457 tests, 130
 seconds**, with only 20 deselected — most of what runs under
@@ -138,7 +110,7 @@ production, not only in the suite — or the fixtures should `kill()` after
 a shorter grace. Check the production behaviour first; the test cost is
 the symptom.
 
-## 7. Two things deliberately kept
+## 6. Two things deliberately kept
 
 Recorded so nobody re-derives the decision and deletes them.
 

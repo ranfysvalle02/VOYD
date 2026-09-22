@@ -55,7 +55,7 @@ class ReadPath(_Composed):
                                                       *args, **kw)
         # A singleton is still prompt content. It gets its own tab rather than
         # bypassing a Budget merely because no page object is involved.
-        tab = self._open_tab()
+        tab = self.open_tab()
         admitted = self._admit(doc, tab=tab)
         if tab is not None and tab.exhausted:
             log.warning(
@@ -90,7 +90,7 @@ class ReadPath(_Composed):
         # a ``Page`` (a ``list`` subclass) for that reason -- callers that
         # treat it as a list are unaffected.
         evaluated_at = now()
-        tab = self._open_tab()
+        tab = self.open_tab()
         if tab is not None and sort is None:
             raise ValueError(
                 f"{self.collection}: a cumulative rule needs a deterministic "

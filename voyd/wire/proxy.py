@@ -105,6 +105,9 @@ OP_COMPRESSED = 2012
 FLAG_CHECKSUM = 1 << 0
 
 
+_FRESH_TAB: Any = object()
+
+
 class Guard:
     """One collection's admission handle, and the tally it has refused.
 
@@ -164,7 +167,18 @@ class Guard:
         """
         return any(getattr(r, "needs_caller", False) for r in self.spec.rules)
 
-    def filter(self, docs: list[dict], caller: dict | None = None) -> list[dict]:
+    @property
+    def cumulative(self) -> bool:
+        """Does any rule here compare a document against the page so far?
+
+        The gate on `Budgets` doing anything at all. A `budget()` or a
+        `distinct()` needs a running total that outlives one batch;
+        everything else is per document and needs no state between them.
+        """
+        return any(getattr(r, "needs_tab", False) for r in self.spec.rules)
+
+    def filter(self, docs: list[dict], caller: dict | None = None,
+               tab: Any = _FRESH_TAB) -> list[dict]:
         handle = self.handle
         if self.needs_caller:
             # `for_caller` clones rather than assigns, and here that is
@@ -185,7 +199,12 @@ class Guard:
             scopes = {d.get(self.spec.tenant) for d in docs}
             handle = handle.for_tenant(scopes.pop() if len(scopes) == 1
                                        else object())
-        kept = handle.reachable(docs)
+        # `_FRESH_TAB` means "this call is the whole read", which is true
+        # of everything except a cursor batch. `Budgets` hands in a tab
+        # that spans the cursor; see its docstring for why a fresh one per
+        # batch is a hole rather than an inefficiency.
+        kept = (handle.reachable(docs) if tab is _FRESH_TAB
+                else handle.reachable(docs, tab=tab))
         self.refused += len(docs) - len(kept)
         self.admitted += len(kept)
         return kept
@@ -1377,8 +1396,76 @@ def strip_compression(raw: bytes, req_id: int, resp_to: int) -> bytes:
     return encode_op_msg(req_id, resp_to, flags, doc)
 
 
+class Budgets:
+    """One running total per cursor, because the client picks the batch size.
+
+    A cumulative rule -- `budget()`, `distinct()` -- compares a document
+    against the total of the page so far. The handle opens one tab per
+    `reachable()` call, and on the wire that is one call per *batch*. A
+    cursor delivers one logical read in as many batches as the client asks
+    for, and `batchSize` is a field in the client's own `find`.
+
+    So without this, a declared budget of 100 tokens is a budget of 100
+    tokens **per batch**, and `batchSize=2` over ten 40-token documents
+    serves all ten. Nothing errors, nothing is logged, and the policy file
+    says the rule is in force. That is the shape of hole this whole
+    project is about, so the fix is not an optimisation and the tab is not
+    optional.
+
+    Keyed by the server's cursor id, held per connection, and dropped when
+    the cursor is exhausted or killed. Per connection rather than on the
+    `Guard`, which every connection shares: a tab is one client's read.
+
+    Costs nothing when no guarded collection declares a cumulative rule,
+    which is the ordinary case -- `Guard.cumulative` is the gate and the
+    dict stays empty.
+    """
+
+    __slots__ = ("_open",)
+
+    def __init__(self) -> None:
+        self._open: dict[tuple[str, int], Any] = {}
+
+    def tab_for(self, guard: Guard, cursor_id: Any) -> Any:
+        """The tab this batch should be charged against.
+
+        `_FRESH_TAB` for a read that is already whole: no cumulative rule
+        to carry, or a cursor the server exhausted in one reply (`id: 0`),
+        where there is no second batch for a total to span.
+        """
+        if not guard.cumulative:
+            return _FRESH_TAB
+        if not isinstance(cursor_id, int) or cursor_id == 0:
+            return _FRESH_TAB
+        key = (guard.collection, cursor_id)
+        tab = self._open.get(key)
+        if tab is None:
+            tab = guard.handle.open_tab()
+            self._open[key] = tab
+        return tab
+
+    def done(self, cursor_id: Any) -> None:
+        """Forget a cursor's totals. Called when the server says `id: 0`.
+
+        Without this a long-lived connection accumulates one tab per query
+        it has ever run. Cursor ids are not reused while a cursor is live,
+        so dropping on exhaustion is the whole of the lifecycle.
+        """
+        if not isinstance(cursor_id, int) or cursor_id == 0 or not self._open:
+            return
+        for key in [k for k in self._open if k[1] == cursor_id]:
+            del self._open[key]
+
+    def forget(self, cursor_ids: Any) -> None:
+        """A client abandoned these cursors with `killCursors`."""
+        if isinstance(cursor_ids, list):
+            for cid in cursor_ids:
+                self.done(cid)
+
+
 def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
-            verbose: bool, caller: dict | None = None) -> bytes:
+            verbose: bool, caller: dict | None = None,
+            budgets: "Budgets | None" = None) -> bytes:
     """Apply admission to a cursor batch on its way back to the client.
 
     Everything that is not a guarded cursor batch is forwarded byte for byte.
@@ -1419,7 +1506,12 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
     # declared guard is about to judge. Still lazy: the rules name a handful
     # of top-level fields, so a vector never becomes a list of floats -- and a
     # document that survives is re-encoded from the bytes it arrived in.
-    kept = guard.filter(batch, caller)
+    cursor_id = cursor.get("id")
+    tab = (budgets.tab_for(guard, cursor_id) if budgets is not None
+           else _FRESH_TAB)
+    kept = guard.filter(batch, caller, tab)
+    if budgets is not None and cursor_id == 0:
+        budgets.done(cursor_id)
     if len(kept) == len(batch):
         return raw                      # nothing refused: do not touch the bytes
 
@@ -1644,7 +1736,8 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
                 guards: dict[str, Guard], verbose: bool,
                 vault: "seal.Vault | None",
                 meter: "metrics.Meter | None" = None,
-                caller: dict | None = None) -> bytes:
+                caller: dict | None = None,
+                budgets: "Budgets | None" = None) -> bytes:
     """`enforce`, plus decryption for the collections that declared it.
 
     **The fast path is byte-for-byte the old one.** With no `--key-vault`,
@@ -1665,14 +1758,14 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
     process -- but it is wasted work worth naming.
     """
     if vault is None:
-        return enforce(raw, req_id, resp_to, guards, verbose, caller)
+        return enforce(raw, req_id, resp_to, guards, verbose, caller, budgets)
 
     peek = decode_op_msg(raw, LAZY)
     if peek is None:
         return raw
     collection = _collection_of(peek[1])
     if not vault.seals(collection):
-        return enforce(raw, req_id, resp_to, guards, verbose, caller)
+        return enforce(raw, req_id, resp_to, guards, verbose, caller, budgets)
 
     # Eager, unlike the fast path: these documents are about to be rebuilt
     # with a decrypted field in them, so there is no forwarding the bytes
@@ -1700,7 +1793,12 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
     if guard is not None:
         if tally:
             guard.note_sealed(tally)
-        kept = guard.filter(plain, caller)
+        cursor_id = cursor.get("id")
+        tab = (budgets.tab_for(guard, cursor_id) if budgets is not None
+               else _FRESH_TAB)
+        kept = guard.filter(plain, caller, tab)
+        if budgets is not None and cursor_id == 0:
+            budgets.done(cursor_id)
     else:
         kept = plain
 
@@ -1742,6 +1840,7 @@ class _Pump(TypedDict):
     # remember this.
     reduced: set[int]
     reduced_cursors: set[int]
+    budgets: Budgets
 
 
 async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -1756,7 +1855,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                back_channel: "Backchannel | None" = None,
                who: "CallerIdentity | None" = None,
                reduced: set[int] | None = None,
-               reduced_cursors: set[int] | None = None) -> str:
+               reduced_cursors: set[int] | None = None,
+               budgets: "Budgets | None" = None) -> str:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -1881,6 +1981,11 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     # other way this entry stops being needed.
                     if body.get("batchSize") == 0:
                         reduced_cursors.discard(more)
+                # A cursor the client gives up on will never report `id: 0`,
+                # so its running total would sit in `Budgets` for the life
+                # of the connection. This is the other end of that lifecycle.
+                if budgets is not None and "killCursors" in body:
+                    budgets.forget(body.get("cursors"))
                 if refusal is not None:
                     await send(back, refusal)
                     continue
@@ -1989,7 +2094,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 elif not already:
                     raw = await judge(raw, req_id, resp_to, guards,
                                       verbose, vault, meter,
-                                      who.claims if who else None)
+                                      who.claims if who else None, budgets)
             await send(writer, raw)
     except Hangup:
         # Not an error, and the one disconnect the caller may still be
@@ -2618,7 +2723,8 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                          "embeds": embeds, "meter": meter,
                          "back_channel": channel,
                          "who": CallerIdentity(channel),
-                         "reduced": set(), "reduced_cursors": set()}
+                         "reduced": set(), "reduced_cursors": set(),
+                         "budgets": Budgets()}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
         back = asyncio.ensure_future(pump(up_r, client_w, up_w,
@@ -2868,6 +2974,10 @@ class Conversation:
         self.back = Backchannel(primary_w)
         self.who = CallerIdentity(self.back)
         self.client_lock = asyncio.Lock()
+        # One running total per cursor, for the same reason the plain path
+        # has one: a cumulative rule spans a read, and a client picks how
+        # many batches a read arrives in.
+        self.budgets = Budgets()
         self.payoff = None
         # request id -> (sent at, shape). The shape travels with the
         # timing so the routing decision and the accounting cannot end up
@@ -3182,6 +3292,10 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 await conv.to_client(refused)
                 continue
 
+            # The other end of a cursor's lifecycle; see `Budgets`.
+            if "killCursors" in body:
+                conv.budgets.forget(body.get("cursors"))
+
             # The same call the single-upstream pump makes, for the same
             # reason the delete rewrites above are duplicated rather than
             # factored: the two paths must agree about what a sealed write
@@ -3370,7 +3484,7 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
                 raw = (delete_reply(raw, req_id, resp_to) if was_delete
                        else await judge(raw, req_id, resp_to, guards,
                                         verbose, vault, meter,
-                                        conv.who.claims))
+                                        conv.who.claims, conv.budgets))
             await conv.to_client(raw)
     except Hangup:
         return "hangup"

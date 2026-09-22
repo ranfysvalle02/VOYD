@@ -46,6 +46,7 @@ of fifty and asserted a page of one, and it passed under sabotage. See
 | It scales across cores without the counting getting looser | `tests/test_the_boundary_scales_without_lying.py` |
 | It says what it did, while it is still running | `tests/test_the_boundary_says_what_it_is_doing.py` |
 | The vector dies with the fact: an erasure through the wire nulls every declared derived encoding, because an embedding is a lossy copy of the text and not a pointer to it | `tests/test_the_vector_dies_with_the_fact.py` |
+| A cumulative rule — a token `budget()`, a `distinct()` — is enforced across the whole read and not per batch, so a client cannot reset it by asking for a smaller `batchSize` | `tests/test_a_page_budget_survives_the_batch_size.py` |
 | The proxy builds what it enforces — `--ensure` creates the collection, the TTL index, the tenant index and the server-embedded vector index the policy declares, and `--verify`, written separately, then has nothing to report | `tests/test_the_proxy_provisions_what_it_enforces.py` |
 | The secondary ranks and the primary permits, so replication lag never becomes a second delete-is-a-wish window | `tests/test_the_boundary_ranks_on_a_replica_and_asks_the_primary.py` |
 | Caller-scoped rules run on the wire, and the claims are the *server's* account of who authenticated — `connectionStatus` on the client's own connection, never anything the client asserted | `tests/test_the_boundary_learns_who_is_asking.py` |
