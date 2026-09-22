@@ -9,6 +9,13 @@ defect found by somebody who is not the author.
 Nothing in this document requires a credential of ours, a document of
 theirs to cross our network, or a proxy in anybody's data path.
 
+**Read [INDEX_DRIFT.md](INDEX_DRIFT.md) first.** It proposes the sharper
+instrument: this one measures *collection versus rules*, and that one
+measures *index versus collection* — a number a skeptic cannot argue with,
+needing no rules declared and, in its first form, no access to customer
+data at all. Drift finds out whether the premise is true; shadow mode
+finds out whether anybody cares.
+
 ---
 
 ## Why: two problems, and they are the same problem

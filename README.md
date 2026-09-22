@@ -442,8 +442,13 @@ only because a boundary would defeat the point of it: `examples/shadow.py`
 counts how many documents your existing read path serves that your own
 database has already marked as gone, and changes nothing while it does.
 When that number convinces somebody, the same rules become a policy file.
-[SHADOW_MODE.md](SHADOW_MODE.md) argues that measurement is the thing to
-ship first, and says what result would mean this project should stop.
+Two proposals argue that measurement is the thing to ship first, and both
+name the result that would mean this project should stop.
+[INDEX_DRIFT.md](INDEX_DRIFT.md) is the sharper one: it measures how long
+a deleted document keeps coming back from a vector index — the half of
+this README's opening paragraph that is currently inferred rather than
+measured. [SHADOW_MODE.md](SHADOW_MODE.md) measures the other axis, what
+your existing read path serves that your database already marked as gone.
 
 ## The server owns the encoding
 
