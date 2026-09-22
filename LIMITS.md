@@ -487,7 +487,7 @@ the guarded side only.
 
 ## 4. Coverage
 
-564 tests, ~9,495 lines, against 13,856 lines of `voyd/` -- 7,196 of
+576 tests, ~9,652 lines, against 13,856 lines of `voyd/` -- 7,196 of
 policy and admission, 6,660 of boundary under `voyd/wire/`. Well-targeted
 rather than thorough: the coverage is by *claim*, which is the right axis,
 but it is not line coverage and should not be mistaken for it.
@@ -632,7 +632,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (560 tests, ~106 seconds) with
+**Consider:** the suite is fast by default (572 tests, ~106 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
@@ -907,6 +907,27 @@ than the one it fixes. Undecided, and unclosed today.
 ---
 
 ## 6. Operational notes that will surprise somebody
+
+**The boundary does not redact embedded subjects, because a policy file
+cannot declare them.** `AdmissionSpec` takes `subjects` and
+`subject_key`, `_admit` redacts refused elements from the document it
+returns, and `revoke_subject` can address one -- all of it works, and
+`declare.py` exposes none of it, so on the wire `spec.subjects` is always
+`None`. A book with a revoked chapter is served whole.
+
+Said here rather than left to be discovered, because the engine having
+the capability reads like the product having it. It is the same shape as
+every other gap found this week: a guarantee that exists and has no route
+through the one artifact an application holds. The verb is the missing
+half -- declaring the array is easy, and `subject_key` has to be enforced
+or an anonymous subject is one nothing can ever revoke.
+
+The redaction itself was also **counted and not performed** on the only
+read path the proxy uses, which is fixed and tested: `reachable()` used
+`_admit` as a predicate and kept the document it was handed, so a refused
+chapter appeared in `receipts()` and in the reply. `find()` was correct.
+One read path redacting and another not is this project's own named
+failure, and the two paths were the library one and the wire one.
 
 **A readiness probe on the listen port lies, so do not use one.** Pointed
 at a deployment that is unreachable, the boundary starts, prints its

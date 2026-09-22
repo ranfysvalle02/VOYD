@@ -682,11 +682,25 @@ class AdmissionCore:
         # needed after it is consumed.
         candidates = list(docs)
         _seen = len(candidates)
-        kept = [d for d in candidates
-                if self._admit(d, when=when, tab=tab) is not None]
-        # Redactions are counted into ``receipts()`` by ``_admit`` already;
-        # this path returns a bare list, so the per-read number has nowhere
-        # to go and the mark is simply taken off.
+        # `_admit`'s **return value**, not the document handed in. On a
+        # collection declaring `subjects` they are different objects: the
+        # returned one has had its refused embedded subjects removed.
+        #
+        # This line used to be a comprehension over `candidates` that kept
+        # `d` and used `_admit` only as a predicate, so a refused chapter
+        # was counted in `receipts()` and served anyway -- and this is the
+        # only read path the proxy uses. The comment that stood here
+        # explained that the redaction *count* has nowhere to go on a path
+        # returning a bare list, which is true, and had been read as
+        # meaning the redaction itself was optional.
+        kept = []
+        for doc in candidates:
+            admitted = self._admit(doc, when=when, tab=tab)
+            if admitted is not None:
+                kept.append(admitted)
+        # The count still has nowhere to go -- this returns a list, not a
+        # `Page` -- so `_harvest` below takes the private mark off without
+        # reporting the number. The removal is not optional; the tally is.
         # Both entry points for a batch that arrived from elsewhere record
         # the same arithmetic, because both are exact for the same reason:
         # nothing here passed through a query that could have dropped it
