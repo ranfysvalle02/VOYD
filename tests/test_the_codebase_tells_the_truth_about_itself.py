@@ -231,10 +231,44 @@ def test_both_doors_leave_the_same_row():
 @pytest.mark.parametrize("module", [
     "voyd.wire.policy", "voyd.wire.proxy", "voyd.wire.upstream",
     "voyd.wire.identity", "voyd.wire.report", "voyd.wire.cli",
+    "voyd.wire.plan", "voyd.wire.plan_report",
     "voyd.engine", "voyd.engine.admission", "voyd",
+    "voyd.engine.plan", "voyd.engine.attest",
+    "voyd.engine.admission.transforms", "voyd.engine.admission.rerank",
 ])
 def test_every_module_a_reader_is_pointed_at_imports(module):
     # The package docstrings are a map. A map naming a module that does
     # not import is the same defect as one naming a file that does not
     # exist, one level in.
     __import__(module)
+
+
+@pytest.mark.parametrize("module", [
+    "voyd.engine.plan", "voyd.engine.attest",
+    "voyd.engine.admission.transforms", "voyd.engine.admission.rerank",
+    "voyd.wire.plan_report",
+])
+def test_the_modules_that_claim_to_be_pure_reach_no_database(module):
+    """Each of these says "pure" in its own docstring. Checked, not trusted.
+
+    Purity is not an aesthetic here -- it is what lets the same check run
+    inside a wire proxy, what lets `voyd-plan` ask about a policy nobody
+    deployed, and what lets the terminal admission pass be cheap enough
+    to run after somebody else's reranker. A `import pymongo` added to
+    any of them would take all three away quietly.
+    """
+    import ast
+    import pathlib
+
+    path = pathlib.Path(ROOT, *module.split(".")).with_suffix(".py")
+    tree = ast.parse(path.read_text())
+    reached = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            reached |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            reached.add(node.module.split(".")[0])
+    forbidden = reached & {"pymongo", "bson", "socket", "asyncio",
+                           "requests", "urllib"}
+    assert not forbidden, (
+        f"{module} says it is pure and imports {sorted(forbidden)}")

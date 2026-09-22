@@ -49,7 +49,7 @@ found. Delete them.
 
 Fine. MongoDB's TTL monitor runs about once a minute. An object-lifecycle
 rule runs about once a day. Your cleanup cron runs whenever it last
-worked, a fact you will learn more about later.
+worked.
 
 In every one of those windows the document is genuinely, correctly, still
 on disk. Nothing is stale. Nothing is broken. The sweeper simply has not
@@ -260,11 +260,19 @@ looking at, because it is not looking — it is asking the same pure
 question it asks every document, after everybody else has had their
 turn.
 
-The inversion in the pitch is the part I like. Security's objection to a
+The inversion is the part I like. Security's standing objection to a
 programmable proxy is *"unvetted code modifying data in flight."* Here
-that is the feature: your unvetted code is the safest place it has ever
-run, because for the first time it is inside the thing that would have
-caught it.
+that is the feature: your unvetted code is in the safest place it has
+ever run, because for the first time it is inside the thing that would
+have caught it.
+
+And the two audiences stop arguing. An engineer installs this because
+their top ten results are six chunks of the same contract and one line
+in a config file fixes it. A security team keeps it because the same
+process is a non-bypassable read boundary for every notebook, agent and
+MCP server pointed at that cluster. Neither has to lose for the other to
+win, which is unusual enough in this category to be worth saying out
+loud.
 
 ## Three questions it refuses to answer
 
@@ -364,7 +372,7 @@ tool. Which is, once again, an argument for turning the tool off.
 Everything in this domain wants to become invisible. You have to keep
 taking its hat off.
 
-## The generalisation, which is bigger than vector search
+## Five things I now believe about this whole category
 
 | the intent | the window it actually has |
 |---|---|
@@ -377,7 +385,7 @@ taking its hat off.
 
 Six subsystems, one defect: **a statement of intent doing the work of a
 guarantee.** The gap between what you declared and what is verified is
-where all of these live, and it does not announce itself, for a reason
+where all of these live, and it does not announce itself for a reason
 that is almost funny — declaring something is precisely what makes you
 stop checking it.
 
