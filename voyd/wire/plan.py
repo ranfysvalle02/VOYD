@@ -115,7 +115,7 @@ def _database(uri: str, name: str | None):
 # `Plan`, and everything below is sockets, files and an exit code.
 # Re-exported here because `voyd-plan` is the name people know.
 from .plan_report import (as_json, matrix_as_json,  # noqa: E402
-                          render, render_matrix)
+                          render, render_audit, render_matrix)
 
 
 # ---- the command --------------------------------------------------------
@@ -254,6 +254,11 @@ def build() -> argparse.ArgumentParser:
     # Not `required=True`: `--verify` is a different job that needs
     # neither, and argparse refusing to run it without two policy files
     # would be the parser asserting something untrue about the command.
+    ap.add_argument("--audit", action="store_true",
+                    help="what is reachable on this cluster *today* that "
+                         "the proposed policy would refuse. Implies "
+                         "`--current none`, needs no proxy and changes "
+                         "nothing: a read-only URI and one command")
     ap.add_argument("--current",
                     help="the voydfile in force, or `none` when there is "
                          "not one yet")
@@ -363,6 +368,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"voyd-plan: {exc}", file=sys.stderr)
             return 2
 
+    if args.audit:
+        # An audit is a plan against nothing in force, which is the same
+        # arithmetic read as a question about the present rather than
+        # about a change. Setting it here rather than asking the operator
+        # to spell `--current none` is the whole difference between a
+        # report somebody runs and a flag combination somebody is told.
+        if args.current and args.current != NO_POLICY:
+            print("voyd-plan: --audit compares the cluster against no "
+                  "policy at all, so --current cannot also be given",
+                  file=sys.stderr)
+            return 2
+        args.current = NO_POLICY
+
     try:
         if not args.current or not args.proposed:
             raise ValueError(
@@ -435,6 +453,9 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(result, Matrix):
         text = render_matrix(result, missing=missing)
         blob = matrix_as_json(result, missing=missing)
+    elif args.audit:
+        text = render_audit(result, missing=missing)
+        blob = as_json(result, missing=missing)
     else:
         text = render(result, missing=missing)
         blob = as_json(result, missing=missing)

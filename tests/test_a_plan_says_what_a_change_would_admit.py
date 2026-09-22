@@ -33,7 +33,7 @@ from voyd.engine.plan import (GUARD_ADDED, GUARD_REMOVED, NEEDS_CALLER,
                               SET_RELATIVE, SUBJECTS_REMOVED, TENANT_CHANGED,
                               TENANT_REMOVED, compare, plan, plannable,
                               structural)
-from voyd.wire.plan import as_json, render
+from voyd.wire.plan import as_json, render, render_audit
 from voyd.wire.plan import main as plan_main
 
 UTC = timezone.utc
@@ -631,7 +631,8 @@ def test_every_flag_the_action_passes_is_one_voyd_plan_has():
     # git's flags, which are not this parser's business.
     passed &= {"--current", "--proposed", "--target", "--database",
                "--sample", "--all", "--at", "--as", "--as-each", "--json",
-               "--collection", "--report", "--attest", "--sign", "--verify"}
+               "--collection", "--report", "--attest", "--sign", "--verify",
+               "--audit"}
     assert passed, "the action passes no voyd-plan flags; this test stopped checking"
     assert passed <= known, f"action.yml passes flags voyd-plan does not have: {passed - known}"
 
@@ -717,3 +718,81 @@ def test_the_sampler_asks_the_cluster_what_exists_once(tmp_path):
         list(sampler(name))
     assert db.asked == 1
     assert sampler.missing == ["cases", "ledger"]
+
+
+# ---- the same arithmetic, asked about today ----------------------------
+
+def test_an_audit_is_a_plan_against_nothing_in_force(tmp_path, capsys):
+    """`--audit` needs no proxy, no install and no staging environment.
+
+    It is the one motion this design allows and a sidecar cannot: every
+    competitor's audit requires their proxy to already be running,
+    because their enforcement only exists inside their process. This
+    one is a pure function, so the report arrives *before* the install.
+    """
+    proposed = policy(tmp_path, "proposed.py", """
+        from voyd import guard, deadline, revocable
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+            forgotten = revocable()
+    """)
+    assert plan_main(["--audit", "--proposed", proposed, "--json"]) == 0
+    blob = json.loads(capsys.readouterr().out)
+    # Nothing is in force, so the policy can only close the boundary.
+    assert blob["fails_open"] is False
+    assert blob["structural"][0]["kind"] == GUARD_ADDED
+
+
+def test_the_audit_says_reachable_today_not_stops_being_reachable(tmp_path):
+    # Identical arithmetic to a plan and deliberately different prose.
+    # A plan is read by somebody merging a change; an audit by somebody
+    # who has installed nothing. "Stops being reachable" is a tense the
+    # second reader never asked about, and it buries the finding.
+    proposed = specs(tmp_path, "proposed.py", """
+        from voyd import guard, deadline
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+    """)
+    result = plan({}, proposed, lambda _c: [{"expire_at": PAST}] * 3,
+                  when=NOW, exhaustive=True)
+    text = render_audit(result)
+    assert "reachable today, and refused by this policy" in text
+    assert "stop being reachable" not in text
+    # Spelled out, because an audit reader has not read the vocabulary.
+    assert "past an expire_at the TTL monitor has not reached" in text
+    assert "collections with no boundary in front of them today" in text
+
+
+def test_a_sampled_audit_says_so_where_the_number_is(tmp_path):
+    # An audit is read by somebody deciding whether this is worth
+    # installing. The scope of the number belongs beside it, not in a
+    # footnote they will not reach.
+    proposed = specs(tmp_path, "proposed.py", """
+        from voyd import guard, deadline
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+    """)
+    docs = [{"expire_at": PAST}] * 3
+    sampled = render_audit(plan({}, proposed, lambda _c: docs, when=NOW))
+    assert "a sample of 3" in sampled and "--all reads every document" in sampled
+    whole = render_audit(plan({}, proposed, lambda _c: docs, when=NOW,
+                              exhaustive=True))
+    assert "every document" in whole and "--all reads" not in whole
+
+
+def test_audit_and_an_explicit_current_policy_is_refused(tmp_path, capsys):
+    # They are two different questions and the flags would silently
+    # pick one. An audit compares against nothing in force by
+    # definition; if there *is* a policy in force, a plan is the tool.
+    before = policy(tmp_path, "in_force.py", """
+        from voyd import guard, deadline
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+    """)
+    assert plan_main(["--audit", "--current", before,
+                      "--proposed", before]) == 2
+    assert "--current cannot also be given" in capsys.readouterr().err

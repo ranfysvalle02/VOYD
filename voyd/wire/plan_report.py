@@ -13,7 +13,8 @@ format, and the text is meant to be improved.
 
 from __future__ import annotations
 
-from voyd.engine.plan import NEEDS_CALLER, Matrix, Plan, SET_RELATIVE
+from voyd.engine.plan import (GUARD_ADDED, NEEDS_CALLER, Matrix,
+                              Plan, SET_RELATIVE)
 
 
 def _looked(result: Plan) -> str:
@@ -267,3 +268,80 @@ def as_json(result: Plan, *, missing: list[str] | None = None) -> dict:
                        "why": s.why} for s in result.set_aside],
         "missing_collections": sorted(missing or []),
     }
+
+
+def render_audit(result: Plan, *, missing: list[str] | None = None) -> str:
+    """The same arithmetic, asked as a question about today.
+
+    ``--audit`` is ``--current none``: compare *no policy at all* against
+    the one being proposed, and every document the policy would refuse is
+    a document reachable right now. The numbers are identical to a plan's
+    and the sentences must not be, because the reader is different and so
+    is the question.
+
+    A plan is read by somebody deciding whether to merge a change, and
+    its finding is a *delta* -- "these documents stop being reachable".
+    An audit is read by somebody who has not installed anything, and the
+    same count means "these documents are reachable today and should not
+    be". Printing the first sentence to the second reader buries the
+    finding under a tense nobody asked about.
+    """
+    out: list[str] = []
+    say = out.append
+    total = 0
+
+    for c in result.collections:
+        if not c.newly_refused:
+            continue
+        total += c.newly_refused_total
+        say(f"  {c.collection}  {c.newly_refused_total} of {c.sampled} "
+            f"{_looked(result)} are reachable now and would be refused")
+        for reason, n in sorted(c.newly_refused.items(),
+                                key=lambda kv: -kv[1]):
+            say(f"    {n:>8}  {_AUDIT_REASONS.get(reason, reason)}")
+        say("")
+    if total:
+        out.insert(0, "")
+        out.insert(0, "reachable today, and refused by this policy")
+
+    unguarded = [s.collection for s in result.structural
+                 if s.kind == GUARD_ADDED]
+    if unguarded:
+        say("collections with no boundary in front of them today")
+        say(f"  {', '.join(sorted(unguarded))}")
+        say("")
+
+    if missing:
+        say("declared by the policy, absent from this cluster")
+        say(f"  {', '.join(sorted(missing))}")
+        say("")
+
+    # An audit is read by somebody deciding whether this is worth
+    # installing, so the honest scope of the number goes next to it
+    # rather than in a footnote they will not reach.
+    scope = ("every document" if result.exhaustive
+             else f"a sample of {result.sampled}")
+    say(f"{total} documents, out of {scope} looked at, are reachable "
+        f"through this cluster's retrieval path")
+    say("and would be refused by the policy in "
+        + (", ".join(sorted({c.collection for c in result.collections
+                             if c.newly_refused})) or "no collection"))
+    if not result.exhaustive:
+        say("")
+        say("  --all reads every document, which is what it takes to say "
+            "this about the collection rather than about the sample.")
+    return "\n".join(out)
+
+
+# An audit reader has not read this project's vocabulary, so the reason
+# names are spelled out. The strings themselves stay stable elsewhere --
+# this is a rendering, not a rename.
+_AUDIT_REASONS = {
+    "deadline": "are past an expire_at the TTL monitor has not reached",
+    "revoked": "carry an erasure mark and are still being served",
+    "quarantined": "are held back for review and are still being served",
+    "wrong_model": "were embedded by a different model than declared",
+    "unreadable": "have a deadline field nothing can parse",
+    "not_cleared": "are above this caller's clearance",
+    "unrecoverable": "are sealed with a key that no longer exists",
+}

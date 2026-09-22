@@ -368,6 +368,29 @@ policy have refused last Tuesday?"* a real question — a deadline and a hold
 are both functions of time. It moves the clock and not the data: nothing
 here keeps history, and the documents are the ones on disk now.
 
+### Before anything is installed
+
+The same arithmetic, asked about the present. `--audit` compares the
+cluster against *no policy at all*, so every document the policy would
+refuse is a document reachable right now:
+
+```bash
+voyd-plan --audit --proposed voydfile.py --target $READONLY_URI --all
+```
+
+```
+reachable today, and refused by this policy
+
+  records  1000 of 4100 read are reachable now and would be refused
+         812  are past an expire_at the TTL monitor has not reached
+         188  carry an erasure mark and are still being served
+```
+
+No proxy, no sidecar, no connection string changed, nothing in a query
+path — a read-only credential and a batch job. That is only possible
+because the check is a pure function: a boundary whose enforcement lives
+inside a running process has nowhere to stand to ask this.
+
 ### In the place a policy is actually reviewed
 
 A check nobody runs is a man page, so the plan ships as an action:
