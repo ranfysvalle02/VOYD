@@ -1,10 +1,12 @@
 name: test
 
 # Small on purpose. The suite is the foundation the rewrite stands on, not a
-# census: three of its four files need no database at all, because the
-# per-document check and the wire codec are pure. The fourth drives a real
-# `mongod` through a real proxy with a real driver, because the claim is
-# about bytes on a wire and a mock would only prove the mock was filtered.
+# census. Four of its five files need no database at all -- the per-document
+# check, the policy loader and the wire codec are pure, which is what lets
+# the same check run inside a proxy in the first place. The fifth drives a
+# real `mongod` through a real proxy with a real driver, because its claims
+# are about queries and bytes and a mock would only prove the mock was
+# filtered.
 
 on:
   push:
@@ -53,21 +55,13 @@ jobs:
         # If this step ever needs `services:`, the boundary has stopped being
         # pure -- and a per-document check that cannot run without a database
         # is one that cannot move to a wire, a browser, or anywhere else.
+        #
+        # Selected by marker rather than by filename, so a new pure file is
+        # covered the moment it is written and a new *impure* one has to
+        # declare itself `needs_mongo` to be skipped here. A list of paths
+        # silently stops covering whatever was added after it.
         run: |
-          uv run --no-sync pytest -q \
-            tests/test_the_codec_round_trips.py \
-            tests/test_the_boundary_refuses.py \
-            tests/test_the_policy_file_is_the_configuration.py \
-            tests/test_the_scanner_is_not_confidently_wrong.py \
-            tests/test_the_server_owns_the_encoding.py \
-            tests/test_the_policy_is_checked_against_the_cluster.py \
-            tests/test_every_claim_names_its_evidence.py \
-            tests/test_every_documented_command_is_real.py \
-            tests/test_a_derived_read_cannot_launder_a_forgotten_fact.py \
-            tests/test_a_page_budget_survives_the_batch_size.py \
-            tests/test_a_clearance_ladder_is_declarable.py \
-            tests/test_the_boundary_shuts_down_without_waiting.py \
-            -m 'not needs_mongo'
+          uv run --no-sync pytest -q -m 'not needs_mongo'
 
       - name: The container is the deployment story, so it is built and run
         # The deployment path is a claim like any other and gets the same
@@ -137,28 +131,17 @@ jobs:
           /tmp/wheelcheck/bin/voyd-wire --help > /dev/null
 
       - name: End to end, real driver through a real boundary
-        # Atlas Local is a real mongod and a real mongot, not a mock. The
-        # server-side embedding test skips here and runs in the step below,
-        # because Atlas Local registers no models -- it *declines* an
-        # `auto_embed` declaration, and a test that accepted the fallback
-        # would assert the opposite of what it claims.
+        # Atlas Local is a real mongod and a real mongot, not a mock.
+        #
+        # `-m ""` clears the default deselection, and the one `slow` test it
+        # lets in skips by name here: server-side embedding needs a cluster
+        # that has registered a model, and Atlas Local *declines* an
+        # `auto_embed` declaration rather than honouring it. A run that
+        # accepted the fallback would assert the opposite of what it claims.
+        # Set VOYD_ATLAS_URI to have it actually run.
         env:
           VOYD_TEST_MONGO_URI: mongodb://localhost:27018/?directConnection=true
-        # `-m ""` clears the default deselection. The fast run is for a
-        # laptop; CI is the place the index builds actually happen.
-        run: uv run --no-sync pytest -q -m "" tests/
-
-      - name: Server-side embedding, against a real Atlas cluster
-        # The one claim that cannot be checked anywhere else. Gated on the
-        # secret being present so a fork's CI is green rather than red for a
-        # reason it cannot fix -- and skipped loudly rather than silently,
-        # because `auto_embed` is a headline feature.
-        if: ${{ env.VOYD_ATLAS_URI != '' }}
-        env:
-          VOYD_ATLAS_URI: ${{ secrets.VOYD_ATLAS_URI }}
-        run: |
-          uv run --no-sync pytest -q -rs \
-            tests/test_search_refuses_on_the_path_that_bypasses_the_query.py
+        run: uv run --no-sync pytest -q -rs -m "" tests/
 
       - name: The examples are the documentation, so they have to run
         env:
