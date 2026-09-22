@@ -43,7 +43,8 @@ SOURCES = sorted(
      if not any(x in p.parts for x in (".venv", "__pycache__", "dist",
                                        ".mypy_cache", ".pytest_cache"))]
     + [ROOT / n for n in ("README.md", "blog.md",
-                          "docs/ranking-is-not-permission.md", "pyproject.toml",
+                          "docs/ranking-is-not-permission.md",
+                          "docs/cosine.md", "pyproject.toml",
                           "Dockerfile", "action.yml",
                           ".github/workflows/test.yml",
                           ".github/workflows/policy-plan.yml")])
