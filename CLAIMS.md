@@ -42,6 +42,7 @@ of fifty and asserted a page of one, and it passed under sabotage. See
 | The wire codec round-trips, including the kind-1 document sequence that carries a write | `tests/test_the_codec_round_trips.py` |
 | A client cannot walk past the boundary: `hello` is rewritten, so the guarantee is not a connection-string option somebody remembers | `tests/test_a_client_cannot_walk_past_the_boundary.py` |
 | It is operable: TLS termination, a capped message size, keepalive, a draining `SIGTERM` | `tests/test_the_boundary_is_operable.py` |
+| A `SIGTERM` drains: requests already in flight finish, connections sitting idle between them are closed at once, and the wait is bounded and settable | `tests/test_the_boundary_shuts_down_without_waiting.py` |
 | It survives hostile conditions — backpressure, resets mid-reply, garbage on the port, an upstream restart | `tests/test_the_boundary_survives_hostile_conditions.py` |
 | It scales across cores without the counting getting looser | `tests/test_the_boundary_scales_without_lying.py` |
 | It says what it did, while it is still running | `tests/test_the_boundary_says_what_it_is_doing.py` |

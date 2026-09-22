@@ -89,6 +89,49 @@ from .codec import (LAZY, OP_COMPRESSED, OP_MSG, Hangup, ProtocolError,
                     encode_sections, read_message_async, uncompress_message)
 
 
+async def _next_message(reader: asyncio.StreamReader,
+                        draining: "asyncio.Event | None"):
+    """The next message, or the shutdown that arrived while we waited.
+
+    Racing the read against the drain is what makes a connection sitting
+    idle between requests close *now* rather than in `drain_seconds`.
+    Being blocked here is the definition of idle: nothing has been read,
+    so nothing is half-forwarded, and closing costs the client nothing it
+    was owed. A connection mid-request is not blocked here -- it is
+    downstream waiting for a reply -- so it still gets the full drain.
+
+    That distinction is the whole of a graceful shutdown, and it is the
+    one every other proxy makes: finish what is in flight, hang up on
+    what is idle. Without it a single connected `mongosh` held a deploy
+    for the entire drain window, doing nothing.
+
+    Racing means cancelling the loser. If the drain wins, the read may
+    have consumed a partial header -- which does not matter, because the
+    only thing that happens next is this connection closing.
+
+    **A message already in the buffer wins even once the drain has
+    fired**, which is why this races rather than checking `is_set()`
+    first. The cheap version short-circuits on a set event and drops a
+    request the client had already sent -- turning a graceful shutdown
+    into a dropped request, in the function whose entire job is the
+    opposite.
+    """
+    if draining is None:
+        return await read_message_async(reader)
+    read = asyncio.ensure_future(read_message_async(reader))
+    stop = asyncio.ensure_future(draining.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {read, stop}, return_when=asyncio.FIRST_COMPLETED)
+        if read in done:
+            return read.result()        # a real request wins a tie
+        raise Hangup("drained while idle between requests")
+    finally:
+        for task in (read, stop):
+            if not task.done():
+                task.cancel()
+
+
 class _Pump(TypedDict):
     """The state both directions of one connection share.
 
@@ -119,6 +162,7 @@ class _Pump(TypedDict):
     reduced: set[int]
     reduced_cursors: set[int]
     budgets: Budgets
+    draining: "asyncio.Event | None"
 
 
 async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -134,7 +178,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                who: "CallerIdentity | None" = None,
                reduced: set[int] | None = None,
                reduced_cursors: set[int] | None = None,
-               budgets: "Budgets | None" = None) -> str:
+               budgets: "Budgets | None" = None,
+               draining: "asyncio.Event | None" = None) -> str:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -162,7 +207,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
 
     try:
         while True:
-            raw, _len, req_id, resp_to, opcode = await read_message_async(reader)
+            raw, _len, req_id, resp_to, opcode = await _next_message(
+                reader, draining if to_server else None)
             if meter is not None:
                 # One integer add per *message*, not per document. The
                 # per-document path is 2.3us and stays untouched.
@@ -964,7 +1010,8 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                   vault: "seal.Vault | None" = None,
                   embeds: Mapping | None = None,
                   meter: "metrics.Meter | None" = None,
-                  half_close_seconds: float = 10.0) -> None:
+                  half_close_seconds: float = 10.0,
+                  draining: "asyncio.Event | None" = None) -> None:
     """One client connection, start to finish, as one coroutine pair.
 
     A MongoDB connection is stateful -- authentication, sessions, cursors
@@ -1009,7 +1056,7 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                          "back_channel": channel,
                          "who": CallerIdentity(channel),
                          "reduced": set(), "reduced_cursors": set(),
-                         "budgets": Budgets()}
+                         "budgets": Budgets(), "draining": draining}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
         back = asyncio.ensure_future(pump(up_r, client_w, up_w,
@@ -1495,7 +1542,8 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
                 guards: dict[str, Guard], verbose: bool,
                 rewritten: set[int], vault: "seal.Vault | None",
                 embeds: Mapping | None,
-                meter: "metrics.Meter | None") -> str:
+                meter: "metrics.Meter | None",
+                draining: "asyncio.Event | None" = None) -> str:
     """client -> upstream, choosing which upstream each message goes to.
 
     Every write rewrite here is the same call the single-upstream pump
@@ -1511,7 +1559,8 @@ async def route(client_r: asyncio.StreamReader, conv: Conversation,
 
     try:
         while True:
-            raw, _len, req_id, resp_to, opcode = await read_message_async(client_r)
+            raw, _len, req_id, resp_to, opcode = await _next_message(
+                client_r, draining)
             if meter is not None:
                 meter.messages_from_client_total += 1
             if opcode == OP_COMPRESSED:
@@ -1707,7 +1756,8 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
     """
     try:
         while True:
-            raw, _len, req_id, resp_to, opcode = await read_message_async(reader)
+            raw, _len, req_id, resp_to, opcode = await read_message_async(
+                reader)
             if meter is not None:
                 meter.messages_from_upstream_total += 1
             if opcode == OP_COMPRESSED:
@@ -1800,7 +1850,8 @@ async def replies(reader: asyncio.StreamReader, conv: Conversation, *,
 
 async def fanned_session(client_r, client_w, upstream: Upstream,
                          secondaries: Secondaries, guards, verbose: bool,
-                         live: Live, advertise, vault, embeds, meter) -> None:
+                         live: Live, advertise, vault, embeds, meter,
+                         draining: "asyncio.Event | None" = None) -> None:
     """One client connection when `--fan-out` is on.
 
     Deliberately a sibling of `session` rather than a mode inside it. The
@@ -1824,7 +1875,7 @@ async def fanned_session(client_r, client_w, upstream: Upstream,
         tasks = [
             asyncio.ensure_future(route(client_r, conv, upstream, secondaries,
                                         guards, verbose, rewritten, vault,
-                                        embeds, meter)),
+                                        embeds, meter, draining)),
             asyncio.ensure_future(replies(up_r, conv, source="primary",
                                           guards=guards, verbose=verbose,
                                           rewritten=rewritten,
@@ -2157,10 +2208,10 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         if secondaries is not None:
             await fanned_session(reader, writer, upstream, secondaries,
                                  guards, verbose, live, advertise, vault,
-                                 embeds, meter)
+                                 embeds, meter, stopping)
         else:
             await session(reader, writer, upstream, guards, verbose, live,
-                          advertise, vault, embeds, meter)
+                          advertise, vault, embeds, meter, draining=stopping)
 
     # A failed TLS handshake, a port scan, a plain-TCP probe against a TLS
     # listener: one client's problem, never the listener's. An earlier
@@ -2200,14 +2251,14 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         except (ValueError, NotImplementedError):
             pass                         # not the main thread, or not POSIX
 
-    async with server:
-        await stopping.wait()
+    await stopping.wait()
 
+    # `server.close()` rather than `async with server`, and the difference
+    # is not style. Since Python 3.12 `Server.__aexit__` awaits
+    # `wait_closed()`, which waits for every *handler* to finish -- so the
+    # context manager blocked forever on a single idle client and the
+    # bounded drain below was never reached.
     server.close()
-    try:
-        await server.wait_closed()
-    except (OSError, ConnectionError):
-        pass
 
     # Wait for the connections that were already open. Bounded, because a
     # client holding a cursor open forever must not hold up a deploy.
@@ -2222,6 +2273,24 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
     if live.count:
         print(f"voyd-wire: {live.count} connection(s) still open after "
               f"{drain_seconds}s; closing anyway", flush=True)
+
+    # **Bounded, and that is the whole point of this line.** Since Python
+    # 3.12 `Server.wait_closed()` waits for every *handler* to finish, not
+    # only for the listening socket to shut. An unbounded await here meant
+    # a `SIGTERM` with one idle client attached never returned at all --
+    # measured: an idle proxy exited in 0.02s and a proxy with a single
+    # connected `mongosh` was still alive after 60 seconds, having printed
+    # "draining" and nothing since. The bounded drain above it was never
+    # reached, so the timeout that was supposed to cap this could not.
+    #
+    # In production that is every rolling deploy waiting out its grace
+    # period and then taking a `SIGKILL`, which is precisely the
+    # connection reset draining exists to avoid -- the feature failing in
+    # the shape of the problem it was added for.
+    try:
+        await asyncio.wait_for(server.wait_closed(), timeout=1.0)
+    except (asyncio.TimeoutError, OSError, ConnectionError):
+        pass
     if flusher is not None:
         await asyncio.gather(flusher, return_exceptions=True)
     counted = tally(guards, vault)
@@ -2641,6 +2710,11 @@ def main(argv: list[str] | None = None) -> int:
                          "closed rather than queued, because a driver "
                          "retries and an unbounded backlog turns a busy "
                          "minute into an outage")
+    ap.add_argument("--drain", type=float, default=20.0, metavar="SECONDS",
+                    help="on SIGTERM, how long to let requests already in "
+                         "flight finish. Connections sitting idle between "
+                         "requests are closed at once and do not wait this "
+                         "out. 0 hangs up on everything immediately")
     ap.add_argument("--workers", type=int, default=1, metavar="N",
                     help="worker processes sharing the listening socket. "
                          "The event loop makes a connection cheap but "
@@ -2783,6 +2857,7 @@ def main(argv: list[str] | None = None) -> int:
         serve(args.listen, args.target, guards, not args.quiet,
               certfile=args.tls_cert, keyfile=args.tls_key,
               max_connections=args.max_connections, advertise=advertise,
+              drain_seconds=args.drain,
               workers=args.workers, metrics_port=args.metrics,
               fan_out=args.fan_out, give_up=args.fan_out_give_up,
               vault_spec=vault_spec, auto_embed=_embeds_from(OPTIONS))
