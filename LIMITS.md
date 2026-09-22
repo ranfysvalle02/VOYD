@@ -487,7 +487,7 @@ the guarded side only.
 
 ## 4. Coverage
 
-549 tests, ~9,263 lines, against 13,856 lines of `voyd/` -- 7,196 of
+564 tests, ~9,495 lines, against 13,856 lines of `voyd/` -- 7,196 of
 policy and admission, 6,660 of boundary under `voyd/wire/`. Well-targeted
 rather than thorough: the coverage is by *claim*, which is the right axis,
 but it is not line coverage and should not be mistaken for it.
@@ -632,7 +632,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (545 tests, ~103 seconds) with
+**Consider:** the suite is fast by default (560 tests, ~106 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports

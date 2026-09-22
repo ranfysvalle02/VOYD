@@ -32,6 +32,7 @@ of fifty and asserted a page of one, and it passed under sabotage. See
 | An insert that says what it was made out of has its ancestry closed transitively on the way in, and is refused outright if a named parent is missing, out of scope or already refused | `tests/test_a_refusal_travels_and_is_gated.py` |
 | A `$vectorSearch` hit is refused on the path that never passes through a query | `tests/test_search_refuses_on_the_path_that_bypasses_the_query.py` |
 | `numCandidates` is sized from the measured refusal rate, not a constant | `tests/test_the_boundary_sizes_its_own_fetch.py` |
+| A rule that raises is a refusal, counted under its own reason and logged — so a third-party rule cannot open the gate by failing; and cumulative rules are asked last, the charging ones last of all, each with its own running total | `tests/test_the_rule_protocol_holds_its_contracts.py` |
 | A rule's two halves agree: the clause pushed into MongoDB never hides a document `refuses()` would admit — checked against a real server, on the corners where they could disagree (field absent, null, wrong type, wrong value) | `tests/test_a_rules_two_halves_agree.py` |
 | A read the boundary cannot judge per document — `distinct`, `count`, a pipeline that groups or reshapes, **or a `find` whose projection hides the marks** — has the refusal pushed into its query instead, and is refused outright in the cases where that push-down would be narrower than the guarantee | `tests/test_a_derived_read_cannot_launder_a_forgotten_fact.py` |
 
