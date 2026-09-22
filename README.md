@@ -33,6 +33,42 @@ VOYD is the second one, placed where it cannot be bypassed: **the wire**.
 
 ---
 
+## The part that surprised me
+
+Once refusal is on the wire, it has to be **pure** — no database under it,
+no I/O, documents in and the admissible ones out. That reads like a tax.
+It turned out to be the most valuable property in the project, and it paid
+twice.
+
+**A policy change can be diffed before it ships.** A pure function can be
+asked about a policy that is not deployed. `voyd-plan` asks it twice and
+fails a pull request that widens the boundary — naming the documents, and
+the role.
+
+**Your reranker cannot leak.** Because the check is pure and cheap, it can
+run *last*, always, after arbitrary page-shaping code:
+
+```
+pure rules  →  your transform  →  every rule, terminally  →  the wire
+```
+
+Reranking, de-duplication and caching have always lived *outside* the
+boundary, and outside is what makes them dangerous — anything downstream
+of a filter can undo it. Usually by accident: merging a cached list,
+falling back to the unfiltered candidate pool because an empty page looked
+like a bug. So they move inside, and the guarantee survives:
+
+> **A transform cannot widen what a read returns.** Not because it was
+> reviewed. Because the boundary is downstream of it.
+
+There is a test that starts a real proxy with a policy whose transform
+exists solely to inject forgotten facts, and reads through it with a
+`pymongo` client that has never heard of this package. The transform is
+not disabled, sandboxed or reviewed. It runs. It returns the documents.
+They do not arrive.
+
+---
+
 ## No code
 
 ```bash
@@ -132,6 +168,12 @@ since there would be nowhere to record that the fact was forgotten.
 | `sealed()` | ciphertext at rest, under a key scoped to the tenant |
 | `auto_embed(model)` | the *server* embeds this text; refuse a client's own vector |
 
+Beside them, and deliberately not one of them:
+
+| | |
+|---|---|
+| `@transform(collection)` | shape the page — rerank, de-duplicate, annotate — inside the boundary, where it cannot widen a read |
+
 `budget(n)` and `distinct()` are **set-relative**: they refuse a document
 because of the *other* documents on the page, so the same document is
 admitted alone and refused in company. No index filter and no policy engine
@@ -176,6 +218,67 @@ proxy at all.
 
 The asymmetry only runs one way. A rule with no query half is slower. A rule
 with *only* a query half would be a hole.
+
+---
+
+## Shaping the page, inside the boundary
+
+A rule decides whether one document may reach a prompt. A **transform**
+decides what the page looks like — what order, which of them, annotated
+how. Reranking, de-duplication, a cache.
+
+Those have always been a separate system, running after retrieval, and
+that is what makes them dangerous rather than useful. A reranker
+downstream of a filter can put back what the filter removed, and almost
+never on purpose: it merges a cached list, or falls back to the
+unfiltered candidate pool because an empty page looked like a bug, or
+reorders a list it was handed by reference.
+
+```python
+# voydfile.py
+@transform("notes")
+class Diversify:
+    name = "mmr"
+
+    def on_egress(self, docs, *, request):
+        return mmr(docs, diversity=0.7)     # your code, any code
+```
+
+It runs **inside**:
+
+```
+pure rules  →  transform  →  every rule, terminally  →  the wire
+```
+
+The terminal pass is not a stage you compose. It is the last thing that
+touches a document, always, and a transform cannot be placed after it
+because there is nowhere after it. Everything a transform returns —
+reordered, merged, restored from a cache, invented — is checked before it
+leaves. So a transform may reorder, drop, annotate and even inject, and a
+forgotten fact still cannot come out.
+
+The first pass is a different argument: a transform is never *shown* a
+forgotten fact. That is defence in depth, not the guarantee — code that
+never receives a fact cannot mishandle it.
+
+**A transform is not an enforcement point** and must never be written as
+one. Dropping a document for a security reason here duplicates a rule
+badly: the rule is what is re-asked terminally, and the rule is the half
+`voyd-plan` can tell you about before you ship it. A transform gets no
+credit and no attestation.
+
+Two members, `name` and `on_egress`, checked at load the way a
+half-written rule is. A transform that raises is skipped and its input
+carried forward — the opposite of the decision for a rule, and for the
+opposite reason: a rule that fails open is a leak, a transform that fails
+open is impossible, and refusing a whole read over a broken reranker
+would be an outage caused by an optimisation.
+
+Cumulative rules are held back to the terminal pass, so a `budget()`
+charges the page that is *served* rather than the one that was proposed
+and then reranked down.
+
+A collection with no transforms runs the loop it always ran.
 
 ---
 
@@ -466,5 +569,8 @@ the second language.
 - `voyd-plan --at` replays the clock against today's documents. Answering
   it against the documents as they *were* needs history this package does
   not keep.
+- A transform cannot widen a read, and that is the only promise made
+  about one. It can still be slow, wrong, or expensive, and nothing here
+  bounds how long somebody's reranker runs inside the egress path.
 
 MIT.

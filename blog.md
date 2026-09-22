@@ -7,10 +7,13 @@
 There is a particular kind of bug that does not announce itself, does not
 raise, does not page anyone, and makes the graph go up.
 
-I want to tell you about four of them. Three are in the problem. The
-fourth is in the thing I built to catch the first three, which is the
-part of the story I did not plan and would not have believed if somebody
-had described it to me in advance.
+Three of them are in the problem I set out to solve. One is in the thing
+I built to solve it, which I did not plan and would not have believed in
+advance. And somewhere in the middle, a constraint I had filed under
+*cost* turned out to be the only reason the two best things in the
+project are possible — including one that lets you run a stranger's
+reranking code inside an authorisation boundary and still make a
+guarantee about it.
 
 ## Exhibit A: the filter you forgot returns more rows
 
@@ -187,38 +190,95 @@ query, there would be nowhere to stand to ask the question except the
 production cluster, and no way at all to ask it about a policy the
 cluster has never seen.
 
-I did not earn this. I want to be clear that I did not see it coming. I
-am reporting it because it is the most interesting thing that happened:
-**purity was not a virtue I was practising, it was a constraint the
-placement forced, and it paid a dividend I could not have designed for.**
+I did not earn this and did not see it coming. **Purity was not a virtue
+I was practising. It was a constraint the placement forced, and it paid
+a dividend I could not have designed for.**
+
+Then it paid a second time, and the second one is bigger.
+
+## The thing everybody builds outside the boundary
+
+Every retrieval stack has a step after the search: rerank, de-duplicate,
+serve from cache. It lives in application code, downstream of whatever
+governs the read, and being downstream is the whole problem — anything
+after a filter can undo it.
+
+Almost never on purpose. It merges a cached list, and the cache did not
+run a policy. It falls back to the unfiltered candidate pool because an
+empty page looked like a bug to whoever wrote it. It reorders a list it
+was handed by reference. The filter ran, correctly, and then something
+ran after it.
+
+The reflex is to review that code. The better answer is to make the
+review unnecessary, and the pure check is what makes it possible:
+
+```
+pure rules  →  your transform  →  every rule, terminally  →  the wire
+```
+
+Put the reranker *inside*. The authoritative check is cheap — single
+microseconds per document — so it can run again, last, on whatever the
+transform returned. Reordered, merged, restored from a cache, invented
+outright: all of it is checked before it leaves.
+
+> **A transform cannot widen what a read returns.** Not because it was
+> reviewed. Because the boundary is downstream of it.
+
+I wrote a test to try to break this, and I wrote it to win. A policy file
+whose transform exists for no reason other than to inject forgotten
+facts, a real `voyd-wire` subprocess, and a `pymongo` client that has
+never heard of this package:
+
+```python
+@transform("notes")
+class PutItBack:
+    name = "hostile"
+
+    def on_egress(self, docs, *, request):
+        return list(docs) + [expired_document, revoked_document]
+```
+
+The transform is not disabled, not sandboxed, not reviewed. It runs. It
+returns the documents. They do not arrive.
+
+Eighteen more of those run without a cluster: a cache merge, an
+empty-page fallback, a body swap that keeps the admitted document's
+`_id` and replaces everything else, a launder that strips the revocation
+mark before handing it back. The boundary does not care which one it is
+looking at, because it is not looking — it is asking the same pure
+question it asks every document, after everybody else has had their
+turn.
+
+The inversion in the pitch is the part I like. Security's objection to a
+programmable proxy is *"unvetted code modifying data in flight."* Here
+that is the feature: your unvetted code is the safest place it has ever
+run, because for the first time it is inside the thing that would have
+caught it.
 
 ## Three questions it refuses to answer
 
 The temptation with a tool like this is to produce a number for
-everything, because a number looks like coverage.
-
-It declines, by name, in three places.
+everything, because a number looks like coverage. It declines in three
+places, by name, in the output.
 
 `budget()` and `distinct()` are *set-relative* — they refuse a document
 because of the **other** documents on the page, so the same document is
 admitted alone and refused in company. A sample is not a page. Evaluating
-them one document at a time would not be a weaker answer, it would be an
-answer to a different question, printed with total confidence. So they
-are set aside and named.
+them one document at a time would not be a weaker answer; it would be a
+confident answer to a different question.
 
 `clearance()` and `restricted_to()` decide by who is asking, so they are
-planned only against a caller you supply. Planning them against nobody
-would report every restricted document as refused under both policies and
-print a serene zero.
+planned only against callers you name — which is how you get *"this
+change exposes 412 documents to tier1-support, and nothing to anyone
+else"* instead of a single number nobody can act on.
 
 And the tenant is enforced by the handle rather than by a rule, so the
-plan says the boundary *moved* — it does not claim to know which rows
-crossed it.
+plan reports that the boundary *moved* and does not claim to know which
+rows crossed it.
 
 A tool that quietly folded any of those into a total would be this
-project's own complaint, one level up: a guarantee that looks complete
-with a hole in it that nothing announces. I have spent too long being
-annoyed about that to ship it.
+project's own complaint one level up: something that looks complete with
+a hole in it that nothing announces.
 
 ## Exhibit D: in which the genre comes for the tool
 
@@ -284,12 +344,11 @@ Reverting `set +e` fails two tests, which is the only evidence that a
 regression test is one.
 
 Then I opened the pull request again and watched a real runner print the
-report, post the comment, patch the same comment in place across three
+report, post the comment, patch that same comment in place across three
 pushes, and fail the job with a sentence rather than a number — because
-on a structural finding the count is legitimately zero, and
-`0 documents become reachable` as the reason a build failed reads as a
-bug in the tool, and a red build that looks like a bug in the tool is,
-once again, an argument for turning the tool off.
+on a structural finding the count is legitimately zero, and *"0 documents
+become reachable"* as the reason a build failed reads as a bug in the
+tool. Which is, once again, an argument for turning the tool off.
 
 Everything in this domain wants to become invisible. You have to keep
 taking its hat off.
@@ -303,8 +362,9 @@ taking its hat off.
 | a replica's copy is current | unbounded replication lag |
 | the index embeds with the declared model | nothing ever asks it |
 | the policy file says what we enforce | nobody diffed what it admits |
+| the reranker only reorders | nothing checks what it returns |
 
-Five subsystems, one defect: **a statement of intent doing the work of a
+Six subsystems, one defect: **a statement of intent doing the work of a
 guarantee.** The gap between what you declared and what is verified is
 where all of these live, and it does not announce itself, for a reason
 that is almost funny — declaring something is precisely what makes you
