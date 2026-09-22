@@ -7,7 +7,7 @@
 This shows the other half of the protocol, and the half nobody else can
 express at all: rules that are about the **page**, not the document.
 
-`AHA.md` step 5 names two of them -- a token `Budget` and `Distinct` -- and
+This package ships two of them -- a token `Budget` and `Distinct` -- and
 calls them a category rather than two awkward examples. Two members is thin
 evidence for a category. So here are three more, written the way a stranger
 writes them: against the public protocol, in this file, with nothing added to

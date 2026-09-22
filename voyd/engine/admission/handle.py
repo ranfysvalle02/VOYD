@@ -22,7 +22,6 @@ Read them in this order -- each depends on the one above it:
     marks.py        imposing a reason, and lifting one where it inverts
     lineage.py      making the refusal travel to what was made of it
     sealing.py      the erasure refusal cannot perform
-    attestation.py  what the model was allowed to see
 """
 
 from __future__ import annotations

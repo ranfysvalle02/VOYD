@@ -6,8 +6,8 @@
 Cross-tenant leakage in retrieval is not an exotic failure. It is the ordinary
 one, and the reason is specific: `find({"tenant_id": t})` is easy to remember,
 and **a `$vectorSearch` hit never passes through that query at all.** One read
-path prunes correctly and another does not, which is the exact shape
-[`AHA.md`](../docs/AHA.md) step 4 calls a silent hole. Nothing errors. A
+path prunes correctly and another does not, which is a silent hole:
+the filter narrows and nothing says it did. Nothing errors. A
 well-scored, well-formed row from somebody else's company is ranked into a
 prompt, and the answer is returned to a customer who was never entitled to it.
 
@@ -40,7 +40,7 @@ Four things, in order, and the fourth is the one nobody expects.
 
 No vector index is built here. The per-document check is the same code on
 every path, so these isolate the part being shown without a 100-second
-index build -- the same choice `bench/pilot.py` makes, for the same reason.
+index build, which is the cluster's clock rather than this example's.
 """
 
 from __future__ import annotations

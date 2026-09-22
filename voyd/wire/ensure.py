@@ -8,7 +8,7 @@ separately, refuses to agree until it is there.
 
 That symmetry is a checkable claim rather than a design note:
 **`--ensure` then `--verify` is clean**, and
-`tests/test_the_proxy_provisions_what_it_enforces.py` runs exactly that
+The examples run exactly that
 sequence against a real `mongod`. If the two ever drift, one of them is
 wrong and the pair says so.
 

@@ -80,7 +80,6 @@ dependency order -- each layer may only reach the ones above it:
     marks.py        imposing a reason, and lifting one where it inverts.
     lineage.py      making a refusal travel to what was made of it.
     sealing.py      the erasure refusal cannot perform.
-    attestation.py  what the model was allowed to see.
     handle.py       the one object a caller holds, composed of the above.
 
 Import from the package, not from the modules: ``from voyd.engine.admission

@@ -249,7 +249,7 @@ class AdmissionCore:
         rows while engine.search refused the same query -- one declaration,
         two primitives, two answers.* That was fixed for the query. The same
         gap survived on the way out, where a rule that exists only as a query
-        clause is what `AHA.md` step 4 calls a silent hole.
+        clause is a silent hole: the filter narrows and nothing says it did.
 
         Unknown scope admits, deliberately: the guard against an unbound read
         lives at the entry points (``reachable`` raises, the rest bind from
@@ -312,10 +312,10 @@ class AdmissionCore:
 
         So this is the mechanism and ``including_refused()`` is the mechanism
         plus a gate and a counter. It is private on purpose:
-        ``tests/test_break_glass_is_named.py`` fails the build if any module
-        outside ``core.py`` reaches for the *public* name, the same shape as
-        ``test_no_module_reaches_past_the_handle.py`` for the search
-        primitive.
+        ``tests/test_the_codebase_tells_the_truth_about_itself.py`` fails
+        the build if anything outside this package reaches for it at all:
+        a second caller would be a second door onto every refusal here,
+        added without the counter that makes the first one auditable.
         """
         clone = self._clone()
         clone._include = True
@@ -643,10 +643,10 @@ class AdmissionCore:
         ``_redact`` has to return one value and has to say two things -- the
         document, and how much of it is gone -- so it stamps a private key
         and this takes it off again. One strip point rather than one per read
-        path, because a sentinel that escapes to a caller is a worse bug than
-        the one it was added to fix, and
-        ``tests/test_a_subject_is_not_always_a_document.py`` fails the build
-        if it ever does.
+        path, because a sentinel that escapes to a caller is a worse bug
+        than the one it was added to fix, and
+        ``tests/test_the_codebase_tells_the_truth_about_itself.py`` fails
+        the build if the key is ever known outside this module.
         """
         total = 0
         out: list[dict] = []

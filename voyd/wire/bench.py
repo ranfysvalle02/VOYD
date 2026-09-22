@@ -5,7 +5,7 @@
     voyd-bench --workers 1,4    # just these
     voyd-bench --seconds 20     # longer, less noise
 
-Every performance number in `LIMITS.md` comes from here, so it is in the
+Every performance number this project states comes from here, so it is in the
 repository rather than in a gist: a benchmark nobody else can run is an
 anecdote, and this project's whole argument is that a claim you cannot
 check is worth nothing.

@@ -37,8 +37,7 @@ The check itself is pure -- no database, no connection, no I/O -- which is
 what lets it run inside a proxy at all. The proxy opens one connection of
 its own, and only when a policy declares ``lineage_field``: making a
 refusal reach what was derived from a fact is a write the caller did not
-issue, so it does not go on the caller's session. See ``LIMITS.md``
-section 6b.
+issue, so it does not go on the caller's session.
 
 The pieces, and everything else is mechanics:
 
@@ -46,7 +45,7 @@ The pieces, and everything else is mechanics:
 collected by one TTL index. Enforced in the *read path* as well as by the
 reaper: MongoDB's TTL monitor runs about once a minute (measured: 60.0s), so
 an expired document lives on disk for a window afterwards, and serving it
-during that window is the whole bug class. See ``examples/forget.py``.
+during that window is the whole bug class.
 
 **Refusal** -- not a convention each call site remembers, because a rule you
 have to remember to apply is not enforced. ``revoke()`` makes a fact
@@ -55,7 +54,7 @@ storage event, refusal is a retrieval guarantee, and only the second can be
 immediate. Not every refusal is an erasure, and the difference is declared on
 the reason rather than decided by the verb -- one word, ``reversible``, says
 whether ``lift()`` works and whether imposing it schedules the reaper. See
-``examples/refuse.py`` and ``examples/hold.py``.
+``examples/refuse.py``.
 
 **A rule is a protocol, not a list.** ``reason`` + ``refuses(doc)`` +
 ``clause()``, and a stranger's rule is a first-class one. That is what makes
@@ -78,7 +77,7 @@ discovered later.** Refusal binds a read path, and a restored snapshot does
 not run it. That is what ``sealed()`` and ``--key-vault`` are for -- a key
 per scope, so destroying it makes every copy unreadable at once, and the
 boundary revokes the documents *first* so the key cache is not a second
-window. See ``examples/shred.py`` and ``LIMITS.md`` section 5.
+window. See ``examples/shred.py``.
 
 Every claim above is asserted by the test suite against a real MongoDB --
 no mock tier, on purpose, because these properties are only true if the

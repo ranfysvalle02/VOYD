@@ -426,7 +426,7 @@ class MarkWrites(_Composed):
             # schedule: the vector beside an erased document is a copy of
             # it in a coat, close enough that inversion research keeps
             # recovering recognisable source text from one. Pinned by
-            # ``tests/test_the_vector_dies_with_the_fact.py``, which also
+            # ``tests/test_the_codebase_tells_the_truth_about_itself.py``, which also
             # checks the wire's separate spelling of this update agrees.
             for name in self.spec.derived_fields:
                 mark_set[name] = None

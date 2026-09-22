@@ -3,7 +3,7 @@
     docker compose up -d
     uv run python examples/refuse.py      # ~5 seconds, no API key, no vendor
 
-``forget.py`` shows a deadline arriving on its own. This shows the other half,
+A deadline arrives on its own. This shows the other half,
 and the half no vector database offers at all: somebody asks you to forget a
 fact *right now* -- an erasure request, a leaked credential, a retracted
 document -- and you have to answer for when it stopped being reachable.

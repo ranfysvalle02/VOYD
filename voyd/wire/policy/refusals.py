@@ -152,8 +152,8 @@ def _refuse(req_id: int, collection: str, why: str,
     # it does not continue a stream. Getting it from the request's own
     # `responseTo` (which is 0) desynchronises the driver, and the failure
     # arrives as `ProtocolError: got response id 0` -- a boundary bug
-    # wearing the costume of a network one, which is a shape LIMITS.md §1
-    # already has an entry for.
+    # wearing the costume of a network one, which is the most expensive
+    # shape a defect here can take.
     return encode_op_msg(req_id, req_id, 0, {
         "ok": 0.0, "code": 8000, "codeName": "AtlasError",
         "errmsg": (

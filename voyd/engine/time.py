@@ -113,7 +113,7 @@ def living(at_field: str = "expire_at", *, when: datetime | None = None) -> dict
     # MongoDB `{field: null}` already matches documents where the field is
     # *missing* as well as those where it is null -- so the first arm
     # covers both and removing the second changes nothing. Verified by
-    # removing it: `test_a_rules_two_halves_agree.py` stayed green.
+    # removing it: the suite stayed green.
     #
     # It stays because the asymmetry runs the other way and is the kind of
     # thing that gets "simplified" wrongly. `{$exists: false}` does *not*

@@ -54,7 +54,8 @@ def revoke_instead_of_delete(raw: bytes, req_id: int, resp_to: int,
     The update emitted here is the same pipeline ``Admission.revoke()``
     writes -- the literal mark, the deadline moved *earlier only*, and the
     derived encodings nulled. The two have to leave the same row, and
-    `test_both_doors_leave_the_same_row` is what holds them to it: two
+    `tests/test_the_codebase_tells_the_truth_about_itself.py` is what
+    holds them to it: two
     spellings of "forgotten" that produced different documents would be the
     drift this whole package is about.
 

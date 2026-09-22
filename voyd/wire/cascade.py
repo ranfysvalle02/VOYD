@@ -132,8 +132,8 @@ class Cascade:
         The caller-aware rules are *not* rebuilt here, and cannot be:
         they decide by who is asking, per document, and no query expresses
         them. So a cascade can reach a descendant the caller could not
-        have read -- in the direction of refusing more. See LIMITS.md
-        section 6b.
+        have read -- in the direction of refusing more, which is the
+        direction an erasure should err in.
         """
         field = guard.spec.lineage_field
         if self._client is None or not (field and ids and pipeline):

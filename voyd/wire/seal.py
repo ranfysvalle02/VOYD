@@ -10,7 +10,8 @@ This file gives one of them up, deliberately and in exactly one place.
 
 **Why it has to.** Refusal binds *this application's read path*. A replica
 does not run it. Neither does a snapshot, a backup restored next year, or a
-DBA with a shell. That is the honest gap, it is stated in `LIMITS.md` §2, and
+DBA with a shell. That is the honest gap, it is stated here rather than
+discovered later, and
 no amount of refusing closes it -- the plaintext is on disk and every copy of
 the disk has it. Destroying a key closes it, for every copy at once, without
 visiting any of them. But a key is a thing you must *hold*, and a boundary
@@ -41,7 +42,7 @@ byte-identical to what `schema_map` produces: same `Random` algorithm, same
 per-scope key, same vault.
 
 That last point is the one worth testing rather than asserting, and
-`tests/test_the_boundary_seals_and_shreds.py` does: a document sealed here
+`tests/test_the_erasure_refusal_cannot_perform.py` does: a document sealed here
 and one sealed by a driver's own `schema_map` are the same document
 afterwards, and either can be read by the other's reader. Two spellings
 that produced different rows would be exactly the drift this package is
@@ -570,7 +571,7 @@ class Vault:
             # `$exists` rather than `$type: "binData"`: a plaintext value
             # sitting in a field the policy declares sealed is a row
             # written while sealing was off, and an erasure for that scope
-            # should still reach it. See LIMITS.md §5.
+            # should still reach it.
             result = await db[collection].update_many(
                 {scope_field: {"$in": scopes},
                  "$or": [{field: {"$exists": True}} for field in _fields]},
@@ -619,7 +620,8 @@ def announce(spec: Mapping) -> list[str]:
     lines.append(
         "voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database "
         "connection of its own and is a custody holder; sealed reads "
-        "decrypt before they refuse. See LIMITS.md \u00a75")
+        "decrypt before they refuse, so a document a deadline was "
+        "going to refuse has still been decrypted in this process")
     if not view["durable"]:
         lines.append(
             "voyd-wire: WARNING: custody is ephemeral -- the master key is "

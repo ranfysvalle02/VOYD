@@ -240,7 +240,7 @@ class Aws(Custody):
     the code path is shared with the local rung -- but "constructs the
     right document" and "works against AWS" are different claims and only
     the first is proven here. The on-demand credential path in particular
-    may need a package this project does not declare. See ``docs/STATE.md``.
+    may need a package this project does not declare.
     """
 
     key: str = ""

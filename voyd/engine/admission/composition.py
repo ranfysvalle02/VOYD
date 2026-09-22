@@ -11,7 +11,8 @@ The protocols below are that rule, written down where a tool can read it.
 Each one is the *exact* surface a mixin touches, so widening a mixin's reach
 means editing this file, which means somebody types out that the dependency
 is intended -- the same mechanism
-``tests/test_the_public_surface_is_deliberate.py`` uses on ``__all__``, and
+``tests/test_the_codebase_tells_the_truth_about_itself.py`` uses on
+``__all__``, and
 the same one ``including_refused()`` uses on break-glass. The safe thing is
 the default; the other thing has to be said out loud.
 

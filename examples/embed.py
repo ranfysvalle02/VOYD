@@ -29,7 +29,7 @@ which form works instead.
 **This needs no Atlas and no embedding model**, which is the point worth
 noticing: the decision is a `$vectorSearch` body and a dict. Creating the
 `autoEmbed` index needs a real cluster and `voyd-wire --ensure` -- see
-`LIMITS.md` section 5 -- but the *refusal* is pure, and pure is what let it
+an operator step -- but the *refusal* is pure, and pure is what let it
 move to a wire at all.
 """
 

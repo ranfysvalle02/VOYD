@@ -30,7 +30,7 @@ What this found is not what prompted it. A proposal argued for selling a
 detector for documents the index ranks and the collection does not have.
 That bucket is structurally empty -- `$vectorSearch` materialises hits
 from the collection, so a deleted row drops out in a round trip -- and the
-proposal was deleted. `LIMITS.md` section 6 keeps the numbers.
+proposal was deleted. The numbers this prints are the record.
 """
 
 from __future__ import annotations

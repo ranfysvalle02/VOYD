@@ -9,8 +9,9 @@ anyway, and the next connection finds the new primary.
 
 It is deliberately not a driver. It picks one node and forwards bytes; it
 does not pool, load-balance, follow read preference, or retry a write the
-client already saw fail. `LIMITS.md` section 8 says why ranking on a
-replica is not this module's job either.
+client already saw fail. Ranking on a replica is not this module's job
+either: replication lag is unbounded, so a page ranked out of stale rows
+is a different guarantee wearing the same name.
 
 `upstream_ready` is here rather than with the listener because it answers
 the same question from outside: readiness is about the hop past this

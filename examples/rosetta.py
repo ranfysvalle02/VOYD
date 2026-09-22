@@ -8,7 +8,7 @@ convention: re-added to every read path, forgettable in any of them, and only
 ever able to say "gone / not gone". VOYD's actual object is the *reason*, and a
 reason is a first-class thing -- `reason` + `refuses(doc)` + `clause()`, the
 same public contract a stranger uses in
-`tests/test_a_third_party_rule_is_a_first_class_reason.py`.
+`tests/test_the_policy_file_is_the_configuration.py`.
 
 So here are five mechanisms a team would otherwise scatter across their read
 paths as five different filter conventions, written instead as five Rules on

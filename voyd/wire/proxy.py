@@ -8,8 +8,8 @@
     mongosh mongodb://localhost:27099/demo
 
 This file moves bytes and decides *when* they move. It decides nothing
-about what a message is allowed to mean -- that is `policy.py`, all of it,
-so "can this be bypassed?" is a question about one file. Framing and BSON
+about what a message is allowed to mean -- that is the `policy` package,
+all of it, so "can this be bypassed?" is a question about one import list. Framing and BSON
 are `codec.py`. What is left here is the shell: accept a connection, open
 one upstream, pump both directions, fork workers, drain on `SIGTERM`.
 
@@ -54,11 +54,12 @@ forwarded intact.
 
 **One upstream per client, and one request loop.** A read is served by the
 deployment the client was pointed at. There is no second path that routes
-some reads elsewhere, and `LIMITS.md` section 8 says why ranking on a
-replica is not one.
+some reads elsewhere: a replica's copy lags by an unbounded amount, and
+ranking a page out of rows that may be a minute stale is a different
+guarantee wearing the same name.
 
 **Concurrency is this file's problem and nobody else's.** Every function
-in `policy.py` that rewrites bytes is `bytes -> bytes` and touches no
+in `policy` that rewrites bytes is `bytes -> bytes` and touches no
 socket, because the check underneath it is pure. That is what made moving
 from two OS threads per connection to one coroutine pair a change to the
 shell and nothing else, and it is why the ceiling is upstream sockets

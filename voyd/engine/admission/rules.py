@@ -670,7 +670,6 @@ class Distinct:
     page. ``$vectorSearch`` decides each candidate before the page exists,
     and ``enforce(subject, object, action)`` has no argument for the rest of
     the set -- so the same document is admitted alone and refused in company.
-    See ``docs/policy-engines.md``.
     """
 
     on: Any = None
@@ -783,9 +782,9 @@ class Budget:
     pretending MongoDB's natural order is a stable policy.
 
     **No query half, and there never can be one.** ``clause()`` is ``None``: a
-    running total is not something a per-document query can express. Per
-    ``docs/AHA.md`` that is the safe asymmetry -- per-document-only is slower, not a
-    hole; a clause-only rule would be the hole -- and ``Unrecoverable`` is the
+    running total is not something a per-document query can express. That is
+    the safe asymmetry -- per-document-only is slower, not a hole; a
+    clause-only rule would be the hole -- and ``Unrecoverable`` is the
     existing precedent for a rule that lives entirely on egress.
 
     Bypassable, because the audit handle is not assembling a prompt and has no

@@ -27,12 +27,6 @@ collections, fields and filters, never about namespaces or voids.
 from __future__ import annotations
 
 from .authority import AuthorityRequired, Anyone, Grants, NotAuthorised
-# Only ``report_assumptions`` -- it is called in ``describe()`` below. ``WORLD``
-# and ``Assumption`` are deliberately not re-exported here: they are the
-# vocabulary of the assumptions registry, and per
-# ``tests/test_the_public_surface_is_deliberate.py`` a name that is not a
-# promise should be imported from the module that owns it
-# (``.assumptions``), which is what every caller already does.
 from .capabilities import detect
 from .errors import (
     BlastRadius,
@@ -74,7 +68,8 @@ from .trait import Trait
 # internals in ``.capabilities``, ``.search`` and ``.jobs`` -- and is
 # reachable without being guaranteed.
 #
-# ``tests/test_the_public_surface_is_deliberate.py`` pins this list, so
+# ``tests/test_the_codebase_tells_the_truth_about_itself.py`` pins this
+# list, so
 # growing it is a line in a diff somebody has to justify rather than a
 # thing that happens.
 __all__ = [

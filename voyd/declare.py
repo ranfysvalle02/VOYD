@@ -97,9 +97,9 @@ def holdable(reason: str = "quarantined") -> _Field:
 def tenant() -> _Field:
     """This field is the tenant id, enforced on *both* halves.
 
-    Required in every query, and checked per document on the way out, which
-    are two different mistakes and both of them leak. See
-    ``tests/test_the_tenant_is_enforced_on_both_halves.py``.
+    Required in a reduction, and checked per document on the way out,
+    which are two different mistakes and both of them leak. See
+    ``tests/test_a_real_driver_through_a_real_boundary.py``.
     """
     return _Field("tenant")
 
@@ -294,9 +294,11 @@ def sealed() -> _Field:
     this file. A driver's own ``schema_map`` gets you the same ciphertext
     one process at a time; this gets it once.
 
-    It is also what costs the boundary its purity: holding keys makes it a
-    custody holder, and a sealed read decrypts before it refuses. See
-    ``LIMITS.md`` §5.
+    It is also what costs the boundary its purity: holding keys makes it
+    a custody holder, and a sealed read decrypts before it refuses -- so a
+    document a deadline was going to refuse has still been decrypted by
+    the time the deadline sees it. Wasted work rather than a leak, since
+    it never leaves the process, but worth naming.
 
     An ``Unrecoverable`` rule is attached alongside, so a sealed field that
     reaches a read path which never decrypted it is refused by name rather
@@ -455,8 +457,8 @@ def guard(collection: str, *, lineage_field: str | None = None,
         #
         # What is *not* closed: sealing `text` here while an Atlas index
         # declared somewhere else auto-embeds `text`. No policy file can
-        # see that, and the wire boundary does not create indexes. See
-        # LIMITS.md section 5.
+        # see that -- the declaration lives in the cluster, not in this
+        # file -- and the wire boundary does not create indexes.
 
         # Two declarations naming the same thing have to agree about it.
         for field, rule in ((r.field, r) for r in rules

@@ -11,7 +11,8 @@ question worth asking that way, `connectionStatus`, cached because a
 MongoDB connection authenticates once and stays that identity.
 `claims_from` turns the server's answer into the claims a rule reads.
 
-Nothing here decides anything. What the claims *mean* is `policy.py`, and
+Nothing here decides anything. What the claims *mean* is the `policy`
+package, and
 whether a document is admitted is `voyd.engine.admission` -- this module
 only establishes whose prompt it would be reaching.
 """

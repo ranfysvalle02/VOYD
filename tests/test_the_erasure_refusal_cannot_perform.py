@@ -363,3 +363,266 @@ async def test_the_bytes_on_disk_are_noise_once_the_key_is_destroyed(
     # And the ciphertext is still sitting there, which is the point: no
     # backup had to be visited for it to stop being readable.
     assert direct[database].notes.count_documents({"tenant_id": "alice"}) == 1
+
+
+# ---- the vault on the wire ---------------------------------------------
+#
+# `keyring.py` mints and destroys keys. `seal.py` is the half that decides
+# *what* gets encrypted on the way in and decrypted on the way out, and it
+# is the file that spends this boundary's purity -- so what it costs is
+# asserted here in the same breath as what it buys.
+
+def vault(sealed=None, database="app"):
+    from voyd.engine.custody import Ephemeral
+    from voyd.wire.seal import Vault
+
+    return Vault("mongodb://localhost:27017", database=database,
+                 sealed=sealed if sealed is not None else
+                 {"notes": (("text",), "tenant_id")},
+                 custody=Ephemeral())
+
+
+def test_what_is_sealed_comes_from_the_policy_and_not_a_second_list():
+    # One declaration. A second place to keep in step is a second place to
+    # get out of step, and the failure would be a field the boundary
+    # decrypts on the way out and never encrypted on the way in.
+    from voyd.wire.seal import sealed_from
+
+    options = {
+        "notes": {"sealed": ("text",), "scope_field": "tenant_id"},
+        "archive": {"sealed": (), "scope_field": "tenant_id"},
+        "orphan": {"sealed": ("text",), "scope_field": None},
+    }
+    assert sealed_from(options) == {"notes": (("text",), "tenant_id")}
+
+
+def test_a_collection_nobody_sealed_costs_the_write_path_nothing():
+    v = vault()
+    assert v.seals("notes") is True
+    assert v.seals("archive") is False
+    assert v.seals(None) is False
+    # Three dictionary reads rather than a parse, and only for the verbs
+    # that carry documents.
+    assert v.targets({"insert": "notes"}) is True
+    assert v.targets({"update": "notes"}) is True
+    assert v.targets({"findAndModify": "notes"}) is True
+    assert v.targets({"insert": "archive"}) is False
+    assert v.targets({"find": "notes"}) is False
+    assert v.targets({"delete": "notes"}) is False
+
+
+def test_the_scope_of_an_update_is_read_off_its_own_filter():
+    # An update's `$set` names what changes and not whose it is, so the
+    # tenant comes from the selector -- which a guarded collection already
+    # has to carry, for a different reason that turns out to be the same.
+    from voyd.wire.seal import Vault
+
+    scope = Vault._scope_of_query
+    assert scope({"tenant_id": "acme"}, "tenant_id") == "acme"
+    assert scope({"tenant_id": {"$eq": "acme"}}, "tenant_id") == "acme"
+    # More than one scope has no single key, so there is nothing to seal
+    # under and the write is not silently encrypted to the wrong tenant.
+    assert scope({"tenant_id": {"$in": ["a", "b"]}}, "tenant_id") is None
+    assert scope({"tenant_id": {"$ne": "acme"}}, "tenant_id") is None
+    assert scope({}, "tenant_id") is None
+    assert scope("not a query", "tenant_id") is None
+
+
+def test_an_erasure_needs_no_new_verb_and_is_noticed_anyway():
+    # `db["__keys"].delete_one({"keyAltNames": "alice"})` is the right
+    # shape -- nobody should learn a protocol extension to honour an
+    # erasure request -- and it is exactly why the boundary has to notice
+    # one, so the revocation can be sequenced ahead of it.
+    v = vault()
+    body = {"delete": "__keys", "$db": "app"}
+    assert v.erasing(body, [{"q": {"keyAltNames": "alice"}}], "app") == ["alice"]
+    assert v.erasing(body, [{"q": {"keyAltNames": {"$in": ["a", "b"]}}}],
+                     "app") == ["a", "b"]
+    # The clauses live in the kind-1 section, and reading only the body
+    # found nothing: the key died and the revocation that had to come
+    # first was skipped.
+    assert v.erasing({**body, "deletes": [{"q": {"keyAltNames": "alice"}}]},
+                     [], "app") == ["alice"]
+    # Another database, another collection, or a filter this cannot read.
+    assert v.erasing(body, [{"q": {"keyAltNames": "alice"}}], "other") == []
+    assert v.erasing({"delete": "notes"}, [{"q": {"keyAltNames": "a"}}],
+                     "app") == []
+    assert v.erasing(body, [{"q": {"expire_at": {"$lt": 1}}}], "app") == []
+
+
+def test_the_price_of_this_flag_is_printed_rather_than_discovered():
+    # The README leads with "the proxy holds no database connection of its
+    # own". A deployment that switched that off is owed the retraction in
+    # the first screen of output, not in a footnote.
+    from voyd.wire.seal import announce
+
+    from voyd.engine.custody import Ephemeral
+
+    lines = "\n".join(announce({
+        "uri": "mongodb://localhost:27017", "database": "app",
+        "sealed": {"notes": (("text",), "tenant_id")},
+        "custody": Ephemeral()}))
+    assert "HOLDS KEYS" in lines
+    assert "custody holder" in lines
+    assert "decrypt" in lines and "refuse" in lines
+    # And the weakest rung says so where somebody will read it.
+    assert "ephemeral" in lines.lower()
+
+
+@crypto
+@pytest.mark.needs_mongo
+async def test_a_write_is_sealed_on_the_way_in_and_read_back_as_text(
+        direct, database):
+    """The boundary encrypts below the *driver*, not below the application.
+
+    A driver's own `schema_map` gets the same ciphertext one process at a
+    time. This gets it once, so no writer in any language can forget --
+    not the migration script, not the shell, not the service written next
+    year by somebody who has not read the policy file.
+    """
+    from voyd.engine.custody import Ephemeral
+    from voyd.wire.seal import Vault
+
+    host, port = direct.address
+    v = Vault(f"mongodb://{host}:{port}/?directConnection=true",
+              database=database, sealed={"notes": (("text",), "tenant_id")},
+              custody=Ephemeral())
+    await v.open()
+    try:
+        secret = "the fault code is P0301"
+        body, ident, docs = await v.seal_command(
+            {"insert": "notes", "$db": database}, "documents",
+            [{"tenant_id": "alice", "text": secret}])
+        assert v.sealed_writes == 1
+
+        # What a client sent as a string is ciphertext before it is stored.
+        stored = docs[0]["text"]
+        assert stored.subtype == 6, "the write was forwarded in the clear"
+        assert secret.encode() not in bytes(stored)
+
+        direct[database].notes.insert_one(docs[0])
+        on_disk = direct[database].notes.find_one({"tenant_id": "alice"})
+        assert secret.encode() not in bytes(on_disk["text"])
+
+        # And on the way out it is a string again, for a client that did
+        # nothing to deserve it.
+        kept, tally = await v.unseal([on_disk], "notes")
+        assert [d["text"] for d in kept] == [secret]
+        assert not tally
+        assert v.unsealed_reads == 1
+    finally:
+        await v.aclose()
+
+
+@crypto
+@pytest.mark.needs_mongo
+async def test_a_crypto_erased_row_is_one_refusal_and_not_a_failed_page(
+        direct, database):
+    """Automatic decryption raises for the *batch* when one key is gone.
+
+    A single erased row would turn a page of fifty into a 500 -- "fewer
+    rows, or an error", which is the shape this codebase refuses
+    everywhere else. A crypto-erased document is not an incident; it is
+    somebody's erasure request, honoured.
+
+    The reader here is a *fresh* vault, and that is not a convenience.
+    The process that did the shredding holds the key in its own cache and
+    keeps decrypting for about a minute afterwards -- which is precisely
+    why `revoke_first` exists and why the boundary revokes the documents
+    before it forwards the key's destruction. A test that unsealed
+    through the shredding vault would be asserting the opposite of what
+    this package says about its own window.
+    """
+    from voyd.engine.custody import Ephemeral
+    from voyd.wire.seal import Vault
+
+    host, port = direct.address
+    uri = f"mongodb://{host}:{port}/?directConnection=true"
+    custody = Ephemeral()          # one master key, two vaults over its life
+    sealed = {"notes": (("text",), "tenant_id")}
+
+    writer = Vault(uri, database=database, sealed=sealed, custody=custody)
+    await writer.open()
+    try:
+        rows = []
+        for who, text in (("alice", "hers"), ("bob", "his")):
+            _, _, docs = await writer.seal_command(
+                {"insert": "notes", "$db": database}, "documents",
+                [{"tenant_id": who, "text": text}])
+            rows.append(docs[0])
+        direct[database].notes.insert_many(rows)
+        await writer.shred("alice")
+    finally:
+        await writer.aclose()
+
+    # What a restored backup is: a reader that never had the key.
+    reader = Vault(uri, database=database, sealed=sealed, custody=custody)
+    await reader.open()
+    try:
+        page = list(direct[database].notes.find({}).sort("tenant_id"))
+        assert len(page) == 2, "the rows are still on disk, which is the point"
+        kept, tally = await reader.unseal(page, "notes")
+
+        # Bob's row is served. Alice's is refused, by name, and counted --
+        # and the page did not become an error.
+        assert [d["text"] for d in kept] == ["his"]
+        assert sum(tally.values()) == 1, tally
+        assert set(tally) <= {"unrecoverable", "key_unavailable"}
+    finally:
+        await reader.aclose()
+
+
+@crypto
+@pytest.mark.needs_mongo
+async def test_either_reader_can_read_what_the_other_sealed(direct, database):
+    """The ciphertext is byte-compatible with a driver's own `schema_map`.
+
+    Explicit encryption here, automatic encryption there -- same `Random`
+    algorithm, same per-scope key, same vault. Two spellings that produced
+    rows only their own writer could read would be exactly the drift this
+    package is about, and it is the one claim in `seal.py` worth testing
+    rather than asserting.
+    """
+    from pymongo import AsyncMongoClient
+    from pymongo.asynchronous.encryption import AsyncClientEncryption
+
+    from voyd.engine.custody import Ephemeral
+    from voyd.engine.keyring import RANDOM
+    from voyd.wire.seal import Vault
+
+    host, port = direct.address
+    uri = f"mongodb://{host}:{port}/?directConnection=true"
+    custody = Ephemeral()
+    v = Vault(uri, database=database,
+              sealed={"notes": (("text",), "tenant_id")}, custody=custody)
+    await v.open()
+    client = AsyncMongoClient(uri)
+    try:
+        _, _, docs = await v.seal_command(
+            {"insert": "notes", "$db": database}, "documents",
+            [{"tenant_id": "alice", "text": "written by the boundary"}])
+        by_boundary = docs[0]["text"]
+
+        # A plain driver, pointed at the same vault with the same custody,
+        # reading what the boundary wrote.
+        outside = AsyncClientEncryption(
+            custody.providers(), f"{database}.__keys", client,
+            client.codec_options)
+        try:
+            assert await outside.decrypt(by_boundary) == \
+                "written by the boundary"
+
+            # And the other direction: the boundary reads what an ordinary
+            # driver sealed under the same key.
+            key_id = await outside.get_key_by_alt_name("alice")
+            by_driver = await outside.encrypt(
+                "written by a driver", RANDOM, key_id=key_id["_id"])
+            kept, tally = await v.unseal(
+                [{"tenant_id": "alice", "text": by_driver}], "notes")
+            assert [d["text"] for d in kept] == ["written by a driver"]
+            assert not tally
+        finally:
+            await outside.close()
+    finally:
+        await client.close()
+        await v.aclose()

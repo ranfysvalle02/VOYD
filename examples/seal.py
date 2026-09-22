@@ -33,7 +33,7 @@ complaining about. So the boundary revokes the scope's documents *first*,
 which is immediate and has no window, and destroys the key *second*, which
 reaches every copy that exists anywhere. Unreachable first, erased second.
 The reverse order is the bug, and the reverse order is what this shipped
-with until somebody pointed a client at it. See LIMITS.md §5.
+with until somebody pointed a client at it.
 
 This file asserts rather than prints-and-hopes. An example that cannot fail
 is a screenshot.

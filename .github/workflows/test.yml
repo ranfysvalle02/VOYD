@@ -1,12 +1,16 @@
 name: test
 
 # Small on purpose. The suite is the foundation the rewrite stands on, not a
-# census. Four of its five files need no database at all -- the per-document
-# check, the policy loader and the wire codec are pure, which is what lets
-# the same check run inside a proxy in the first place. The fifth drives a
-# real `mongod` through a real proxy with a real driver, because its claims
-# are about queries and bytes and a mock would only prove the mock was
-# filtered.
+# census, and it is split by what a test *needs* rather than by how many
+# there are -- a number in a comment is wrong one commit after somebody
+# writes it, which this repository has now been bitten by twice.
+#
+# Most of it needs no database. The per-document check, every decision in
+# the policy package, the wire codec and the custody rungs are pure, which
+# is what lets the same check run inside a proxy in the first place. What
+# needs a real `mongod` says so with `needs_mongo` and gets one, because
+# those claims are about queries and bytes and a mock would only prove the
+# mock was filtered.
 
 on:
   push:

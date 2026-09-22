@@ -1,7 +1,8 @@
 """The command line: what an operator types, and what it does before serving.
 
 Separated from the transport because the two have different readers. A
-person debugging a refusal reads `policy.py`; a person deploying this reads
+person debugging a refusal reads the `policy` package; a person deploying
+this reads
 here -- what the flags are, what `--ensure` builds, where the key vault
 comes from, and what the boundary refuses to start without.
 
@@ -254,8 +255,7 @@ def main(argv: list[str] | None = None) -> int:
                          "erasure refusal cannot perform -- destroying a "
                          "key makes every copy of that tenant's ciphertext "
                          "unreadable, in every replica, snapshot and "
-                         "backup, without visiting any of them. See "
-                         "LIMITS.md \u00a75")
+                         "backup, without visiting any of them")
     ap.add_argument("--kms", metavar="SPEC", default="local",
                     help="who holds the master key: `local` (ephemeral, "
                          "demo-grade, gone on restart), "

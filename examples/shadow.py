@@ -164,7 +164,7 @@ async def main() -> None:
         print("  documents deleted:                              0\n")
         print("  The number above is the whole result. If it is zero after")
         print("  two weeks on your own data, you do not have this problem,")
-        print("  and LIMITS.md says so before you start, on purpose.\n")
+        print("  and this example says so before you start, on purpose.\n")
     finally:
         await client.drop_database(name)
         await client.close()
