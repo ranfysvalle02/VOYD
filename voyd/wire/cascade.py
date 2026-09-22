@@ -202,6 +202,7 @@ class Cascade:
         at = guard.spec.at_field
         query: dict = {"_id": {"$in": parents}}
         tenant = guard.spec.tenant
+        handle = guard.handle
         if tenant:
             scope = document.get(tenant)
             if scope is None:
@@ -211,10 +212,18 @@ class Cascade:
                 # the insert succeed into a hole.
                 return [], [], [f"<no {tenant} on the document>"]
             query[tenant] = scope
+            # Bound before the check, not only in the query above. The
+            # handle refuses to judge a scoped collection with no tenant
+            # bound -- correctly, because a batch of search hits never
+            # went through a query and that is the only place the tenant
+            # can be checked -- so leaving it unbound here does not read
+            # the parents unscoped, it raises, on the insert path, and
+            # takes the client's connection with it.
+            handle = handle.for_tenant(scope)
         found = [d async for d in
                  self._client[database][guard.collection].find(query)]
         by_id = {str(d["_id"]): d for d in found}
-        kept = {str(d["_id"]) for d in guard.handle.reachable(found)}
+        kept = {str(d["_id"]) for d in handle.reachable(found)}
         broken = sorted(set(map(str, parents)) - kept)
         closure = sorted({*parents, *(a for d in found
                                       for a in (d.get(field) or []))}, key=str)
