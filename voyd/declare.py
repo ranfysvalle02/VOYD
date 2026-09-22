@@ -184,8 +184,14 @@ def clearance(*, order: tuple[str, ...] | list[str],
     **It fails closed in four directions**, and each one is a default
     somebody would otherwise get wrong on a Friday:
 
-    - a caller with no matching role is cleared for the lowest level, not
-      the highest;
+    - a caller with no matching role is cleared for **nothing**, not for
+      the lowest rung -- so they are refused even a ``public`` document.
+      This sentence used to say "the lowest level", which is the weaker
+      of the two behaviours and is not the one ``Clearance._held``
+      implements: an unmapped role is an unanswered question, and the
+      answer to an unanswered question here is no. A reader who believed
+      the old wording would size a role table expecting public documents
+      to flow to everyone, and find out otherwise from a support ticket;
     - a document labelled with something not in ``order`` is refused --
       an unrecognised classification is not a low one;
     - a document with no label at all is refused unless ``default`` is

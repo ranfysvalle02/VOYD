@@ -630,7 +630,8 @@ def test_every_flag_the_action_passes_is_one_voyd_plan_has():
     # Only the ones handed to `voyd-plan`; the file also names pip's and
     # git's flags, which are not this parser's business.
     passed &= {"--current", "--proposed", "--target", "--database",
-               "--sample", "--all", "--at", "--as", "--json", "--collection"}
+               "--sample", "--all", "--at", "--as", "--as-each", "--json",
+               "--collection", "--report", "--attest", "--sign", "--verify"}
     assert passed, "the action passes no voyd-plan flags; this test stopped checking"
     assert passed <= known, f"action.yml passes flags voyd-plan does not have: {passed - known}"
 

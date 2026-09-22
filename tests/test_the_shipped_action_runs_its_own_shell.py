@@ -173,6 +173,19 @@ def test_a_change_that_opens_the_boundary_survives_long_enough_to_say_so(
     assert "report" in runner.outputs and "json" in runner.outputs
     assert pathlib.Path(runner.outputs["report"]).exists()
     assert "widens the boundary" in runner.summary.read_text()
+    # An attestation is written whether or not one was asked for. A
+    # pipeline that discovers at audit time that it was not producing
+    # evidence costs more than a file in $RUNNER_TEMP.
+    import json as _json
+    from voyd.engine import attest
+    envelope = _json.loads(
+        pathlib.Path(runner.outputs["attestation"]).read_text())
+    ok, why = attest.verify(envelope)
+    assert ok, why
+    assert envelope["payload"]["plan"]["fails_open"] is True
+    # The policy digests, not the paths: the branch this ran on can be
+    # deleted and the artifact still says what it was about.
+    assert set(envelope["payload"]["policies"]) == {"current", "proposed"}
 
 
 def test_a_change_that_closes_the_boundary_reports_and_does_not_fail(

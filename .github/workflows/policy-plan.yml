@@ -40,5 +40,16 @@ jobs:
           fetch-depth: 0
 
       - uses: ./
+        id: plan
         with:
           policy: voydfile.py
+
+      # The artifact is the half a terminal cannot give you: what the
+      # check said, tied to the digest of the exact policy files it said
+      # it about, kept after the runner is gone.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: voyd-plan-attestation
+          path: ${{ steps.plan.outputs.attestation }}
+          if-no-files-found: error

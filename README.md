@@ -261,6 +261,72 @@ A plan that could not be *computed* — a voydfile that will not load — exits
 says. A check that answered "nothing found" when it had not run is the one
 failure this could have that would be worse than not existing.
 
+### Whose access did it widen?
+
+"The boundary widened" is the wrong granularity for a review. `--as-each`
+takes a table of callers and plans the same change once for each:
+
+```bash
+voyd-plan --current voydfile.py --proposed voydfile.new.py \
+          --target $URI --database app --all --as-each roles.json
+```
+
+```
+per caller
+  caller          newly reachable   examined
+  tier1-support               412        824
+  analyst                       0        824
+  clinician                     0        824
+
+what tier1-support gains
+  records       412  were refused as not_cleared
+
+newly reachable: 412 (worst caller: tier1-support)
+```
+
+The headline is the **worst** caller, not the sum: one document reachable
+by four roles is one document that got out, not four, and a number that
+grew when somebody added a read-only role to the JSON would be measuring
+the role table. The data is read once however many callers there are —
+not an optimisation, a correctness requirement, since a second role
+handed an exhausted cursor reports zero and looks clean.
+
+### A plan somebody can still believe next year
+
+`--attest PATH` writes the result, the SHA-256 of **each policy file's
+contents**, when it ran and what ran it. `--sign env:NAME` adds an
+HMAC over the whole envelope.
+
+```bash
+voyd-plan --verify plan.att.json --sign env:VOYD_ATTEST_KEY \
+          --current voydfile.py --proposed voydfile.new.py
+```
+
+```
+intact:  digest and signature both check out
+current: the attested policies are the ones on disk
+attested 2026-09-22T13:38:39+00:00: fails_open=True, newly reachable=412
+```
+
+Four outcomes, and they are deliberately four rather than a boolean:
+
+| | |
+|---|---|
+| **intact** | nothing has changed since it was produced |
+| **edited** | the payload no longer matches its digest — caught with no key |
+| **wrong key or altered** | the digest was recomputed; the signature was not |
+| **stale** | intact, but a policy file has changed since. A different finding, and usually the more interesting one |
+
+**What it proves.** That the envelope has not changed since something
+holding the key produced it, and — via the digests — that it is a verdict
+about the exact bytes of those two files.
+
+**What it does not.** That the plan ran against a real cluster, that the
+sample was representative, or who produced it. It is a symmetric MAC:
+anyone who can verify can forge. Evidence of integrity, never of origin.
+The key is taken as `env:NAME` or `file:/path` and never on the command
+line, because `argv` reaches the process table and the build log.
+
 ---
 
 ## The server owns the encoding

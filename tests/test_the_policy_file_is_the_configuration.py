@@ -409,3 +409,25 @@ def test_importing_voyd_offers_the_vocabulary_and_no_handle():
     # re-exported here would be a second door onto the guarantee.
     for name in ("Engine", "Model", "Admission", "AdmissionSpec"):
         assert not hasattr(voyd, name), f"voyd.{name} is application-facing"
+
+
+def test_an_unmapped_role_is_cleared_for_nothing_not_for_the_lowest_rung():
+    """The two readings differ on `public`, and the docs disagreed.
+
+    `declare.clearance` said an unmapped caller is "cleared for the
+    lowest level"; `Clearance._held` returns None, which refuses even the
+    bottom rung. Only one of them can be what ships, and the stricter one
+    is right -- an unmapped role is an unanswered question. Asserted here
+    so the prose cannot drift back to the roomier claim.
+    """
+    rule = Clearance(order=("public", "secret"),
+                     field="sensitivity",
+                     claim="roles",
+                     roles=(("clinician", "secret"),))
+    public = {"sensitivity": "public"}
+    # A mapped role is cleared for its rung and everything below it.
+    assert not rule.refuses(public, caller={"roles": ["clinician"]})
+    # An unmapped one is cleared for nothing at all -- including this.
+    assert rule.refuses(public, caller={"roles": ["support"]})
+    assert rule.refuses(public, caller={"roles": []})
+    assert rule.refuses(public, caller=None)

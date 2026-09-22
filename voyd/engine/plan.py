@@ -246,6 +246,56 @@ def _reason(spec: AdmissionSpec | None, doc: Mapping, *,
 
 # ---- the comparison ----------------------------------------------------
 
+@dataclass(frozen=True)
+class _Prepared:
+    """One caller's view of one collection, with the unanswerables removed.
+
+    Computed once per collection per caller rather than once per document.
+    It is the same argument ``asking_order`` makes one level down: a
+    property of the policy was being rederived for every row.
+    """
+
+    cur: AdmissionSpec | None
+    new: AdmissionSpec | None
+    aside: tuple[SetAside, ...]
+    not_compared: bool
+    caller: dict | None
+
+
+def _prepare(current: AdmissionSpec | None,
+             proposed: AdmissionSpec | None,
+             caller: dict | None) -> _Prepared:
+    cur, cur_aside = plannable(current, with_caller=caller is not None)
+    new, new_aside = plannable(proposed, with_caller=caller is not None)
+    # Both sides unplannable means the only rules either policy declared are
+    # ones this file will not guess about. Counting zero differences would
+    # be indistinguishable from "these policies agree", which is the one
+    # thing it must not be mistaken for.
+    return _Prepared(cur, new, cur_aside + new_aside,
+                     cur is None and current is not None
+                     and new is None and proposed is not None,
+                     caller)
+
+
+def _bucket(out: CollectionPlan, ready: _Prepared, doc: Mapping,
+            when: datetime | None) -> None:
+    """Put one document in one of the four buckets, for one caller."""
+    before = _reason(ready.cur, doc, when=when, caller=ready.caller)
+    after = _reason(ready.new, doc, when=when, caller=ready.caller)
+    if before == after:
+        if before is None:
+            out.unchanged_admitted += 1
+        else:
+            out.unchanged_refused += 1
+    elif after is None and before is not None:
+        out.newly_reachable[before] = out.newly_reachable.get(before, 0) + 1
+    elif before is None and after is not None:
+        out.newly_refused[after] = out.newly_refused.get(after, 0) + 1
+    elif before is not None and after is not None:
+        key = (before, after)
+        out.reason_changed[key] = out.reason_changed.get(key, 0) + 1
+
+
 def compare(collection: str,
             current: AdmissionSpec | None,
             proposed: AdmissionSpec | None,
@@ -260,33 +310,53 @@ def compare(collection: str,
     collection through without holding it, and are counted as they pass
     rather than measured up front.
     """
-    cur, cur_aside = plannable(current, with_caller=caller is not None)
-    new, new_aside = plannable(proposed, with_caller=caller is not None)
-    out = CollectionPlan(collection, set_aside=cur_aside + new_aside)
-    # Both sides unplannable means the only rules either policy declared are
-    # ones this file will not guess about. Counting zero differences would
-    # be indistinguishable from "these policies agree", which is the one
-    # thing it must not be mistaken for.
-    out.not_compared = (cur is None and current is not None
-                        and new is None and proposed is not None)
-    if out.not_compared:
+    ready = _prepare(current, proposed, caller)
+    out = CollectionPlan(collection, set_aside=ready.aside,
+                         not_compared=ready.not_compared)
+    if ready.not_compared:
         return out
     for doc in docs:
         out.sampled += 1
-        before = _reason(cur, doc, when=when, caller=caller)
-        after = _reason(new, doc, when=when, caller=caller)
-        if before == after:
-            if before is None:
-                out.unchanged_admitted += 1
-            else:
-                out.unchanged_refused += 1
-        elif after is None and before is not None:
-            out.newly_reachable[before] = out.newly_reachable.get(before, 0) + 1
-        elif before is None and after is not None:
-            out.newly_refused[after] = out.newly_refused.get(after, 0) + 1
-        elif before is not None and after is not None:
-            key = (before, after)
-            out.reason_changed[key] = out.reason_changed.get(key, 0) + 1
+        _bucket(out, ready, doc, when)
+    return out
+
+
+def compare_many(collection: str,
+                 current: AdmissionSpec | None,
+                 proposed: AdmissionSpec | None,
+                 docs: Iterable[Mapping],
+                 callers: Mapping[str, dict | None],
+                 *,
+                 when: datetime | None = None,
+                 ) -> dict[str, CollectionPlan]:
+    """The same comparison for several callers, in **one pass** over the data.
+
+    The obvious implementation runs ``compare`` once per role, and it is
+    wrong twice over. ``docs`` is an iterable that a cluster is streaming,
+    so the second role gets an exhausted cursor -- and materialising it to
+    avoid that means holding a whole collection in memory to answer a
+    question that is per document. Both are avoided by inverting the
+    loops: read each document once, ask every role about it, and throw it
+    away.
+
+    The cost of that inversion is that a role which is refused everything
+    is still evaluated everywhere, which is cheap -- the check is pure
+    arithmetic over a dict -- against a saving that is a network round
+    trip per role per batch.
+    """
+    prepared = {name: _prepare(current, proposed, claims)
+                for name, claims in callers.items()}
+    out = {name: CollectionPlan(collection, set_aside=ready.aside,
+                                not_compared=ready.not_compared)
+           for name, ready in prepared.items()}
+    live = [(name, ready) for name, ready in prepared.items()
+            if not ready.not_compared]
+    if not live:
+        return out
+    for doc in docs:
+        for name, ready in live:
+            out[name].sampled += 1
+            _bucket(out[name], ready, doc, when)
     return out
 
 
@@ -377,4 +447,101 @@ def plan(current: Mapping[str, AdmissionSpec],
                       sample(name), when=when, caller=caller)
         out.collections.append(one)
         out.sampled += one.sampled
+    return out
+
+
+# ---- the same question, once per role ----------------------------------
+
+@dataclass
+class Matrix:
+    """One plan per caller, and the sentence they add up to.
+
+    An access-control change is rarely the same change for everybody. The
+    question an auditor asks is not *"did this widen access?"* but *"whose
+    access did this widen, and by how much?"* -- and a single plan run
+    against no caller cannot answer it, because it sets every
+    caller-dependent rule aside by name and says so.
+
+    The structural findings are identical for every role by construction,
+    so they are held **once** here rather than repeated in each plan. A
+    report that printed `tenant_removed` once per role would scale the
+    loudest finding in the file by the size of the role table and bury it
+    in its own repetition.
+
+    The cost of holding them here is worth stating, because it is a trap:
+    **a ``Plan`` taken out of a ``Matrix`` carries no structural
+    findings**, so its ``fails_open`` answers only "did this role gain
+    documents". The question "did this change open the boundary" is
+    ``Matrix.fails_open`` and nothing else.
+    """
+
+    plans: dict[str, Plan] = field(default_factory=dict)
+    structural: list[Structural] = field(default_factory=list)
+    when: datetime | None = None
+    exhaustive: bool = False
+
+    @property
+    def fails_open(self) -> bool:
+        return (any(s.fails_open for s in self.structural)
+                or any(p.newly_reachable_total for p in self.plans.values()))
+
+    @property
+    def newly_reachable_total(self) -> int:
+        """The worst role's exposure, not the sum of every role's.
+
+        Summing would double-count: one document reachable by four roles
+        is one document that got out, not four. The honest single number
+        for "how bad is this change" is the largest any one caller gains.
+        """
+        return max((p.newly_reachable_total for p in self.plans.values()),
+                   default=0)
+
+    @property
+    def worst(self) -> str | None:
+        """The role that gains the most, or ``None`` if none gains any."""
+        ranked = sorted(self.plans.items(),
+                        key=lambda kv: -kv[1].newly_reachable_total)
+        if not ranked or not ranked[0][1].newly_reachable_total:
+            return None
+        return ranked[0][0]
+
+
+def matrix(current: Mapping[str, AdmissionSpec],
+           proposed: Mapping[str, AdmissionSpec],
+           sample: Callable[[str], Iterable[Mapping]],
+           callers: Mapping[str, dict | None],
+           *,
+           when: datetime | None = None,
+           collections: Sequence[str] | None = None,
+           exhaustive: bool = False) -> Matrix:
+    """Plan the same change for every named caller, reading the data once.
+
+    ``sample`` is still called once per collection, not once per
+    collection per role: ``compare_many`` inverts the loops underneath so
+    a cursor is consumed exactly once. That is not an optimisation to be
+    proud of, it is a correctness requirement -- a second role handed an
+    exhausted cursor would report zero findings and look clean.
+    """
+    if not callers:
+        raise ValueError(
+            "matrix() needs at least one named caller. Planning against "
+            "nobody is what plan() already does, and it says so by setting "
+            "the caller-dependent rules aside rather than reporting a zero")
+    names = sorted(set(current) | set(proposed))
+    if collections is not None:
+        wanted = set(collections)
+        names = [n for n in names if n in wanted]
+    out = Matrix(when=when, exhaustive=exhaustive)
+    out.structural = [s for s in structural(current, proposed)
+                      if collections is None or s.collection in names]
+    for role, claims in callers.items():
+        out.plans[role] = Plan(when=when,
+                               caller=dict(claims) if claims else None,
+                               exhaustive=exhaustive)
+    for name in names:
+        per_role = compare_many(name, current.get(name), proposed.get(name),
+                                sample(name), callers, when=when)
+        for role, one in per_role.items():
+            out.plans[role].collections.append(one)
+            out.plans[role].sampled += one.sampled
     return out

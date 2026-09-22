@@ -53,7 +53,7 @@ become reachable and fails the build if any do.
 |---|---|
 | **Audience** | Platform and SecOps teams carrying SOC 2 / HIPAA / GDPR evidence for a RAG system |
 | **Size** | Small today, growing fast. Basis: every team with a compliance obligation *and* a vector index — the intersection is narrow now and is the fastest-growing half of both sets |
-| **Readiness** | ~80% shipped. Planner, exit codes, GitHub Action, PR comments, 252 tests |
+| **Readiness** | Shipped. Planner, role matrix, signed attestations, exit codes, GitHub Action, PR comments, 274 tests |
 
 **Why.** It is the only opportunity here with **no adoption friction**.
 Every other one requires a stranger to put an unproven proxy in the data
@@ -69,10 +69,15 @@ recollection.
 **Why not.** A CI check is a feature, not a company. It is a wedge into
 the boundary, and it has to be sold as one.
 
-**Missing.** Two small things: `--as-each roles.json`, to run the plan
-once per role and turn one number into the table an auditor reads; and a
-signed, dated plan attached to the merge commit
-(`voyd/engine/admission/receipts.py` already exists for attestation).
+**Shipped since this was written.** `--as-each` plans the change once per
+named caller and reports the role table, headlined by the worst caller
+rather than the sum. `--attest` writes a verifiable envelope — the
+result, the SHA-256 of each policy file's contents, the timestamp —
+and `--sign env:NAME` adds an HMAC over it. `--verify` distinguishes
+*intact*, *edited*, *wrong key*, and *stale*, that last one being an
+intact attestation of a policy since changed.
+
+**Still missing.** A reference deployment. See the last section.
 
 ---
 

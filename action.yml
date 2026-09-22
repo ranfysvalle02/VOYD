@@ -69,6 +69,28 @@ inputs:
       aside by name rather than guessed at.
     required: false
     default: ""
+  as-each:
+    description: >-
+      Plan once per named caller and report a role table: a JSON object
+      of caller name to claims, or a path to one. This is what turns
+      "the boundary widened" into "the boundary widened for
+      tier1-support, by 412 documents".
+    required: false
+    default: ""
+  attest:
+    description: >-
+      Write the plan as a verifiable envelope at this path: the result,
+      the SHA-256 of each policy file, and when it ran. Upload it as a
+      build artifact and it is the evidence an auditor asks for.
+    required: false
+    default: ""
+  sign:
+    description: >-
+      Sign the attestation. `env:NAME` or `file:/path` -- never the key
+      itself, because argv reaches the process table and the build log.
+      Set the variable from a secret in the job's `env:`.
+    required: false
+    default: ""
   comment:
     description: Post the plan as a pull request comment, updated in place.
     required: false
@@ -102,6 +124,9 @@ outputs:
   json:
     description: Path to the same plan as JSON.
     value: ${{ steps.plan.outputs.json }}
+  attestation:
+    description: Path to the signed envelope, when `attest` was set.
+    value: ${{ steps.plan.outputs.attestation }}
 
 runs:
   using: composite
@@ -174,6 +199,16 @@ runs:
         if [ -n '${{ inputs.as }}' ]; then args+=(--as '${{ inputs.as }}'); fi
         args+=(--sample '${{ inputs.sample }}')
         if [ '${{ inputs.all }}' = 'true' ]; then args+=(--all); fi
+        if [ -n '${{ inputs.as-each }}' ]; then args+=(--as-each '${{ inputs.as-each }}'); fi
+        if [ -n '${{ inputs.sign }}' ]; then args+=(--sign '${{ inputs.sign }}'); fi
+        # Defaulted rather than optional. An attestation nobody asked for
+        # costs one file in $RUNNER_TEMP; a pipeline that discovers it
+        # was not producing evidence costs an audit finding.
+        attestation='${{ inputs.attest }}'
+        if [ -z "$attestation" ]; then
+          attestation="${RUNNER_TEMP}/voyd-plan.attestation.json"
+        fi
+        args+=(--attest "$attestation")
 
         # One run, both forms. Two runs would be two passes over the
         # cluster under --target, and on --all that is the whole
@@ -184,6 +219,7 @@ runs:
         cat "$report" 2>/dev/null
         echo "report=$report" >> "$GITHUB_OUTPUT"
         echo "json=$blob" >> "$GITHUB_OUTPUT"
+        echo "attestation=$attestation" >> "$GITHUB_OUTPUT"
 
         # Exit 2 is "the plan could not be computed", and it must not be
         # reported as a plan that found nothing -- that is the one way this
