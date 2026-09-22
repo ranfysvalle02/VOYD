@@ -442,6 +442,8 @@ only because a boundary would defeat the point of it: `examples/shadow.py`
 counts how many documents your existing read path serves that your own
 database has already marked as gone, and changes nothing while it does.
 When that number convinces somebody, the same rules become a policy file.
+[SHADOW_MODE.md](SHADOW_MODE.md) argues that measurement is the thing to
+ship first, and says what result would mean this project should stop.
 
 ## The server owns the encoding
 
