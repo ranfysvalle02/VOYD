@@ -45,7 +45,7 @@ there is no second mechanism.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from .engine import (Budget, Clearance, Deadline, Distinct, EmbeddedWith,
@@ -272,6 +272,71 @@ OPTIONS: dict[str, dict] = {}
 ON_DELETE = ("forward", "revoke")
 
 
+def _as_rule(collection: str, name: str, value: Any) -> Any:
+    """A rule somebody else wrote, installed straight from a policy file.
+
+    This is the extension point reaching the wire. ``rules.py`` says a
+    third-party rule is the same kind of object as a builtin one with no
+    privileged path, and that was true of the *engine* and false of the
+    *policy file*: the vocabulary above is a fixed set of helpers, so a
+    stranger's rule had nowhere to be written. Declaring one is now a line
+    that reads like every other line:
+
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+            region    = Jurisdiction(allowed="eu")
+
+    **It was worse than missing, which is why this function refuses as
+    much as it accepts.** A rule object in a class body was simply not a
+    ``_Field``, so it was skipped -- and the boundary came up announcing
+    "refuses on [deadline, revoked]" while serving every document the
+    stranger's rule was written to refuse. No error, no warning, and a
+    policy file that looked exactly like a working one. That is this
+    project's own named failure, in the loader that reads the file the
+    whole product is.
+
+    So anything in a class body that is *half* a rule raises here, by
+    name. The protocol is three members -- ``reason``, ``refuses`` and
+    ``clause`` -- and the two ways to get it wrong are to write one of
+    them and to misspell one of them, which look identical from here.
+
+    ``field`` is rebound to the attribute name when the rule carries one,
+    so ``region = Jurisdiction(...)`` reads the ``region`` field without
+    saying so twice. That is what every other line in a policy file does,
+    and a rule that had to repeat its own name would be the one exception.
+    """
+    partial = [m for m in ("reason", "refuses", "clause") if hasattr(value, m)]
+    if not partial:
+        return None                      # a constant, a helper, a docstring
+    if len(partial) < 3:
+        raise ValueError(
+            f"{collection}: {name!r} has {sorted(partial)} and is missing "
+            f"{sorted({'reason', 'refuses', 'clause'} - set(partial))}. A "
+            f"rule needs all three -- `reason` names the refusal, "
+            f"`refuses(doc)` is the verdict, `clause()` is the query half "
+            f"or None. Half a rule refuses nothing, and would have been "
+            f"skipped in silence")
+    if not isinstance(getattr(value, "reason", None), str):
+        raise ValueError(
+            f"{collection}: {name!r} has a `reason` that is not a string. "
+            f"It is the name this refusal is counted and reported under, so "
+            f"it has to be one")
+    if not callable(value.refuses):
+        raise ValueError(
+            f"{collection}: {name!r} has a `refuses` that is not callable")
+    if hasattr(value, "field"):
+        try:
+            return replace(value, field=name)
+        except Exception:                                      # noqa: BLE001
+            # Not a dataclass, or `field` is not an init argument. The rule
+            # is installed as written rather than rejected: it named its
+            # own field, which is merely less tidy than letting the
+            # attribute name do it.
+            pass
+    return value
+
+
 def guard(collection: str, *, lineage_field: str | None = None,
           on_delete: str = "forward"):
     """Declare the rules for one collection. Returns the class unchanged.
@@ -296,7 +361,12 @@ def guard(collection: str, *, lineage_field: str | None = None,
         sealed_fields: list[str] = []
         embedded: dict[str, str] = {}
         for name, value in vars(cls).items():
-            if name.startswith("__") or not isinstance(value, _Field):
+            if name.startswith("__"):
+                continue
+            if not isinstance(value, _Field):
+                custom = _as_rule(collection, name, value)
+                if custom is not None:
+                    rules.append(custom)
                 continue
             if value.kind == "tenant":
                 if tenant_field is not None:

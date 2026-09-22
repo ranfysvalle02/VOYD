@@ -51,7 +51,9 @@ import struct
 import subprocess
 import sys
 import time
+import pathlib
 from pathlib import Path
+from typing import Any
 
 from . import codec
 from . import proxy as w
@@ -556,6 +558,126 @@ def seal_cost(uri: str, docs: int, pad: int, runs: int) -> int:
 REFUSAL_US = 2.3
 
 
+def cascade_cost(uri: str, parents: int, children: int, runs: int) -> int:
+    """What making a refusal travel costs, measured rather than assumed.
+
+    `lineage_field` buys the thing an erasure request actually needs: a
+    revocation reaching the summary somebody wrote out of the fact. It
+    buys it with round trips the boundary does not otherwise make, and
+    "one extra round trip" had been a sentence in a docstring rather than
+    a number -- in a repository whose whole argument is the difference.
+
+    Two operations pay, and they pay differently:
+
+    **A delete** resolves the ids its filter matched, marks every
+    descendant of them, and only then forwards the revocation. Two extra
+    commands, whatever the filter matched, so the cost per *erasure
+    request* is flat and the cost per document falls as the subtree grows.
+
+    **An insert naming a parent** reads its ancestors so the child's
+    lineage can be closed transitively. One extra command per insert,
+    which is the one to watch: it is on the ordinary write path of any
+    application that records derivation, not on an erasure path somebody
+    runs occasionally.
+
+    Measured against a real deployment through a real proxy, twice: once
+    with a policy declaring `lineage_field` and once with the same policy
+    without it. The second is the control, and it is what makes the number
+    a difference rather than a latency.
+    """
+    import statistics
+    import tempfile
+
+    try:
+        import pymongo
+    except ImportError:
+        raise SystemExit("pip install pymongo   (--cascade needs a driver)")
+
+    LINEAGE = """
+from voyd import guard, deadline, revocable
+
+@guard("notes", on_delete="revoke", lineage_field="lineage")
+class Notes:
+    expire_at = deadline()
+    forgotten = revocable()
+"""
+    PLAIN = LINEAGE.replace(', lineage_field="lineage"', "")
+
+    def timed(policy_text: str, label: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "voydfile.py"
+            path.write_text(policy_text)
+            listen = _free_port()
+            host = uri.split("//", 1)[1].split("/", 1)[0]
+            proxy = subprocess.Popen(
+                [sys.executable, "-m", "voyd.wire.proxy", "--config",
+                 str(path), "--listen", str(listen), "--target", host,
+                 "--quiet"])
+            try:
+                wait_for(listen)
+                name = f"voyd_bench_casc_{os.getpid()}"
+                direct: Any = pymongo.MongoClient(uri)
+                through: Any = pymongo.MongoClient(
+                    f"mongodb://localhost:{listen}/?directConnection=true",
+                    serverSelectionTimeoutMS=8000)
+                inserts: list[float] = []
+                deletes: list[float] = []
+                try:
+                    notes = through[name].notes
+                    for _ in range(runs):
+                        direct.drop_database(name)
+                        roots = [notes.insert_one({"n": i}).inserted_id
+                                 for i in range(parents)]
+                        # One insert naming a parent, timed on its own.
+                        start = time.perf_counter()
+                        for i in range(children):
+                            notes.insert_one(
+                                {"c": i, "lineage": [roots[i % parents]]})
+                        inserts.append(
+                            (time.perf_counter() - start) / children * 1e6)
+                        # One erasure request, cascading over the subtree.
+                        start = time.perf_counter()
+                        notes.delete_one({"_id": roots[0]})
+                        deletes.append((time.perf_counter() - start) * 1e3)
+                finally:
+                    direct.drop_database(name)
+                    through.close()
+                    direct.close()
+            finally:
+                proxy.terminate()
+                proxy.wait(timeout=10)
+        return {"label": label,
+                "insert_us": statistics.median(inserts),
+                "delete_ms": statistics.median(deletes)}
+
+    with_lineage = timed(LINEAGE, "lineage_field declared")
+    without = timed(PLAIN, "the same policy without it")
+
+    print(f"\n  {parents} parents, {children} derived documents, "
+          f"{runs} runs, through a real proxy\n")
+    head = f"  {'policy':30} {'insert':>12} {'delete':>12}"
+    print(head)
+    print("  " + "-" * (len(head) - 2))
+    for row in (without, with_lineage):
+        print(f"  {row['label']:30} {row['insert_us']:9.0f}us "
+              f"{row['delete_ms']:9.2f}ms")
+
+    d_insert = with_lineage["insert_us"] - without["insert_us"]
+    d_delete = with_lineage["delete_ms"] - without["delete_ms"]
+    print(f"\n  the cascade costs {d_insert:+.0f}us per derived insert and "
+          f"{d_delete:+.2f}ms per erasure request.")
+    print(f"  Per document the delete reached, that is "
+          f"{d_delete * 1000 / max(children, 1):+.0f}us -- and it falls as "
+          f"the subtree grows,")
+    print("  because resolving the ids and marking the descendants is two "
+          "commands")
+    print("  whatever they matched. The insert figure is the one to watch: "
+          "it is on")
+    print("  an ordinary write path, not on an erasure path somebody runs "
+          "twice a year.")
+    return 0
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -593,6 +715,13 @@ def main(argv: list[str] | None = None) -> int:
                          "counters on a timer costs the message path "
                          "nothing measurable")
     ap.add_argument("--policy", help="keep the generated voydfile here")
+    ap.add_argument("--cascade", action="store_true",
+                    help="measure what `lineage_field` costs: the round "
+                         "trips a cascading erasure and a derived insert "
+                         "add, against the same policy without it. Needs a "
+                         "real deployment")
+    ap.add_argument("--cascade-parents", type=int, default=4)
+    ap.add_argument("--cascade-children", type=int, default=40)
     ap.add_argument("--seal", action="store_true",
                     help="instead of the sweep, measure what --key-vault "
                          "costs per document: one encrypt and one decrypt "
@@ -605,6 +734,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="the deployment --seal builds its key vault in")
     ap.add_argument("--seal-runs", type=int, default=5)
     args = ap.parse_args(argv)
+
+    if args.cascade:
+        return cascade_cost(args.seal_uri, args.cascade_parents,
+                            args.cascade_children, args.seal_runs)
 
     if args.seal:
         return seal_cost(args.seal_uri, args.docs * 5, args.pad,

@@ -58,7 +58,7 @@ So this repository applies it to itself, and not as a slogan:
 - **[CLAIMS.md](CLAIMS.md)** maps every guarantee to the file that would go
   red if it stopped holding. The mapping is checked in both directions by
   `tests/test_every_claim_names_its_evidence.py` — a claim with no test, or
-  a test no claim points at, fails the suite. Currently 31 claims across 30
+  a test no claim points at, fails the suite. Currently 32 claims across 31
   files — lineage is two of them, because the cascade on read and the
   ancestry closed on write fail separately.
 - **[LIMITS.md](LIMITS.md)** counts this project's own defects, names its
@@ -308,6 +308,68 @@ the people it was written for.
 A `clearance()` with no mapping is still declarable for a process that
 already knows the level, and the boundary says at boot that it cannot
 supply one rather than letting it look like broken reads.
+
+## The vocabulary is not a fixed list
+
+Everything above compiles to a `Rule`: a `reason`, a `refuses(doc)`, and a
+`clause()` that is the same rule as a query fragment or `None`. Three
+members, no base class, no registration. **So a rule this package has no
+word for goes in the policy file beside the ones it does**, and the
+boundary enforces it for every driver in every language without being
+edited:
+
+```python
+# voydfile.py
+from dataclasses import dataclass
+from voyd import guard, deadline, revocable
+
+@dataclass(frozen=True)
+class Jurisdiction:
+    """A document may not leave its region."""
+    allowed: str
+    field: str = "region"
+    reason: str = "wrong_region"
+
+    def refuses(self, doc, *, when=None):
+        return doc.get(self.field) != self.allowed
+
+    def clause(self):
+        return {self.field: self.allowed}
+
+@guard("notes")
+class Notes:
+    expire_at = deadline()
+    forgotten = revocable()
+    region    = Jurisdiction(allowed="eu")
+```
+
+```
+voyd-wire: guarding notes: notes: refuses on [deadline, revoked, wrong_region]
+  voyd: notes: refused 2 of 3  {'wrong_region': 2}
+```
+
+The attribute name binds the field, the reason is announced at boot and
+counted under its own name on `/metrics`, and nothing in `voyd/` knows
+what a region is. That is the extension point: the interesting refusals
+are domain refusals, and the boundary should not have to learn your
+domain to enforce them.
+
+**And a rule that is only half written fails when the file is loaded.**
+This is the half worth having. A rule object in a class body used to be
+skipped — not a declared field, so not installed — and the proxy came up
+announcing `refuses on [deadline, revoked]` while serving every document
+the rule existed to refuse. No error, no warning, a policy file that
+looked exactly like a working one. Anything with one or two of the three
+members now raises at load, by name, because a misspelled `refuses` and a
+missing one are indistinguishable from the loader and identical in
+consequence.
+
+The set-relative rules are the same protocol used harder: `budget()` and
+`distinct()` compare a document against the *page so far* rather than
+against the clock, which is a thing no index filter and no policy engine
+can express — `$vectorSearch` decides each candidate before the page
+exists, and `enforce(subject, object, action)` has nowhere to put the rest
+of the set.
 
 ## It sizes its own fetch
 
@@ -747,7 +809,7 @@ from somebody asking why a paragraph said what it said. One
 team, two weeks, their own corpus is worth more than anything else that
 could be built next.
 
-The suite is **501 tests**, and it is the foundation rather than a census —
+The suite is **514 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie. Each one and the file that holds it up is
 **[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim with
@@ -769,7 +831,7 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
-pytest              # 497 tests, ~95 seconds -- the inner loop
+pytest              # 510 tests, ~100 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 

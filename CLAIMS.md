@@ -38,6 +38,7 @@ of fifty and asserted a page of one, and it passed under sabotage. See
 
 | claim | held up by |
 |---|---|
+| A rule this package has no word for — written in the policy file, against the documented protocol — is announced at boot, enforced per document on the wire, and counted under its own reason; and one that is only half written fails at *load* rather than being skipped in silence | `tests/test_a_stranger_can_extend_the_boundary.py` |
 | A plain driver with no VOYD import gets every guarantee — real `mongod`, real proxy, real driver. Sessions, transactions and retryable writes cross intact; read preference is honoured against a topology of one | `tests/test_the_wire_is_the_front_door.py` |
 | The wire codec round-trips, including the kind-1 document sequence that carries a write | `tests/test_the_codec_round_trips.py` |
 | A client cannot walk past the boundary: `hello` is rewritten, so the guarantee is not a connection-string option somebody remembers | `tests/test_a_client_cannot_walk_past_the_boundary.py` |

@@ -64,16 +64,10 @@ jobs:
             tests/test_every_claim_names_its_evidence.py \
             tests/test_every_documented_command_is_real.py \
             tests/test_a_derived_read_cannot_launder_a_forgotten_fact.py \
+            tests/test_a_page_budget_survives_the_batch_size.py \
+            tests/test_a_clearance_ladder_is_declarable.py \
+            tests/test_the_boundary_shuts_down_without_waiting.py \
             -m 'not needs_mongo'
-
-      - name: Fan-out, against three mongods and a real election
-        # Kept as its own step because it is the only one that can fail for
-        # a reason that is not VOYD's: if replication is instant on the
-        # runner, the control assertion says so rather than letting the lag
-        # test pass for the wrong reason.
-        run: |
-          uv run --no-sync pytest -q \
-            tests/test_the_boundary_ranks_on_a_replica_and_asks_the_primary.py
 
       - name: The scanner runs on a machine with nothing installed
         # It is the first thing a stranger runs and the only thing here that

@@ -487,15 +487,12 @@ the guarded side only.
 
 ## 4. Coverage
 
-477 tests, ~8,479 lines, against 7,626 lines of `voyd/` and 7,555 of
-`voyd/wire/`. `voyd/` shrank by ~600 and `voyd/wire/` grew by ~500 in the same
-pass: the library front door was deleted and the guarantee it was the last
-holder of moved to the wire. A cut that only subtracted would have been a
-smaller number and a smaller product. Well-targeted rather than thorough: the coverage is by *claim*,
-which is the right axis, but it is not line coverage and should not be
-mistaken for it.
+514 tests, ~8,800 lines, against 13,495 lines of `voyd/` -- 7,155 of
+policy and admission, 6,340 of boundary under `voyd/wire/`. Well-targeted
+rather than thorough: the coverage is by *claim*, which is the right axis,
+but it is not line coverage and should not be mistaken for it.
 
-**124 lines in one file are mentioned by no test file**, and it is
+**119 lines in one file are mentioned by no test file**, and it is
 defensible: `composition.py` declares the protocols a type checker reads
 and the runtime never imports. It used to be two files and 189 lines;
 `trait.py` joined the tested set when the tools that provision indexes
@@ -626,7 +623,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (497 tests, ~95 seconds) with
+**Consider:** the suite is fast by default (510 tests, ~100 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
@@ -1045,13 +1042,28 @@ having it.
   cascade is the boundary's write, not the caller's. It is dialled from
   `--target`, by construction rather than by a flag somebody could point
   elsewhere.
-- **A round trip on the write path.** A delete on a lineage collection is
-  now a find plus an update before the forwarded command, and an insert
-  naming a parent is a find before it. Collections that declare no
-  lineage pay nothing -- the gate is a field being `None`.
+- **Round trips on the write path, and here is what they cost.** A
+  delete on a lineage collection is a find plus an update before the
+  forwarded command; an insert naming a parent is a find before it.
+  Collections declaring no lineage pay nothing -- the gate is a field
+  being `None`. Measured with `voyd-bench --cascade` against a real
+  deployment through a real proxy, four parents and forty derived
+  documents, against the same policy with the declaration removed:
+
+  | | without | with | delta |
+  |---|---|---|---|
+  | insert naming a parent | 1,118us | 1,380us | **+262us** |
+  | one erasure request | 2.53ms | 4.03ms | **+1.49ms** |
+
+  The erasure figure is flat in the size of the subtree -- resolving the
+  ids and marking the descendants is two commands whatever they matched --
+  so per document reached it was +37us here and falls as the subtree
+  grows. **The insert figure is the one to watch.** It is on an ordinary
+  write path, paid by every application that records derivation, not on
+  an erasure path somebody runs twice a year.
 - **The cascade can reach a descendant the caller could not have read.**
-  The library rebuilds the unbypassable rules when it walks the edge. The
-  wire cannot: those rules decide by *who is asking*, per document, and
+  The caller-aware rules are not rebuilt when the edge is walked, and
+  cannot be: they decide by *who is asking*, per document, and
   there is no query that expresses them. The tenant **is** carried
   across, so the cascade cannot leave the caller's namespace -- that one
   would be a cross-tenant write dressed up as an erasure. What remains is

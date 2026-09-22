@@ -1,43 +1,15 @@
 # NEXT-TODO — what the next level needs, measured
 
-Written after the second dispatch path was deleted, tree clean. 501
-tests, all passing: 500 in the default run plus the Atlas one, which is
-run isolated.
+Written after the second dispatch path was deleted and the rule
+protocol reached the policy file. Tree clean. 514 tests, all passing:
+513 in the default run plus the Atlas one, which is run isolated.
 
 Everything below is measured at that commit. Where a previous note
 guessed, it was wrong; the habit that caused it is recorded at the bottom.
 
 ---
 
-## 1. The bijection does not check *which door* a test drives
-
-This is the hole that let the lineage claim go unqualified for as long as
-it did. `tests/test_every_claim_names_its_evidence.py` asserts that every
-claim names a test and every test file is named by a claim. It cannot see
-whether the test exercises the boundary or calls a handle directly.
-
-With one door left, the rule is finally expressible: a test file cited by
-`CLAIMS.md` should either start a `voyd-wire` subprocess or be a pure unit
-test with no database. The exceptions are known and few — `shadow`,
-`portfolio`, `rosetta`, the sealing tests — so it can be "wire-driven, or
-on this list with a reason".
-
-Do it before the next claim is added, not after.
-
-## 2. What the cascade costs is unmeasured
-
-`voyd_cascaded_total` is on the dashboard now, per collection, beside
-`revoked_total`: the two diverging on a collection declaring
-`lineage_field` is how a stopped cascade becomes visible from outside.
-
-What is still an assumption is the **price**. A delete on a lineage
-collection is a find plus an update before the forwarded command, and an
-insert naming a parent is a find before it. `voyd-bench` measures the
-ordinary paths and not this one, so "one extra round trip" is a sentence
-in a docstring rather than a number, in a repository whose entire
-argument is the difference between those.
-
-## 3. The no-database subset is neither, and one cause is a shutdown bug
+## 1. The no-database subset is neither
 
 Its whole premise is that it is pure and fast. Measured: **457 tests, 130
 seconds**, with only 20 deselected — most of what runs under
@@ -63,7 +35,7 @@ production, not only in the suite — or the fixtures should `kill()` after
 a shorter grace. Check the production behaviour first; the test cost is
 the symptom.
 
-## 4. Two things deliberately kept
+## 2. Two things deliberately kept
 
 Recorded so nobody re-derives the decision and deletes them.
 
