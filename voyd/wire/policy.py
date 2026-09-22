@@ -612,6 +612,19 @@ def deciding_fields(guard: Guard) -> set[str]:
                 names.add(value)
     if spec.tenant:
         names.add(spec.tenant)
+    if spec.subjects:
+        # The same fields again, one level down, because a declared
+        # `subjects` array is judged element by element and those rules
+        # read the element's own copy of the mark. Dotted, and the caller
+        # has to compare paths rather than truncate them -- see
+        # `projection_blinds`, where `{"chapters.text": 1}` looked
+        # indistinguishable from `{"chapters": 1}` and is the difference
+        # between redacting a refused chapter and serving its text with
+        # the evidence projected away.
+        under = {n for n in names if "." not in n}
+        if spec.subject_key:
+            under.add(spec.subject_key)
+        names |= {f"{spec.subjects}.{n}" for n in under}
     return names
 
 
@@ -639,9 +652,7 @@ def projection_blinds(projection: Any, needed: set[str]) -> bool:
     # `_id` is exempt from the inclusion/exclusion question by the server
     # and is never a field a rule reads, so it does not decide the kind.
     kinds = {bool(v) for k, v in projection.items() if k != "_id"}
-    named = {k.split(".")[0] for k in projection if isinstance(k, str)}
-    if kinds == {False}:                # exclusion: does it remove a mark?
-        return bool(named & needed)
+    keys = {k for k in projection if isinstance(k, str)}
     if not kinds:
         # Only `_id` was named, and the two spellings are opposites.
         # `{"_id": 0}` removes nothing and is safe; `{"_id": 1}` is an
@@ -650,9 +661,65 @@ def projection_blinds(projection: Any, needed: set[str]) -> bool:
         # second through unjudged -- found by sweeping the shapes rather
         # than by thinking of it, which is the honest account.
         return bool(projection.get("_id")) and bool(needed)
-    # Inclusion, or the mixed form the server rejects anyway: every field
-    # the verdict reads has to survive it.
-    return not needed <= named
+    including = kinds != {False}
+    for path in needed:
+        parent = path.split(".")[0] if "." in path else None
+        if parent is not None and not _survives(parent, keys, including):
+            # A mark *inside* a subject array is only needed when any of
+            # that array reaches the client. `{"chapters": 0}` removes
+            # every element, so there is nothing left to redact and
+            # nothing left to leak -- refusing the read would be strict
+            # about a shape rather than about a guarantee.
+            continue
+        if not _survives(path, keys, including):
+            return True
+    return False
+
+
+def _survives(path: str, keys: set[str], including: bool) -> bool:
+    """Is ``path`` still on a document after this projection?
+
+    Path-aware on purpose. The previous version truncated every projected
+    key to its first segment, which is exactly right while every field a
+    verdict reads is top-level and exactly wrong the moment one is not:
+    `{"chapters.text": 1}` became `{"chapters"}` and satisfied a need for
+    `chapters.forgotten`, so a refused chapter's text was served with the
+    evidence of its refusal projected away.
+
+    An inclusion keeps ``path`` when it names the path, an *ancestor* of
+    it (`{"chapters": 1}` keeps `chapters.forgotten`), or a *descendant*
+    of it (`{"forgotten.at": 1}` leaves a `forgotten` subdocument, which
+    is present, which is all `Marked` asks). An exclusion removes it when
+    it names the path or an ancestor; naming a descendant leaves the field
+    there, so the presence check still answers.
+    """
+    if including:
+        return any(path == k or path.startswith(f"{k}.")
+                   or k.startswith(f"{path}.") for k in keys)
+    return not any(path == k or path.startswith(f"{k}.") for k in keys)
+
+
+def blinds_a_subject(projection: Any, guard: Guard) -> bool:
+    """Does this projection hide the marks *inside* a subject array?
+
+    The difference decides whether the refusal can be pushed into the
+    query instead, and it is the whole reason this is a separate
+    question. A blinded *top-level* mark has a remedy: put
+    `{forgotten: null}` in the filter and the server drops the refused
+    documents before the projection can hide anything that mattered.
+
+    A blinded *subject* mark has no remedy. No query expresses "return
+    this book without its third chapter", so the refusal cannot move into
+    the filter and there is nothing left to take it on the way out. The
+    read is refused instead -- the one case where the push-down that
+    rescues every other blinded projection is not equivalent, and
+    forwarding it would serve a refused chapter with the evidence of its
+    refusal projected away.
+    """
+    if not guard.spec.subjects:
+        return False
+    needed = {p for p in deciding_fields(guard) if "." in p}
+    return projection_blinds(projection, needed)
 
 
 def blinded_find(body: Mapping, guards: dict[str, Guard]) -> Guard | None:
@@ -733,6 +800,17 @@ def rewrite_derived_read(raw: bytes, req_id: int, resp_to: int,
     # where the projection cannot reach it.
     blinded = blinded_find(body, guards)
     if blinded is not None:
+        where_proj = "projection" if "find" in body else "fields"
+        if blinds_a_subject(body.get(where_proj), blinded):
+            return None, _refuse(
+                req_id, blinded.collection,
+                f"this projection removes the fields each "
+                f"{blinded.spec.subjects!r} element is judged by, and no "
+                f"query can remove an element -- so the refusal has "
+                f"nowhere to go. Ask for "
+                f"{blinded.spec.subjects}.{blinded.spec.mark_field} and "
+                f"{blinded.spec.subjects}.{blinded.spec.at_field} too, or "
+                f"exclude {blinded.spec.subjects!r} entirely", verbose)
         clauses = expressible_clauses(blinded, caller)
         if clauses is None:
             return None, _refuse(
@@ -1240,7 +1318,18 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
     kept = guard.filter(batch, caller, tab)
     if budgets is not None and cursor_id == 0:
         budgets.done(cursor_id)
-    if len(kept) == len(batch):
+    # The bytes are forwarded untouched only when the batch came back
+    # *identical* -- same length and the same objects. Length alone was
+    # the test, and it is the right test for whole-document refusal and
+    # the wrong one for redaction: a collection declaring `subjects` has
+    # its refused elements removed from a document that is still
+    # admitted, so the count matches, the fast path returned the original
+    # bytes, and the refused chapter was served with its refusal counted.
+    #
+    # `_admit` returns the document it was handed when it changed nothing
+    # and a new one when it redacted, so identity is an exact answer and
+    # costs a pointer comparison per document on the ordinary path.
+    if len(kept) == len(batch) and all(a is b for a, b in zip(kept, batch)):
         return raw                      # nothing refused: do not touch the bytes
 
     reply = dict(reply)

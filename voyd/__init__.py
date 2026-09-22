@@ -89,7 +89,7 @@ from __future__ import annotations
 
 from .declare import (auto_embed, budget, clearance, deadline, distinct,
                       embedded_with, guard, holdable, restricted_to,
-                      revocable, sealed, tenant)
+                      revocable, sealed, subjects, tenant)
 
 __version__ = "0.1.0"
 
@@ -97,6 +97,6 @@ __all__ = [
     # The declarative policy surface -- everything `voydfile.py` needs.
     "guard", "deadline", "revocable", "holdable", "tenant",
     "restricted_to", "clearance", "embedded_with", "budget", "distinct",
-    "sealed", "auto_embed",
+    "sealed", "auto_embed", "subjects",
     "__version__",
 ]

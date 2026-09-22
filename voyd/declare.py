@@ -110,6 +110,48 @@ def restricted_to(claim: str) -> _Field:
     return _Field("rule", lambda f: Restricted(field=f, claim=claim))
 
 
+def subjects(*, key: str) -> _Field:
+    """This field is an array whose elements are subjects in their own right.
+
+        @guard("books")
+        class Books:
+            expire_at = deadline()
+            forgotten = revocable()
+            chapters  = subjects(key="title")
+
+    A book with chapters, a ticket with comments, a case file with notes:
+    the embedded pattern MongoDB recommends, and increasingly the shape
+    retrieval works over. Every rule above reads *top-level* fields, so
+    without this a chapter carrying the exact mark `revocable()` writes is
+    admitted with its parent, counted nowhere, and reported as "nothing
+    was refused". Declaring the array makes the refusal *see* it: the
+    refused elements are removed from the document and the parent is
+    served without them, because a book is not erased by one retracted
+    chapter.
+
+    **`key` is required here and optional in the engine, deliberately.**
+    A subdocument has no `_id`, so there are only three ways to name one
+    and two are bad. Position -- `chapters.3` -- is wrong the first time
+    anybody `$pull`s an element, and wrong silently, which on an erasure
+    path is the worst available property. Promoting every chapter to its
+    own document gives up the pattern this exists to serve. So the name is
+    a field you already have, or add.
+
+    Anonymous subjects are refusable on read and can never be
+    *addressed* -- and an erasure request names a thing. A policy file that
+    declared subjects without a key would ship a subject nothing can ever
+    revoke, so this asks for one rather than defaulting. It is enforced,
+    not conventional: an element that does not carry `key` is refused as
+    `unnamed`.
+    """
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError(
+            "subjects() needs key= naming the field that identifies each "
+            "element. A subdocument has no _id, and a subject nothing can "
+            "name is one no erasure request can reach")
+    return _Field("subjects", args=(key,))
+
+
 def clearance(*, order: tuple[str, ...] | list[str],
               roles: dict[str, str] | None = None,
               via: str = "roles", default: str | None = None) -> _Field:
@@ -358,6 +400,8 @@ def guard(collection: str, *, lineage_field: str | None = None,
             f"{ON_DELETE}. 'forward' lets a delete really delete")
     def decorate(cls):
         rules, tenant_field, seen = [], None, set()
+        subject_path: str | None = None
+        subject_key: str | None = None
         sealed_fields: list[str] = []
         embedded: dict[str, str] = {}
         for name, value in vars(cls).items():
@@ -384,6 +428,15 @@ def guard(collection: str, *, lineage_field: str | None = None,
             if value.kind == "auto_embed":
                 embedded[name] = value.args[0]
                 continue        # a declaration about the index, not a rule
+            if value.kind == "subjects":
+                if subject_path is not None:
+                    raise ValueError(
+                        f"{collection}: two subject arrays ({subject_path!r} "
+                        f"and {name!r}). A document has one shape, and two "
+                        f"answers to 'which thing is the subject' is no "
+                        f"answer -- declare the other collection separately")
+                subject_path, subject_key = name, value.args[0]
+                continue        # a declaration about shape, not a rule
             seen.add(value.kind)
             assert value.build is not None
             rules.append(value.build(name))
@@ -443,9 +496,17 @@ def guard(collection: str, *, lineage_field: str | None = None,
                 f"record that the fact was forgotten, and the delete would "
                 f"silently do nothing at all")
 
+        if subject_path is not None and not rules:
+            raise ValueError(
+                f"{collection}: subjects({subject_path!r}) with no reason to "
+                f"refuse one. The array makes refusal able to see its "
+                f"elements; something still has to refuse them -- a "
+                f"deadline() or a revocable() beside it")
+
         REGISTRY[collection] = AdmissionSpec(
             collection, rules=tuple(rules), tenant=tenant_field,
-            lineage_field=lineage_field)
+            lineage_field=lineage_field, subjects=subject_path,
+            subject_key=subject_key)
         OPTIONS[collection] = {"on_delete": on_delete,
                                "sealed": tuple(sealed_fields),
                                "scope_field": tenant_field,

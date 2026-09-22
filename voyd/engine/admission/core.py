@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Any, Iterable, Self
 
 from ..errors import (CallerRequired, ScopeInvalid, ScopeRequired,
@@ -542,6 +543,16 @@ class AdmissionCore:
         surfaces as ``Page.redacted``. A short chapter list with an empty
         ``refused`` was the failure; it must not be the fix.
 
+        **Why ``Mapping`` and not ``dict``.** The proxy decodes a reply
+        with a lazy codec, so an element arrives as a ``RawBSONDocument``
+        -- a ``Mapping`` that is not a ``dict`` subclass. Tested against
+        ``dict``, every real subject fell through the "a scalar in an
+        array of scalars" branch below and was kept, so redaction did
+        nothing at all on the only read path the boundary uses while
+        working perfectly in every test that built its documents by hand.
+        The one narrow type made the whole feature a no-op in production
+        and correct in the suite.
+
         **Why cumulative rules are not asked.** ``tab`` is deliberately not
         threaded in. A budget is a property of the set being assembled for
         one prompt, charged once per retrieval unit; charging it again per
@@ -555,20 +566,28 @@ class AdmissionCore:
         if not path:
             return doc
         held = doc.get(path)
-        if not isinstance(held, list) or not held:
+        if not isinstance(held, (list, tuple)) or not held:
             return doc
         kept: list = []
         removed = 0
         for element in held:
-            if not isinstance(element, dict):
+            if not isinstance(element, Mapping):
                 # Not a subject -- a scalar in an array of scalars. Left
                 # alone rather than guessed at: a rule cannot read a field
                 # off a string, and dropping it would be redaction with no
                 # reason to report.
                 kept.append(element)
                 continue
-            reason = self._unnamed(element) or why_refused(
-                element, self.spec, when=when,
+            # A real `dict` before any rule sees it. The lazy codec hands
+            # these over as `RawBSONDocument`, and a rule -- including one
+            # a stranger wrote against the documented protocol -- is
+            # promised a dict. Normalising here keeps that promise true
+            # rather than widening the protocol to whatever the transport
+            # happened to decode into, and it costs a shallow copy per
+            # element on a path only a `subjects` collection takes.
+            subject = element if isinstance(element, dict) else dict(element)
+            reason = self._unnamed(subject) or why_refused(
+                subject, self.spec, when=when,
                 caller=self._caller, tab=None,
                 only_unbypassable=self._include)
             if reason is None:

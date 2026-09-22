@@ -1140,6 +1140,17 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
         print(f"voyd-wire: guarding {name}: {g.spec.describe()}"
               + (", delete -> revoke" if g.on_delete == "revoke" else ""),
               flush=True)
+        if g.spec.subjects:
+            # Its own line because it changes what a *document* is here.
+            # An operator seeing fewer chapters than the database holds
+            # should find the reason in the startup output.
+            print(f"voyd-wire: {name} judges each element of "
+                  f"{g.spec.subjects!r} on its own, named by "
+                  f"{g.spec.subject_key!r}: a refused element is removed and "
+                  f"the document served without it. An element with no "
+                  f"{g.spec.subject_key!r} is refused, because a subject "
+                  f"nothing can name is one no erasure request can reach",
+                  flush=True)
         if g.spec.lineage_field:
             # Worth its own line: this is the only declaration that makes
             # the boundary write to documents the caller never named, and

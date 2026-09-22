@@ -254,7 +254,13 @@ def which_door(path: str) -> str:
     string never opens one, which is the thing nobody noticed for months.
     """
     source = (ROOT / path).read_text()
-    if "voyd.wire.proxy" in source and "subprocess" in source:
+    # Both module spellings, because `-m voyd.wire` is the tidy one and a
+    # detector that only knew `voyd.wire.proxy` classified a wire-driven
+    # file as handle-driven -- a check whose *failure* mode is to demand
+    # justification for something already correct. Annoying rather than
+    # dangerous, and still wrong.
+    if "subprocess" in source and ("voyd.wire.proxy" in source
+                                   or '"voyd.wire"' in source):
         return "wire"
     if re.search(r"\b(Async)?MongoClient\(", source):
         return "handle"

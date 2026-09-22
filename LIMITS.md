@@ -487,7 +487,7 @@ the guarded side only.
 
 ## 4. Coverage
 
-576 tests, ~9,652 lines, against 13,856 lines of `voyd/` -- 7,196 of
+588 tests, ~9,891 lines, against 13,856 lines of `voyd/` -- 7,196 of
 policy and admission, 6,660 of boundary under `voyd/wire/`. Well-targeted
 rather than thorough: the coverage is by *claim*, which is the right axis,
 but it is not line coverage and should not be mistaken for it.
@@ -632,7 +632,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (572 tests, ~106 seconds) with
+**Consider:** the suite is fast by default (584 tests, ~110 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
@@ -908,26 +908,41 @@ than the one it fixes. Undecided, and unclosed today.
 
 ## 6. Operational notes that will surprise somebody
 
-**The boundary does not redact embedded subjects, because a policy file
-cannot declare them.** `AdmissionSpec` takes `subjects` and
-`subject_key`, `_admit` redacts refused elements from the document it
-returns, and `revoke_subject` can address one -- all of it works, and
-`declare.py` exposes none of it, so on the wire `spec.subjects` is always
-`None`. A book with a revoked chapter is served whole.
+**Embedded subjects are judged element by element, and getting there
+took three fixes for one mistake.** `subjects(key=...)` declares an array
+whose elements are subjects in their own right -- a book with chapters, a
+ticket with comments -- and a refused element is removed from a document
+that is still served, because a book is not erased by one retracted
+chapter.
 
-Said here rather than left to be discovered, because the engine having
-the capability reads like the product having it. It is the same shape as
-every other gap found this week: a guarantee that exists and has no route
-through the one artifact an application holds. The verb is the missing
-half -- declaring the array is easy, and `subject_key` has to be enforced
-or an anonymous subject is one nothing can ever revoke.
+It was unreachable and then quietly broken, all in the same direction: an
+optimisation assuming a document comes back whole or not at all.
 
-The redaction itself was also **counted and not performed** on the only
-read path the proxy uses, which is fixed and tested: `reachable()` used
-`_admit` as a predicate and kept the document it was handed, so a refused
-chapter appeared in `receipts()` and in the reply. `find()` was correct.
-One read path redacting and another not is this project's own named
-failure, and the two paths were the library one and the wire one.
+- `declare.py` exposed no `subjects`, so `spec.subjects` was always
+  `None` on the wire.
+- `_redact` tested elements with `isinstance(element, dict)`, and the
+  proxy decodes replies with a lazy codec, so an element arrives as a
+  `RawBSONDocument` -- a `Mapping`, not a `dict` subclass. Every real
+  chapter fell through the "a scalar in an array of scalars" branch. The
+  feature worked in every test that built its documents by hand and did
+  nothing at all in production.
+- `enforce` forwarded the original bytes whenever `len(kept) ==
+  len(batch)`, which is the right test for refusing a document and the
+  wrong one for editing it. Identity now, which is exact and costs a
+  pointer comparison.
+
+**And a projection that hides an element's marks is refused rather than
+rewritten.** Everywhere else a blinding projection has a remedy -- put
+the rule in the filter and the server drops the refused documents before
+the projection can hide anything. No query removes an array element, so
+for a subject there is no remedy, and the message says which fields to
+ask for instead. **Consider:** that is the one place the push-down that
+rescues every other blinded projection is not equivalent.
+
+`key` is required in a policy file and optional in the engine. An
+anonymous subject is refusable on read and can never be *addressed*, and
+an erasure request names a thing -- so an element carrying no key is
+refused as `unnamed` rather than admitted.
 
 **A readiness probe on the listen port lies, so do not use one.** Pointed
 at a deployment that is unreachable, the boundary starts, prints its

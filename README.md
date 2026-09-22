@@ -58,7 +58,7 @@ So this repository applies it to itself, and not as a slogan:
 - **[CLAIMS.md](CLAIMS.md)** maps every guarantee to the file that would go
   red if it stopped holding. The mapping is checked in both directions by
   `tests/test_every_claim_names_its_evidence.py` — a claim with no test, or
-  a test no claim points at, fails the suite. Currently 36 claims across 35
+  a test no claim points at, fails the suite. Currently 37 claims across 36
   files — lineage is two of them, because the cascade on read and the
   ancestry closed on write fail separately.
 - **[LIMITS.md](LIMITS.md)** counts this project's own defects, names its
@@ -308,6 +308,35 @@ the people it was written for.
 A `clearance()` with no mapping is still declarable for a process that
 already knows the level, and the boundary says at boot that it cannot
 supply one rather than letting it look like broken reads.
+
+### A chapter can be forgotten without forgetting the book
+
+Every rule above reads a *top-level* field, which is right until the
+document has parts. A book with chapters, a ticket with comments, a case
+file with notes — the embedded pattern MongoDB recommends, and
+increasingly the shape retrieval works over. A chapter carrying the exact
+mark `revocable()` writes reaches a prompt with its parent, counted
+nowhere, reported as "nothing was refused".
+
+```python
+@guard("books")
+class Books:
+    expire_at = deadline()
+    forgotten = revocable()
+    chapters  = subjects(key="title")
+```
+
+The refused elements are removed and the parent is served without them,
+because a book is not erased by one retracted chapter. `key` is required:
+an anonymous subject is refusable on read and can never be *addressed*,
+and an erasure request names a thing — so an element carrying no key is
+refused rather than admitted.
+
+**And a projection that would hide an element's marks is refused.**
+Everywhere else a blinding projection has a remedy — the rule goes into
+the filter and the server drops the refused documents before the
+projection can hide anything. No query removes an array element, so here
+there is none, and the error names the fields to ask for instead.
 
 ## The vocabulary is not a fixed list
 
@@ -809,7 +838,7 @@ from somebody asking why a paragraph said what it said. One
 team, two weeks, their own corpus is worth more than anything else that
 could be built next.
 
-The suite is **576 tests**, and it is the foundation rather than a census —
+The suite is **588 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie. Each one and the file that holds it up is
 **[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim with
@@ -834,7 +863,7 @@ still refused on the way out. Point it at your own cluster with
 docker compose up -d --wait mongo rs    # the rs has auth; it is the only
                                         # deployment that can test identity
 
-pytest              # 572 tests, ~106 seconds -- the inner loop
+pytest              # 584 tests, ~110 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 
