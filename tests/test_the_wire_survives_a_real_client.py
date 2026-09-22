@@ -391,7 +391,7 @@ def test_the_boundary_follows_an_election_without_being_restarted(boundary):
 # ---- the reply that causes all of the above, read as a pure function ---
 
 def test_a_stepdown_is_recognised_wherever_the_server_puts_it():
-    from voyd.wire.proxy import STEPPED_DOWN, stepped_down
+    from voyd.wire.upstream import STEPPED_DOWN, stepped_down
 
     assert stepped_down({"ok": 1}) is None
     assert stepped_down({"ok": 0, "code": 10107,
@@ -408,7 +408,7 @@ def test_a_stepdown_is_recognised_wherever_the_server_puts_it():
 
 
 def test_an_ordinary_write_error_is_not_read_as_an_election():
-    from voyd.wire.proxy import stepped_down
+    from voyd.wire.upstream import stepped_down
 
     # A duplicate key must not invalidate the upstream: re-resolving on
     # every application-level error would mean a topology scan per bad

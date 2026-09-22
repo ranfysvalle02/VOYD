@@ -125,7 +125,8 @@ jobs:
           # assertion: a distribution shipping the vocabulary to write a
           # policy and nothing that can serve one is not the artifact.
           import voyd.wire, voyd.wire.proxy, voyd.wire.seal, voyd.wire.cascade
-          assert callable(voyd.wire.proxy.main)
+          import voyd.wire.cli, voyd.wire.upstream, voyd.wire.identity
+          assert callable(voyd.wire.cli.main)
           print('wheel: the policy vocabulary imports, the proxy ships')"
           test -x /tmp/wheelcheck/bin/voyd-wire
           /tmp/wheelcheck/bin/voyd-wire --help > /dev/null

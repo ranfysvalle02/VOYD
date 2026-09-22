@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Transport and dispatch: sockets, connections, workers, and the CLI.
+"""Transport: sockets, connections, workers, and the shutdown.
 
     # terminal 1 -- rules in a file that is not your application
     voyd-wire --config voydfile.py --target localhost:27018
@@ -7,12 +7,24 @@
     # terminal 2 -- any driver, any language
     mongosh mongodb://localhost:27099/demo
 
-This file moves bytes and decides *where* they go. It decides nothing about
-what a message is allowed to mean -- that is `policy.py`, all of it, so
-"can this be bypassed?" is a question about one file. Framing and BSON are
-`codec.py`. What is left here is the shell: accept a connection, open one
-upstream, pump both directions, fork workers, drain on `SIGTERM`, parse the
-arguments.
+This file moves bytes and decides *when* they move. It decides nothing
+about what a message is allowed to mean -- that is `policy.py`, all of it,
+so "can this be bypassed?" is a question about one file. Framing and BSON
+are `codec.py`. What is left here is the shell: accept a connection, open
+one upstream, pump both directions, fork workers, drain on `SIGTERM`.
+
+Four questions a reader arrives with are four files beside this one,
+because each is a different question and only one of them is "how do the
+bytes move":
+
+    upstream.py   *where* it forwards, and how an election is followed
+    identity.py   *who* the server says this connection authenticated as
+    report.py     *what* it refused, summed across workers
+    cli.py        the flags, and what runs before the listener binds
+
+None of them imports this file except `cli`, which composes them. The
+direction matters: "what does it do with a message" stays answerable
+without reading an argument parser.
 
 The boundary binds the **connection**, not a handle. There is no raw read
 to guard -- not from Node, not from Compass, not from a notebook, not from
@@ -56,27 +68,21 @@ rather than thread stacks.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import os
 import signal
 import socket
 import ssl
-import sys
 import threading
 import time
 import traceback
-from typing import Callable, Mapping, TypedDict
+from typing import Mapping, TypedDict
 
 
 from . import cascade
-from . import ensure
-from . import preflight
 from . import seal
 from . import metrics
-from voyd import __version__
-from voyd.declare import OPTIONS, load
 from .policy import (Budgets, Guard, _wants_a_caller, _was_reduced,
                      cascade_first, cascade_first_for_one, delete_reply,
                      derive_on_insert, erase_first, guard_for, judge,
@@ -87,8 +93,12 @@ from .policy import (Budgets, Guard, _wants_a_caller, _was_reduced,
                      unsuppliable_claims)
 
 from .codec import (OP_COMPRESSED, OP_MSG, Hangup, ProtocolError,
-                    decode_op_msg, decode_sections, encode_op_msg,
-                    encode_sections, read_message_async, uncompress_message)
+                    decode_op_msg, decode_sections, encode_sections,
+                    read_message_async, uncompress_message)
+from .identity import Backchannel, CallerIdentity
+from .report import merge, summarise, tally
+from .upstream import (Upstream, keepalive, stepped_down,
+                       upstream_ready, vault_uri)
 
 
 async def _next_message(reader: asyncio.StreamReader,
@@ -452,204 +462,6 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     return "closed"
 
 
-# What a replica set says when the node you are talking to is no longer the
-# one that may write. The boundary learns from these rather than polling: a
-# health check is a guess about the future, and this is the server telling
-# you about the present.
-STEPPED_DOWN = {
-    10107,   # NotWritablePrimary
-    13435,   # NotPrimaryNoSecondaryOk
-    13436,   # NotPrimaryOrSecondary
-    11602,   # InterruptedDueToReplStateChange
-    189,     # PrimarySteppedDown
-    91,      # ShutdownInProgress
-}
-
-
-class Upstream:
-    """Where the boundary forwards to, and how it stays right.
-
-    A connection is a *lifecycle*, not an address, and the difference is
-    the whole class of operability complaint: an address resolved once at
-    startup cannot be re-resolved, so a failover means a restart.
-
-    - **resolved lazily**, so startup does not block on DNS and a cluster
-      that is briefly unreachable does not prevent the boundary from
-      listening;
-    - **cached**, because resolving a `mongodb+srv` URI costs a DNS round
-      trip and a topology scan, and doing that per connection would put the
-      driver's startup cost on every client;
-    - **invalidated by the server's own error**. When a reply carries
-      `NotWritablePrimary` -- or any of the codes above -- the cached
-      address is wrong *now*, and the next connection re-resolves. That is
-      how a driver learns about an election, and it is strictly better than
-      a timer: no window where the boundary knows and has not acted, and no
-      polling a healthy cluster forever to find out about an event that may
-      never happen.
-
-    What it still is not: a driver. It picks one node and forwards bytes; it
-    does not load-balance reads, follow read preference, or retry a write
-    the client already saw fail. A client should reach it with
-    ``directConnection=true`` so it does not chase the hosts the cluster
-    advertises straight past the boundary.
-    """
-
-    def __init__(self, target: str, *, verbose: bool = True,
-                 meter: "metrics.Meter | None" = None):
-        self.target = target
-        self.verbose = verbose
-        self.meter = meter
-        self._addr: tuple[str, int, bool] | None = None
-        self._lock = threading.Lock()
-        # Resolution is serialised so a burst of clients arriving after an
-        # election causes one topology scan rather than one each. The
-        # threading lock above still guards the cache itself, because
-        # `_resolve` runs in an executor thread.
-        self._resolving = asyncio.Lock()
-        self.generation = 0
-
-    def address(self) -> tuple[str, int, bool]:
-        with self._lock:
-            if self._addr is None:
-                self._addr = self._resolve()
-            return self._addr
-
-    def invalidate(self, why: str) -> None:
-        """Forget where the primary was. The next connection finds out."""
-        with self._lock:
-            if self._addr is None:
-                return
-            host, port, _ = self._addr
-            self._addr = None
-            self.generation += 1
-            if self.meter is not None:
-                self.meter.upstream_reresolve_total += 1
-        print(f"voyd-wire: {host}:{port} is no longer writable ({why}); "
-              f"re-resolving on the next connection", flush=True)
-
-    def _resolve(self) -> tuple[str, int, bool]:
-        """A bare `host:port`, or a URI resolved the way a driver would.
-
-        Atlas is `mongodb+srv`, which means three things a raw TCP dial
-        cannot do: the hosts live in DNS SRV records, the connection must be
-        TLS, and the port is not in the string.
-        """
-        target = self.target
-        if "://" not in target:
-            host, _, port = target.partition(":")
-            return host, int(port or 27017), False
-
-        from pymongo.uri_parser import parse_uri
-        parsed = parse_uri(target)
-        tls = bool(parsed["options"].get("tls",
-                                         target.startswith("mongodb+srv")))
-        try:
-            from pymongo import MongoClient
-            probe: MongoClient = MongoClient(
-                target, serverSelectionTimeoutMS=15000)
-            with probe:
-                # `ping` first: the driver connects lazily, and `.primary` on
-                # an undiscovered topology is `None` -- which silently
-                # selected the first DNS node and looked exactly like this
-                # not working.
-                probe.admin.command("ping")
-                primary = probe.primary
-            if primary:
-                if self.verbose:
-                    print(f"voyd-wire: primary is {primary[0]}:{primary[1]}",
-                          flush=True)
-                return primary[0], primary[1], tls
-        except Exception as exc:
-            print(f"voyd-wire: could not find the primary "
-                  f"({type(exc).__name__}); using the first node DNS "
-                  f"returned. Writes may come back `not primary`.", flush=True)
-
-        host, port = parsed["nodelist"][0]
-        return host, port, tls
-
-    def connect(self) -> socket.socket:
-        host, port, tls = self.address()
-        sock = socket.create_connection((host, port), timeout=20)
-        # No *read* timeout, deliberately. A MongoDB connection legitimately
-        # idles for minutes -- an awaitData cursor, a change stream, a client
-        # between requests -- so a read deadline would kill healthy
-        # connections and look like the cluster flapping. TCP keepalive is
-        # the right tool: it notices a peer that went away without
-        # penalising one that is merely quiet.
-        keepalive(sock)
-        sock.settimeout(None)
-        if not tls:
-            return sock
-        ctx = ssl.create_default_context()
-        # `server_hostname` is what makes certificate validation mean
-        # anything against a named cluster; without it this is an encrypted
-        # channel to whoever answered.
-        return ctx.wrap_socket(sock, server_hostname=host)
-
-    async def open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """The same upstream connection, without holding a thread.
-
-        `_resolve` stays blocking -- it is a DNS round trip and a pymongo
-        topology scan -- so it goes to an executor. Doing it inline would
-        stall every other connection on this loop for the length of a
-        cluster handshake, which is exactly the failure an event loop is
-        supposed to remove.
-        """
-        async with self._resolving:
-            loop = asyncio.get_running_loop()
-            host, port, tls = await loop.run_in_executor(None, self.address)
-
-        ssl_ctx = None
-        server_hostname = None
-        if tls:
-            ssl_ctx = ssl.create_default_context()
-            server_hostname = host
-        reader, writer = await asyncio.open_connection(
-            host, port, ssl=ssl_ctx, server_hostname=server_hostname)
-
-        # No *read* timeout, deliberately -- see `connect` above. Keepalive
-        # is the tool that notices a peer that vanished without penalising
-        # one that is merely idle, and it has to be set on the socket under
-        # the stream rather than on the stream.
-        raw_sock = writer.get_extra_info("socket")
-        if raw_sock is not None:
-            keepalive(raw_sock)
-        return reader, writer
-
-
-
-
-
-
-
-
-def stepped_down(reply: Mapping) -> str | None:
-    """Did the server just say this node may not write?
-
-    Read from the reply the client was going to get anyway. A write error
-    inside a batch is nested under ``writeErrors``, which is where this
-    hides on exactly the command -- a delete -- that matters most here.
-    """
-    if reply.get("code") in STEPPED_DOWN:
-        return str(reply.get("codeName") or reply.get("code"))
-    for err in reply.get("writeErrors") or ():
-        if isinstance(err, dict) and err.get("code") in STEPPED_DOWN:
-            return str(err.get("codeName") or err.get("code"))
-    return None
-
-
-def keepalive(sock: socket.socket) -> None:
-    """Notice a peer that vanished, without punishing one that is idle."""
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        for opt, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 15),
-                           ("TCP_KEEPCNT", 4)):
-            if hasattr(socket, opt):        # Linux; macOS spells one of them
-                sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), value)
-    except OSError:
-        pass                                 # best effort, never fatal
-
-
 def listener(port: int, certfile: str | None, keyfile: str | None,
              *, backlog: int = 512) -> tuple[socket.socket, "ssl.SSLContext | None"]:
     """The socket clients reach, and the TLS context to wrap them in.
@@ -807,177 +619,6 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
 # fixed so they cannot collide with a driver's, which start near zero and
 # count up: a collision would mean a client's reply being resolved into a
 # mark lookup's future and never reaching it.
-ASKED_BASE = 0x7F00_0000
-
-
-
-class Backchannel:
-    """The boundary's own questions, asked on the client's own connection.
-
-    Extracted from `Conversation`, which had the only copy, because the
-    plain path -- the default, and the one most connections take -- needed
-    the same primitive and a second spelling of "send a command and match
-    its reply" is the drift this file keeps finding in itself.
-
-    Why it is still not "a connection of its own": the socket, the
-    authentication and the identity are all the client's. What is borrowed
-    is a gap between its requests, which is also why every question asked
-    here has to be one the client's own credentials are allowed to ask.
-    """
-
-    def __init__(self, primary_w: asyncio.StreamWriter | None = None):
-        self.primary_w = primary_w
-        self.asked: dict[int, asyncio.Future] = {}
-        self._next = ASKED_BASE
-        self.lock = asyncio.Lock()
-
-    def answer(self, resp_to: int, raw: bytes) -> bool:
-        """Resolve a pending question. True when the reply was *ours*.
-
-        The return value is load-bearing: a caller that forwards on a
-        `True` has just handed the client a reply to a command it never
-        sent, which desynchronises the driver as surely as a wrong
-        `responseTo` does.
-        """
-        future = self.asked.get(resp_to)
-        if future is None:
-            return False
-        if not future.done():
-            future.set_result(raw)
-        return True
-
-    async def ask(self, command: dict, timeout: float = 20.0) -> dict | None:
-        """Run one command on the client's connection. `None` on any failure.
-
-        `None` rather than an exception, and every caller treats it as "the
-        question could not be answered" rather than as an answer. On the
-        permission path that distinction is the whole guarantee: not
-        knowing who is asking has to refuse, never admit.
-        """
-        if self.primary_w is None:
-            return None
-        self._next += 1
-        req_id = self._next
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future = loop.create_future()
-        self.asked[req_id] = future
-        try:
-            async with self.lock:
-                # One `write` per whole message, and that is load-bearing
-                # rather than tidy. Two coroutines share this writer now --
-                # the request pump forwarding the client, and this asking
-                # its own question -- and what keeps their bytes from
-                # interleaving is that each appends a complete message to
-                # the buffer with no await inside. The `drain` below may
-                # yield; by then the bytes are already ordered. Splitting
-                # either write in two would corrupt the stream in a way
-                # that looks like a driver bug.
-                self.primary_w.write(encode_op_msg(req_id, 0, 0, command))
-                await self.primary_w.drain()
-            raw = await asyncio.wait_for(future, timeout)
-        except (asyncio.TimeoutError, ConnectionError, OSError):
-            return None
-        finally:
-            self.asked.pop(req_id, None)
-        decoded = decode_op_msg(raw)
-        return dict(decoded[1]) if decoded else None
-
-
-class CallerIdentity:
-    """Who the server says this connection authenticated as.
-
-    **The claims come from the server, never from the client**, and that is
-    not a preference. `for_caller` in `admission/core.py` says it outright:
-    a handle that believed ``{"clearance": "secret"}`` because it was
-    passed one "would be an authorisation system whose only input is the
-    attacker's". A proxy is in an even worse position to trust the client,
-    because the client is the only thing talking to it.
-
-    So the question is put to the deployment. ``connectionStatus`` answered
-    on this connection returns ``authenticatedUsers`` and
-    ``authenticatedUserRoles`` -- the server's own account of who
-    authenticated here, which the client cannot forge without forging the
-    authentication itself.
-
-    Asked once and cached, because it cannot change: a MongoDB connection
-    authenticates and stays that identity. Asked *lazily*, on the first
-    read against a collection whose rules need a caller, so a deployment
-    that declares no such rule pays nothing at all.
-
-    ``None`` claims mean the question could not be answered, and that is
-    kept distinct from ``{}`` -- "nobody is authenticated", which is a real
-    answer on a deployment without auth. The rules refuse either way; the
-    difference is what an operator is told.
-    """
-
-    def __init__(self, back: Backchannel):
-        self.back = back
-        self.claims: dict | None = None
-        self.asked = False
-        self.why: str | None = None
-
-    async def resolve(self, verbose: bool = False) -> dict | None:
-        if self.asked:
-            return self.claims
-        self.asked = True
-        reply = await self.back.ask({"connectionStatus": 1, "$db": "admin"})
-        if reply is None or not reply.get("ok"):
-            self.why = ("the deployment did not answer connectionStatus, so "
-                        "who is asking is unknown")
-            if verbose:
-                print(f"  voyd: {self.why}", flush=True)
-            return None
-        self.claims = claims_from(reply)
-        if verbose:
-            who = self.claims.get("user") or "nobody"
-            groups = ",".join(self.claims.get("groups") or []) or "none"
-            print(f"  voyd: this connection is {who!r} to the server; "
-                  f"groups={groups}", flush=True)
-        return self.claims
-
-
-def claims_from(status: Mapping) -> dict:
-    """`connectionStatus` as the claims a rule reads.
-
-    The mapping is deliberately thin. A role *is* a group -- that is what
-    `db.createRole({role: "legal"})` makes -- so `restricted_to("groups")`
-    against a document listing ``["legal", "deal-desk"]`` works with no
-    further declaration, which is the case this is for.
-
-    Bare role names only, not ``db.role``. Qualified names would also match
-    a document that happened to spell them that way, and being generous is
-    the wrong direction in a check that decides who sees what: a name this
-    does not produce fails closed.
-    """
-    info = status.get("authInfo")
-    info = info if isinstance(info, Mapping) else {}
-    users = info.get("authenticatedUsers") or []
-    roles = info.get("authenticatedUserRoles") or []
-    first = users[0] if users and isinstance(users[0], Mapping) else {}
-    groups = sorted({str(r["role"]) for r in roles
-                     if isinstance(r, Mapping)
-                     and isinstance(r.get("role"), str)})
-    return {
-        "user": first.get("user"),
-        "db": first.get("db"),
-        "groups": groups,
-        # The same list under the name the deployment calls it, so a policy
-        # can say `restricted_to("roles")` if that reads better to the
-        # person writing it. One source, two spellings of the question.
-        "roles": groups,
-    }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 async def close(writer: asyncio.StreamWriter) -> None:
@@ -992,123 +633,6 @@ async def close(writer: asyncio.StreamWriter) -> None:
         await writer.wait_closed()
     except (OSError, ConnectionError, ssl.SSLError):
         pass
-
-
-def upstream_ready(target: str) -> "Callable[[], tuple[bool, str]]":
-    """A readiness check that goes one hop past "am I listening".
-
-    Bound-but-broken is the case worth catching. Measured: pointed at a
-    dead port, this proxy starts, prints its banner, accepts connections
-    and fails every read -- so a TCP probe on the listen port reports
-    ready and a rolling deploy sends traffic to a pod that cannot serve.
-
-    So the check resolves the upstream the way a connection would and
-    opens a socket to it. `Upstream` caches the address, so the first
-    probe pays the topology scan and the rest are one connect. A
-    deployment that has gone away fails the *next* probe rather than
-    being remembered as healthy, because `invalidate` clears that cache
-    on the data path.
-
-    Its own `Upstream`, not the one serving traffic: a probe must never
-    contend with a connection for the resolution lock, and with
-    `--workers` the process answering probes is the parent, which has no
-    upstream of its own at all.
-    """
-    probe = Upstream(target, verbose=False)
-
-    def ready() -> tuple[bool, str]:
-        try:
-            host, port, _tls = probe.address()
-        except Exception as exc:                              # noqa: BLE001
-            return False, f"cannot resolve upstream ({type(exc).__name__})"
-        try:
-            with socket.create_connection((host, port), timeout=2.0):
-                return True, ""
-        except OSError as exc:
-            probe.invalidate(type(exc).__name__)
-            return False, f"cannot reach {host}:{port}"
-
-    return ready
-
-
-def tally(guards: dict[str, Guard],
-          vault: "seal.Vault | None" = None) -> dict:
-    """What one process actually did, as data rather than as a print.
-
-    Separated from the printing because with `--workers` the counters live
-    in N address spaces and the number a human should read is the sum. A
-    summary printed per worker is not a summary, it is N partial ones that
-    each look like the whole -- and undercounting a refusal tally is the
-    specific way this tool would lie about the thing it exists to prove.
-    """
-    reasons: dict[str, int] = {}
-    for g in guards.values():
-        for reason, n in g.reasons().items():
-            reasons[reason] = reasons.get(reason, 0) + n
-    counts = {"served": sum(g.admitted for g in guards.values()),
-              "refused": sum(g.refused for g in guards.values()),
-              "revoked": sum(g.revoked for g in guards.values()),
-              "cascaded": sum(g.cascaded for g in guards.values()),
-              "reasons": reasons}
-    if vault is not None:
-        counts["sealed"] = vault.sealed_writes
-        counts["unsealed"] = vault.unsealed_reads
-        counts["erased"] = vault.erasures
-    return counts
-
-
-def merge(tallies: list[dict]) -> dict:
-    """N workers' counts, added up."""
-    # Counts and reasons kept apart while summing, then joined on the way
-    # out. One dict holding both an `int` and a `dict[str, int]` is what
-    # made the reason accumulator untypeable -- and it is also why
-    # `total[key] += ...` and `total["reasons"][reason] = ...` read as the
-    # same kind of operation when they are not.
-    counts = {"served": 0, "refused": 0, "revoked": 0, "cascaded": 0}
-    reasons: dict[str, int] = {}
-    for one in tallies:
-        for key in counts:
-            counts[key] += one.get(key, 0)
-        for reason, n in (one.get("reasons") or {}).items():
-            reasons[reason] = reasons.get(reason, 0) + n
-    return {**counts, "reasons": reasons}
-
-
-def summarise(counts: dict | dict[str, Guard]) -> None:
-    """What this boundary actually did. A guarantee nobody counted is a
-    claim about one."""
-    if counts and all(isinstance(v, Guard) for v in counts.values()):
-        counts = tally(counts)
-    served = counts.get("served", 0)
-    refused = counts.get("refused", 0)
-    revoked = counts.get("revoked", 0)
-    reasons = counts.get("reasons") or {}
-    print(f"voyd-wire: served {served}, refused {refused} {reasons or '{}'}, "
-          f"turned {revoked} delete(s) into revocations", flush=True)
-    cascaded = counts.get("cascaded", 0)
-    if cascaded:
-        # Said separately from `revoked` on purpose. "3 facts revoked" and
-        # "3 facts revoked and 41 things made out of them went too" are
-        # different sentences, and the second one is the only one that
-        # answers an erasure request honestly.
-        print(f"voyd-wire: the refusal travelled to {cascaded} document(s) "
-              f"derived from those facts, marked before the source was",
-              flush=True)
-    sealed = counts.get("sealed")
-    if sealed is not None:
-        print(f"voyd-wire: sealed {sealed} document(s) on the way in, "
-              f"unsealed {counts.get('unsealed', 0)} on the way out, "
-              f"sequenced {counts.get('erased', 0)} erasure(s)", flush=True)
-        # The old line said this unconditionally, and with `--key-vault` it
-        # would have been a half-truth: the boundary still deletes no
-        # documents, but it does forward a key's destruction, and a key is
-        # the one thing here whose deletion is the point. Saying both is
-        # cheaper than letting a reader reconcile them.
-        print(f"voyd-wire: documents deleted by this process: 0 "
-              f"(key deletions forwarded: {counts.get('erased', 0)} -- the "
-              f"one deletion this tool argues for)", flush=True)
-    else:
-        print("voyd-wire: documents deleted by this process: 0", flush=True)
 
 
 def serve(listen_port: int, target: str, guards: dict[str, Guard],
@@ -1269,7 +793,7 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
     # that needs it already has that collection's guard in hand.
     lineage = None
     if cascade.Cascade.wanted(guards):
-        lineage = cascade.Cascade(_vault_uri(target), verbose=verbose)
+        lineage = cascade.Cascade(vault_uri(target), verbose=verbose)
         await lineage.open()
         for g in guards.values():
             if g.spec.lineage_field:
@@ -1612,371 +1136,3 @@ def supervise(sock: socket.socket, workers: int, target: str,
         print(f"voyd-wire: {missing} worker(s) exited without a tally; the "
               f"totals below undercount by their share", flush=True)
     summarise(merge(tallies))
-
-
-def _custody(spec: str):
-    """`local`, `local:/path`, or `env:PREFIX`. Never a guess.
-
-    Built here, in the parent, *before* any fork -- so every worker
-    inherits the same master key. An `Ephemeral` custody constructed per
-    worker would mint a different key each, and a tenant written through
-    one worker would be undecryptable through the next: a data-loss bug
-    that only appears with `--workers 2` and looks like corruption.
-    """
-    from voyd.engine.custody import Ephemeral, LocalFile, from_env
-
-    if spec == "local":
-        return Ephemeral()
-    if spec.startswith("local:"):
-        return LocalFile(path=spec.split(":", 1)[1])
-    if spec.startswith("env:"):
-        return from_env(spec.split(":", 1)[1])
-    raise ValueError(
-        f"--kms {spec!r}: expected `local`, `local:/path/to/master.key`, or "
-        f"`env:PREFIX`. Custody is the whole of the erasure claim, so this "
-        f"refuses to guess at it")
-
-
-def _vault_from(args) -> dict | int:
-    """The vault configuration, or an exit code and a reason on stderr.
-
-    Three ways to be wrong, and all three are startup errors rather than
-    surprises later:
-
-    - a policy declares `sealed()` and nobody passed `--key-vault`. The
-      boundary would read ciphertext it could not decrypt and refuse every
-      sealed document under `unrecoverable` -- fail-closed, but a
-      deployment reporting a total erasure it never asked for.
-    - `--key-vault` with no `sealed()` anywhere. Holding keys buys nothing
-      and costs a credential, so it is a mistake worth naming.
-    - a `--kms` this cannot parse.
-    """
-    declared = seal.sealed_from(OPTIONS)
-    if declared and not args.key_vault:
-        print("voyd-wire: this policy declares sealed() on "
-              + ", ".join(sorted(declared))
-              + " but no --key-vault was given. Without one this boundary "
-                "holds no keys, so it cannot decrypt those fields and would "
-                "refuse every document in them as unrecoverable -- a total "
-                "erasure nobody asked for, reported as if it were working. "
-                "Pass --key-vault DB, or drop sealed() from the policy",
-              file=sys.stderr)
-        return 2
-    if args.key_vault and not declared:
-        print("voyd-wire: --key-vault was given but no collection declares "
-              "sealed(). Holding a master key buys nothing here and costs "
-              "this process a credential it does not need", file=sys.stderr)
-        return 2
-    if not declared:
-        return {}
-    database, _, collection = args.key_vault.partition(".")
-    try:
-        custody = _custody(args.kms)
-    except ValueError as exc:
-        print(f"voyd-wire: {exc}", file=sys.stderr)
-        return 2
-    return {"uri": _vault_uri(args.target), "database": database,
-            "sealed": declared, "custody": custody,
-            "collection": collection or "__keys"}
-
-
-def _ensure(args, guards: dict[str, Guard]) -> int:
-    """Build what the policy declares, before serving. 0 to continue.
-
-    Deliberately in front of `_preflight` in `main`, so the ordinary first
-    run is `--ensure app --verify app`: create it, then have a separately
-    written checker refuse to agree it is there. One of those alone is a
-    boot step; the pair is evidence.
-    """
-    try:
-        lines = asyncio.run(ensure.provision(
-            _vault_uri(args.target), args.ensure, guards, OPTIONS,
-            wait_s=args.ensure_wait))
-    except Exception as exc:                                  # noqa: BLE001
-        print(f"voyd-wire: --ensure could not build the policy's schema "
-              f"({type(exc).__name__}: {exc}). Nothing was served, because "
-              f"a boundary enforcing a policy whose indexes do not exist "
-              f"refuses correctly and ranks badly, one query at a time",
-              file=sys.stderr)
-        return 4
-    for line in lines:
-        print(line, flush=True)
-    print(flush=True)
-    return 0
-
-
-def _preflight(args, guards: dict[str, Guard]) -> int:
-    """Ask before serving. Returns an exit code, 0 to continue.
-
-    Synchronous and finished before `serve` binds anything, which is the
-    whole point: the answer belongs in the same screen of output as the
-    guarantees the boundary is about to start making, not in a metric
-    somebody reads afterwards.
-    """
-    found, why = asyncio.run(preflight.inspect(
-        _vault_uri(args.target), args.verify,
-        preflight.declarations(guards, OPTIONS)))
-    for line in preflight.report(found, why):
-        print(line, flush=True)
-    if preflight.fatal(found) and not args.verify_only:
-        print("voyd-wire: refusing to start. The boundary would enforce a "
-              "policy this cluster cannot satisfy, and it would do it one "
-              "query at a time -- which is a worse way to find out than "
-              "this. Fix the line above, or drop --verify to start anyway",
-              file=sys.stderr)
-        return 3
-    if preflight.fatal(found):
-        return 3
-    print(flush=True)
-    return 0
-
-
-def _embeds_from(options: Mapping) -> dict:
-    """Collection -> the model the server embeds it with.
-
-    Flattened from the policy file's `OPTIONS`, because the boundary's
-    question is per collection: *does this collection's index hold text
-    the server encoded?* Which field it is declared on matters to the
-    index and not to the refusal -- a client vector is wrong for the
-    collection however many paths it embeds.
-    """
-    out = {}
-    for name, opt in options.items():
-        declared = opt.get("auto_embed") or {}
-        if declared:
-            out[name] = next(iter(declared.values()))
-    return out
-
-
-def _vault_uri(target: str) -> str:
-    """The connection string the vault dials, from `--target`.
-
-    The same deployment the boundary forwards to, by construction rather
-    than by a second flag somebody could point elsewhere. A key vault on a
-    different cluster than the ciphertext is a failure that looks like
-    "the keys are missing" rather than like a misconfiguration.
-    """
-    if "://" in target:
-        return target
-    return f"mongodb://{target}/?directConnection=true"
-
-
-def main(argv: list[str] | None = None) -> int:
-    # `prog` pinned, because argparse defaults it to `sys.argv[0]` and the
-    # help then names whatever file happened to be executed -- `__main__.py`
-    # under `-m`, an absolute path under a systemd unit. An operator copying
-    # a usage line out of `--help` should get the command they typed.
-    ap = argparse.ArgumentParser(
-        prog="voyd-wire", description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--listen", type=int, default=27099, help="local port")
-    ap.add_argument("--target", default="localhost:27017",
-                    help="the database this fronts: `host:port`, or a full "
-                         "MongoDB URI. A `mongodb+srv://` URI is resolved "
-                         "through DNS and connected over TLS, which is what "
-                         "Atlas requires")
-    ap.add_argument("--config", metavar="VOYDFILE",
-                    help="a policy file declaring the rules per collection "
-                         "(see voyd.declare). This is the whole of what you "
-                         "write, and it is not in your application")
-    ap.add_argument("--guard", action="append", default=[], metavar="COLLECTION",
-                    help="a collection whose reads are admitted; repeatable. "
-                         "Collections not named here are forwarded untouched, "
-                         "which is stated rather than implied: this refuses "
-                         "what it was told to refuse")
-    ap.add_argument("--at-field", default="expire_at")
-    ap.add_argument("--mark-field", default="forgotten")
-    ap.add_argument("--tls-cert", metavar="PEM",
-                    help="terminate TLS from clients with this certificate. "
-                         "Without it the listener binds loopback only, "
-                         "because a plaintext boundary reachable from the "
-                         "network would carry in the clear every document it "
-                         "just refused to serve")
-    ap.add_argument("--tls-key", metavar="PEM",
-                    help="the private key for --tls-cert, if it is not in "
-                         "the same file")
-    ap.add_argument("--advertise", metavar="HOST:PORT", default=None,
-                    help="rewrite `hello` so clients see this address "
-                         "instead of the cluster's own hosts. Without it a "
-                         "driver that does not pass directConnection=true "
-                         "reads the real host list and connects past this "
-                         "boundary entirely. Defaults to localhost:<listen> "
-                         "when --advertise-self is given")
-    ap.add_argument("--metrics-bind", metavar="ADDR", default="127.0.0.1",
-                    help="where the metrics and /health server listens "
-                         "(default 127.0.0.1). Set it to 0.0.0.0 or a pod "
-                         "IP when the scrape comes from somewhere else -- "
-                         "and know what you are exposing: a refusal count "
-                         "broken down by reason describes what the corpus "
-                         "contains and who has been probing it. /health "
-                         "carries one bit and no numbers")
-    ap.add_argument("--advertise-self", action="store_true",
-                    help="shorthand for --advertise localhost:<listen>")
-    ap.add_argument("--max-connections", type=int, default=200, metavar="N",
-                    help="concurrent client connections; further ones are "
-                         "closed rather than queued, because a driver "
-                         "retries and an unbounded backlog turns a busy "
-                         "minute into an outage")
-    ap.add_argument("--drain", type=float, default=20.0, metavar="SECONDS",
-                    help="on SIGTERM, how long to let requests already in "
-                         "flight finish. Connections sitting idle between "
-                         "requests are closed at once and do not wait this "
-                         "out. 0 hangs up on everything immediately")
-    ap.add_argument("--workers", type=int, default=1, metavar="N",
-                    help="worker processes sharing the listening socket. "
-                         "The event loop makes a connection cheap but "
-                         "cannot spread BSON decoding across cores, so "
-                         "this is the knob that does. Counters are summed "
-                         "across workers and reported once on shutdown")
-    ap.add_argument("--metrics", type=int, metavar="PORT", default=None,
-                    help="serve Prometheus metrics on this port. Always "
-                         "loopback, with no flag to change it: a refusal "
-                         "count broken down by reason describes what a "
-                         "corpus holds and who has been probing it")
-    ap.add_argument("--key-vault", metavar="DB[.COLLECTION]", default=None,
-                    help="hold the keys for the fields a policy file "
-                         "declared sealed(), encrypting them on the way in "
-                         "and decrypting them on the way out. This is the "
-                         "one flag that costs this boundary its purity: it "
-                         "opens a database connection of its own, holds KMS "
-                         "credentials, and makes a sealed read cost a "
-                         "decrypt rather than 2.3us. What it buys is the "
-                         "erasure refusal cannot perform -- destroying a "
-                         "key makes every copy of that tenant's ciphertext "
-                         "unreadable, in every replica, snapshot and "
-                         "backup, without visiting any of them. See "
-                         "LIMITS.md \u00a75")
-    ap.add_argument("--kms", metavar="SPEC", default="local",
-                    help="who holds the master key: `local` (ephemeral, "
-                         "demo-grade, gone on restart), "
-                         "`local:/path/to/master.key` (durable; custody is "
-                         "a file permission), or `env:PREFIX` to read a "
-                         "provider out of the environment the way "
-                         "voyd.engine.custody.from_env does -- which is the "
-                         "rung that gets you aws/azure/gcp/kmip, where "
-                         "destroying the master key is somebody else's "
-                         "audited operation")
-    ap.add_argument("--ensure", metavar="DB", default=None,
-                    help="before serving, create what the policy file "
-                         "declares in this database: the collection, a TTL "
-                         "index behind every deadline(), an index leading "
-                         "with every tenant(), and a vector index the "
-                         "server embeds for every auto_embed(). The one "
-                         "mode that writes -- it uses your credentials and "
-                         "closes its connection before the listener binds. "
-                         "Idempotent, so it is safe on every boot. Pair it "
-                         "with --verify, which is the same declaration read "
-                         "by different code that creates nothing")
-    ap.add_argument("--ensure-wait", metavar="SECONDS", type=float,
-                    default=90.0,
-                    help="how long --ensure waits for a search index to "
-                         "become queryable. mongot builds asynchronously "
-                         "and a query against a half-built index returns "
-                         "no rows rather than an error, so the wait is the "
-                         "difference between a clean first run and a "
-                         "confusing one (default: 90)")
-    ap.add_argument("--ensure-only", action="store_true",
-                    help="run --ensure and exit without serving, for a "
-                         "deploy step that is not the process that serves")
-    ap.add_argument("--verify", metavar="DB", default=None,
-                    help="before serving, ask the cluster whether it "
-                         "matches the policy file: a TTL index behind every "
-                         "deadline(), an index leading with every tenant(), "
-                         "an autoEmbed field naming the model auto_embed() "
-                         "declares, a binData validator behind every "
-                         "sealed(). Read-only -- it issues listIndexes, "
-                         "$listSearchIndexes and listCollections, creates "
-                         "nothing, and closes its connection before the "
-                         "listener accepts anything. A contradiction (the "
-                         "index embeds with a different model than the "
-                         "policy names) refuses to start; a missing layer "
-                         "underneath refusal (no TTL index) is a warning. "
-                         "Needs a database because a policy file names "
-                         "collections and the *client* names the database, "
-                         "so this process genuinely cannot know it")
-    ap.add_argument("--verify-only", action="store_true",
-                    help="run --verify and exit without binding a port. "
-                         "The form a deploy gate wants: exit 0 if the "
-                         "cluster matches the policy, 3 if it contradicts "
-                         "it, and print the warnings either way")
-    ap.add_argument("--version", action="version",
-                    version=f"voyd-wire {__version__}",
-                    help="the version of the boundary that is running, "
-                         "which is the first thing anybody asks when it is "
-                         "behaving unlike the last one")
-    ap.add_argument("--quiet", action="store_true")
-    args = ap.parse_args(argv)
-
-    if not args.config and not args.guard:
-        print("voyd-wire: give it --config voydfile.py, or --guard naming at "
-              "least one collection. With neither, this process is a plain "
-              "TCP relay pretending to be a boundary", file=sys.stderr)
-        return 2
-
-    guards: dict[str, Guard] = {}
-    if args.config:
-        try:
-            for collection, spec in load(args.config).items():
-                guards[collection] = Guard(
-                    spec,
-                    on_delete=OPTIONS.get(collection, {}).get(
-                        "on_delete", "forward"))
-        except Exception as exc:
-            # A policy file that is wrong must fail here, loudly, rather than
-            # at the first query. Starting a boundary from a broken
-            # declaration is how you get a door that is ajar.
-            print(f"voyd-wire: {args.config}: {exc}", file=sys.stderr)
-            return 2
-    for c in args.guard:
-        guards.setdefault(c, Guard.defaults(
-            c, at_field=args.at_field, mark_field=args.mark_field))
-    try:
-        if args.tls_key and not args.tls_cert:
-            print("voyd-wire: --tls-key needs --tls-cert", file=sys.stderr)
-            return 2
-        advertise = args.advertise
-        if args.advertise_self and not advertise:
-            advertise = f"localhost:{args.listen}"
-        vault_spec = _vault_from(args)
-        if isinstance(vault_spec, int):
-            return vault_spec
-        if args.ensure_only and not args.ensure:
-            print("voyd-wire: --ensure-only needs --ensure DB naming the "
-                  "database to build", file=sys.stderr)
-            return 2
-        if args.ensure:
-            code = _ensure(args, guards)
-            if code:
-                return code
-            if args.ensure_only and not args.verify:
-                return 0
-        if args.verify_only and not args.verify:
-            print("voyd-wire: --verify-only needs --verify DB naming the "
-                  "database to check", file=sys.stderr)
-            return 2
-        if args.verify:
-            code = _preflight(args, guards)
-            if code or args.verify_only or args.ensure_only:
-                return code
-        if args.workers < 1:
-            print("voyd-wire: --workers must be at least 1", file=sys.stderr)
-            return 2
-        if args.workers > 1 and not hasattr(os, "fork"):
-            print("voyd-wire: --workers needs fork(); this platform has "
-                  "none, so run one process per port behind a balancer",
-                  file=sys.stderr)
-            return 2
-        serve(args.listen, args.target, guards, not args.quiet,
-              certfile=args.tls_cert, keyfile=args.tls_key,
-              max_connections=args.max_connections, advertise=advertise,
-              drain_seconds=args.drain,
-              workers=args.workers, metrics_port=args.metrics,
-              metrics_bind=args.metrics_bind,
-              vault_spec=vault_spec, auto_embed=_embeds_from(OPTIONS))
-    except KeyboardInterrupt:
-        summarise(guards)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

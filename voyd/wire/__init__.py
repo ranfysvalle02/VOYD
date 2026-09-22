@@ -10,7 +10,11 @@ forgotten -- in any driver, in any language, with no import and no code.
                 what a read may see, what is refused outright. One file,
                 so "can this be bypassed?" is one file to read.
     codec       the wire as bytes: framing, OP_MSG, compression
-    proxy       transport and dispatch -- sockets, workers, the CLI
+    proxy       transport: accept, pump both directions, fork, drain
+    upstream    where it forwards to, and how an election is followed
+    identity    who the *server* says this connection authenticated as
+    report      what was refused, counted across workers and said once
+    cli         the flags, and what runs before the listener binds
     cascade     a revocation reaching what was derived from the fact
     seal        `--key-vault`: ciphertext at rest, a key per scope
     ensure      `--ensure`: build what the policy declares
@@ -23,9 +27,9 @@ and is pure -- no database, no connection, no I/O. That is what makes it
 movable to a wire at all.
 """
 
-# Deliberately no imports. Importing `main` here made the package load
-# before `python -m voyd.wire.proxy` executed the module, which Python
-# reports as a `RuntimeWarning` on stderr -- the first line of every
+# Deliberately no imports. Importing `main` here would make the package
+# load before `python -m voyd.wire.<submodule>` executed the module, which
+# Python reports as a `RuntimeWarning` on stderr -- the first line of every
 # container's log, read by somebody who is already worried. The console
-# script points at `voyd.wire.proxy:main`; `python -m voyd.wire` works
+# script points at `voyd.wire.cli:main`; `python -m voyd.wire` works
 # through `__main__.py`.

@@ -72,7 +72,7 @@ build-backend = "hatchling.build"
 [project.scripts]
 # The artifact. `pip install voyd` has to give you something that can
 # serve a policy file, not only the vocabulary to write one.
-voyd-wire = "voyd.wire.proxy:main"
+voyd-wire = "voyd.wire.cli:main"
 voyd-bench = "voyd.wire.bench:main"
 voyd-wire-health = "voyd.wire.health:main"
 

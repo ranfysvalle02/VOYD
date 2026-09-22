@@ -130,7 +130,7 @@ def _serve(name: str) -> None:
         path.write_text(POLICY)
         port = free_port()
         proc = subprocess.Popen(
-            [sys.executable, "-m", "voyd.wire.proxy", "--config", str(path),
+            [sys.executable, "-m", "voyd.wire", "--config", str(path),
              "--listen", str(port), "--target", RS_URI],
             cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True)

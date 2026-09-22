@@ -67,7 +67,7 @@ def main() -> None:
     port = _free_port()
     host = URI.split("//", 1)[1].split("/", 1)[0]
     proxy = subprocess.Popen(
-        [sys.executable, "-m", "voyd.wire.proxy", "--config", "voydfile.py",
+        [sys.executable, "-m", "voyd.wire", "--config", "voydfile.py",
          "--listen", str(port), "--target", host],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:

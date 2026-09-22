@@ -103,7 +103,7 @@ def reply(docs: int, refuse_every: int, pad: int, dims: int = 0) -> bytes:
         if refuse_every and i % refuse_every == 0:
             doc["forgotten"] = True
         batch.append(doc)
-    return w.encode_op_msg(1, 1, 0, {
+    return codec.encode_op_msg(1, 1, 0, {
         "cursor": {"id": 0, "ns": NAMESPACE, "firstBatch": batch},
         "ok": 1.0})
 
@@ -355,7 +355,7 @@ def run(args) -> int:
 
             listen = _free_port()
             proxy = subprocess.Popen(
-                [sys.executable, "-m", "voyd.wire.proxy", "--config", str(policy),
+                [sys.executable, "-m", "voyd.wire", "--config", str(policy),
                  "--listen", str(listen), "--target", f"127.0.0.1:{up_port}",
                  "--max-connections", str(max(args.clients * 4, 64)),
                  "--workers", str(workers), "--quiet"]
@@ -610,7 +610,7 @@ class Notes:
             listen = _free_port()
             host = uri.split("//", 1)[1].split("/", 1)[0]
             proxy = subprocess.Popen(
-                [sys.executable, "-m", "voyd.wire.proxy", "--config",
+                [sys.executable, "-m", "voyd.wire", "--config",
                  str(path), "--listen", str(listen), "--target", host,
                  "--quiet"])
             try:
