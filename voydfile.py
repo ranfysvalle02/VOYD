@@ -10,11 +10,10 @@ row still on disk for the investigation, deadline pulled in so the reaper
 collects it on the schedule it already had.
 """
 
-from voyd import deadline, guard, revocable, tenant
+from voyd import deadline, guard, revocable
 
 
 @guard("notes", on_delete="revoke")
 class Notes:
     expire_at = deadline()
     forgotten = revocable()
-    tenant_id = tenant()
