@@ -232,6 +232,32 @@ policy have refused last Tuesday?"* a real question — a deadline and a hold
 are both functions of time. It moves the clock and not the data: nothing
 here keeps history, and the documents are the ones on disk now.
 
+### In the place a policy is actually reviewed
+
+A check nobody runs is a man page, so the plan ships as an action:
+
+```yaml
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }   # the policy in force is read out of git
+- uses: ranfysvalle02/VOYD@main
+```
+
+That is the whole configuration. It reads the voydfile at the pull
+request's base, compares it to the one on the branch, posts the plan as a
+comment it updates in place, and fails the job if the boundary opened. No
+cluster and no secret: the structural findings are facts about the policy,
+and they are the ones a reviewer is least equipped to see in a diff — a
+`@guard` deleted is one removed line.
+
+Add `target: ${{ secrets.MONGODB_URI }}` and the findings get document
+counts beside them. `fail-on-open: false` makes it a reporter instead of a
+gate, which is a reasonable way to adopt it and a bad way to keep it.
+
+A plan that could not be *computed* — a voydfile that will not load — exits
+2 and fails the job before anything is posted, whatever `fail-on-open`
+says. A check that answered "nothing found" when it had not run is the one
+failure this could have that would be worse than not existing.
+
 ---
 
 ## The server owns the encoding

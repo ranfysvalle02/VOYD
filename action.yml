@@ -1,0 +1,265 @@
+name: voyd-plan
+description: >-
+  Fail a pull request that widens what a retrieval boundary will serve.
+  Runs voyd-plan against the voydfile on both sides of the change and
+  reports which documents become reachable.
+author: Fabian Valle
+branding:
+  icon: shield-off
+  color: red
+
+# A capability nobody can run is a man page. This is the delivery
+# mechanism: the plan belongs in the place where a policy change is
+# actually reviewed, which is a pull request, not a terminal somebody
+# remembers to open.
+#
+# The default shape needs no cluster, no credentials and no secrets --
+# just the two versions of the file, which the action gets from git
+# itself. `target` is the opt-in that turns structural findings into
+# document counts, and a repository that cannot hand CI a database URI
+# still gets the findings that do not depend on one: a @guard deleted, a
+# tenant dropped, a subjects array demoted.
+
+inputs:
+  policy:
+    description: >-
+      Path to the voydfile, as it exists on this branch. The version in
+      force is read out of git at `base-ref`, so an ordinary pull request
+      needs no other input.
+    required: false
+    default: voydfile.py
+  base-ref:
+    description: >-
+      The commit the policy in force is read from. Defaults to the pull
+      request's base; on a push, set it to whatever you are comparing to.
+    required: false
+    default: ""
+  target:
+    description: >-
+      A MongoDB URI to sample documents from. Optional, and omitting it is
+      a supported way to run this: without it the plan reports the
+      structural findings, which are facts about the policy and are not
+      weakened by having no data. Put it in a secret.
+    required: false
+    default: ""
+  database:
+    description: The database to sample, if the URI names none.
+    required: false
+    default: ""
+  sample:
+    description: Documents per collection.
+    required: false
+    default: "500"
+  all:
+    description: >-
+      Read every document instead of sampling. Only a full read earns a
+      claim about the collection rather than about the sample.
+    required: false
+    default: "false"
+  at:
+    description: >-
+      Run the clock at this instant (ISO 8601). Moves the clock, not the
+      data.
+    required: false
+    default: ""
+  as:
+    description: >-
+      Claims to plan the caller-dependent rules against, as inline JSON or
+      a path. Without it, `clearance()` and `restricted_to()` are set
+      aside by name rather than guessed at.
+    required: false
+    default: ""
+  comment:
+    description: Post the plan as a pull request comment, updated in place.
+    required: false
+    default: "true"
+  fail-on-open:
+    description: >-
+      Fail the job when a document becomes reachable. Turning this off
+      makes the action a reporter rather than a gate -- which is a
+      reasonable way to adopt it, and a bad way to keep it.
+    required: false
+    default: "true"
+  github-token:
+    description: Token used to post the comment.
+    required: false
+    default: ${{ github.token }}
+  python-version:
+    description: Python to run voyd-plan under.
+    required: false
+    default: "3.12"
+
+outputs:
+  fails-open:
+    description: "`true` when the change makes something reachable."
+    value: ${{ steps.plan.outputs.fails-open }}
+  newly-reachable:
+    description: Documents that become reachable, across every collection.
+    value: ${{ steps.plan.outputs.newly-reachable }}
+  report:
+    description: Path to the rendered plan.
+    value: ${{ steps.plan.outputs.report }}
+  json:
+    description: Path to the same plan as JSON.
+    value: ${{ steps.plan.outputs.json }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install voyd
+      shell: bash
+      # From the action's own checkout, not from PyPI. The planner and the
+      # policy vocabulary have to be the same version or a voydfile that
+      # loads here would not load at the boundary -- pinning the action's
+      # ref is how a repository pins both at once.
+      run: python -m pip install --disable-pip-version-check -q "${{ github.action_path }}"
+
+    - name: Read the policy in force
+      id: before
+      shell: bash
+      run: |
+        set -euo pipefail
+        base='${{ inputs.base-ref }}'
+        if [ -z "$base" ]; then
+          base='${{ github.event.pull_request.base.sha }}'
+        fi
+        if [ -z "$base" ]; then
+          echo "voyd-plan: no base-ref, and this is not a pull request." >&2
+          echo "Pass base-ref: the commit the policy in force lives at." >&2
+          exit 2
+        fi
+        git fetch --no-tags --depth=1 origin "$base" 2>/dev/null || true
+        in_force="${RUNNER_TEMP}/voyd-in-force.py"
+        if git cat-file -e "${base}:${{ inputs.policy }}" 2>/dev/null; then
+          git show "${base}:${{ inputs.policy }}" > "$in_force"
+          echo "path=$in_force" >> "$GITHUB_OUTPUT"
+        else
+          # The pull request that adds the first voydfile. Not an error and
+          # not a skip: it is the largest possible change to the boundary,
+          # and `none` is how the planner is told there was nothing before.
+          echo "path=none" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Plan
+      id: plan
+      shell: bash
+      env:
+        VOYD_TARGET: ${{ inputs.target }}
+      run: |
+        set -uo pipefail
+        report="${RUNNER_TEMP}/voyd-plan.txt"
+        blob="${RUNNER_TEMP}/voyd-plan.json"
+        proposed='${{ inputs.policy }}'
+        [ -f "$proposed" ] || proposed=none
+
+        args=(--current '${{ steps.before.outputs.path }}' --proposed "$proposed")
+        [ -n "${VOYD_TARGET}" ] && args+=(--target "${VOYD_TARGET}")
+        [ -n '${{ inputs.database }}' ] && args+=(--database '${{ inputs.database }}')
+        [ -n '${{ inputs.at }}' ] && args+=(--at '${{ inputs.at }}')
+        [ -n '${{ inputs.as }}' ] && args+=(--as '${{ inputs.as }}')
+        args+=(--sample '${{ inputs.sample }}')
+        [ '${{ inputs.all }}' = 'true' ] && args+=(--all)
+
+        # One run, both forms. Two runs would be two passes over the
+        # cluster under --target, and on --all that is the whole
+        # collection read twice to print the same numbers.
+        voyd-plan "${args[@]}" --json --report "$report" > "$blob"
+        code=$?
+
+        cat "$report" 2>/dev/null
+        echo "report=$report" >> "$GITHUB_OUTPUT"
+        echo "json=$blob" >> "$GITHUB_OUTPUT"
+
+        # Exit 2 is "the plan could not be computed", and it must not be
+        # reported as a plan that found nothing -- that is the one way this
+        # action could wave a change through. It fails here, before the
+        # comment, whatever `fail-on-open` says.
+        if [ "$code" = "2" ]; then
+          echo "::error::voyd-plan could not compute a plan; see the log."
+          exit 2
+        fi
+
+        open=false
+        [ "$code" = "1" ] && open=true
+        echo "fails-open=$open" >> "$GITHUB_OUTPUT"
+        reachable=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['newly_reachable_total'])" "$blob" 2>/dev/null || echo 0)
+        echo "newly-reachable=$reachable" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "### voyd-plan"
+          echo
+          if [ "$open" = "true" ]; then
+            echo "**This change widens the boundary.**"
+          else
+            echo "No document becomes reachable."
+          fi
+          echo
+          echo '```'
+          cat "$report"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Say it on the pull request
+      if: ${{ inputs.comment == 'true' && github.event.pull_request.number }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        OPEN: ${{ steps.plan.outputs.fails-open }}
+        REPORT: ${{ steps.plan.outputs.report }}
+      run: |
+        set -euo pipefail
+        # A marker, so a pushed branch updates one comment instead of
+        # growing a column of them. A check nobody reads because it is
+        # noisy is a check that is not running.
+        marker='<!-- voyd-plan -->'
+        if [ "$OPEN" = "true" ]; then
+          headline='**This change widens the boundary.** Documents that are refused today would be served after it.'
+        else
+          headline='No document becomes reachable under this change.'
+        fi
+        # Assembled in a file rather than a shell variable: the body holds
+        # newlines and backticks, and every way of inlining it is a way of
+        # getting the quoting wrong somewhere a runner will find first.
+        body="${RUNNER_TEMP}/voyd-plan-comment.md"
+        {
+          echo "$marker"
+          echo "### voyd-plan"
+          echo
+          echo "$headline"
+          echo
+          echo '```'
+          cat "$REPORT"
+          echo '```'
+        } > "$body"
+        existing=$(gh api "repos/${REPO}/issues/${NUMBER}/comments" --paginate \
+          --jq "[.[] | select(.body | startswith(\"${marker}\")) | .id] | first // empty")
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/${REPO}/issues/comments/${existing}" -F "body=@${body}" > /dev/null
+        else
+          gh api -X POST "repos/${REPO}/issues/${NUMBER}/comments" -F "body=@${body}" > /dev/null
+        fi
+
+    - name: Fail if the boundary opened
+      if: ${{ inputs.fail-on-open == 'true' && steps.plan.outputs.fails-open == 'true' }}
+      shell: bash
+      env:
+        REACHABLE: ${{ steps.plan.outputs.newly-reachable }}
+      run: |
+        # Two different findings reach this step and they need different
+        # sentences. A structural one -- a @guard deleted, a tenant
+        # dropped -- opens the boundary for every document that will ever
+        # be written, and the sampled count for it is legitimately zero.
+        # Reporting "0 documents become reachable" as the reason a build
+        # failed would read as a bug in the tool.
+        if [ "${REACHABLE:-0}" -gt 0 ] 2>/dev/null; then
+          echo "::error::${REACHABLE} documents become reachable under the proposed policy."
+        else
+          echo "::error::The boundary moves in the admitting direction; see the plan."
+        fi
+        exit 1

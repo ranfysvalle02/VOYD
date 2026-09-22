@@ -565,3 +565,123 @@ def test_the_sampler_reads_around_the_boundary(direct, database, tmp_path):
     # is reported, not raised: the structural finding for it still holds.
     assert sampler.missing == ["never_created"]
     assert any(s.collection == "never_created" for s in result.structural)
+
+
+# ---- no policy on one side ---------------------------------------------
+
+def test_the_first_voydfile_is_planned_against_nothing(tmp_path, capsys):
+    # The pull request that adds the first policy has none in force, and
+    # it cannot be expressed as an empty file: `load` refuses one of those
+    # on purpose. So `none` is a value, and the answer is that the whole
+    # collection stops being unguarded.
+    proposed = policy(tmp_path, "proposed.py", """
+        from voyd import guard, deadline
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+    """)
+    assert plan_main(["--current", "none", "--proposed", proposed,
+                      "--json"]) == 0
+    blob = json.loads(capsys.readouterr().out)
+    assert blob["structural"][0]["kind"] == GUARD_ADDED
+    assert blob["fails_open"] is False
+
+
+def test_deleting_the_last_voydfile_is_the_loudest_thing_it_can_report(
+        tmp_path, capsys):
+    current = policy(tmp_path, "in_force.py", """
+        from voyd import guard, deadline, revocable
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+            forgotten = revocable()
+    """)
+    assert plan_main(["--current", current, "--proposed", "none"]) == 1
+    assert GUARD_REMOVED in capsys.readouterr().out
+
+
+def test_no_policy_on_either_side_is_an_error_not_a_verdict(tmp_path, capsys):
+    # Exit 2. "Nothing changed" would be a true sentence about a question
+    # nobody asked, printed in the reassuring direction.
+    assert plan_main(["--current", "none", "--proposed", "none"]) == 2
+    assert "voyd-plan:" in capsys.readouterr().err
+
+
+# ---- the action and the command have to agree --------------------------
+
+def test_every_flag_the_action_passes_is_one_voyd_plan_has():
+    """A composite action is only as good as its agreement with the CLI.
+
+    The failure this prevents is exact and quiet: a renamed flag makes
+    `voyd-plan` exit 2 inside somebody's runner, the step fails for a
+    reason that looks like infrastructure, and the pressure is to mark
+    the check non-blocking rather than to read it. A gate that breaks in
+    a way people route around is worse than no gate.
+    """
+    import pathlib
+    import re
+
+    from voyd.wire.plan import build
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    text = (root / "action.yml").read_text()
+    known = {opt for action in build()._actions for opt in action.option_strings}
+    passed = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]*)", text))
+    # Only the ones handed to `voyd-plan`; the file also names pip's and
+    # git's flags, which are not this parser's business.
+    passed &= {"--current", "--proposed", "--target", "--database",
+               "--sample", "--all", "--at", "--as", "--json", "--collection"}
+    assert passed, "the action passes no voyd-plan flags; this test stopped checking"
+    assert passed <= known, f"action.yml passes flags voyd-plan does not have: {passed - known}"
+
+
+def test_one_run_can_produce_both_forms(tmp_path, capsys):
+    # Not a convenience. The action needs the rendering for a comment and
+    # the JSON for a verdict, and getting them from two runs is two passes
+    # over the cluster -- under --all, the whole collection read twice to
+    # print the same numbers.
+    current = policy(tmp_path, "in_force.py", """
+        from voyd import guard, deadline
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+    """)
+    report = tmp_path / "plan.txt"
+    assert plan_main(["--current", current, "--proposed", "none",
+                      "--json", "--report", str(report)]) == 1
+    blob = json.loads(capsys.readouterr().out)
+    assert blob["fails_open"] is True
+    assert GUARD_REMOVED in report.read_text()
+
+
+def test_an_unwritable_report_does_not_become_a_failed_plan(tmp_path, capsys):
+    # Exit 1, not 2. The verdict is computed and is the thing that
+    # matters; turning a filesystem problem into "could not plan" would
+    # report the absence of an answer that exists.
+    current = policy(tmp_path, "in_force.py", """
+        from voyd import guard, deadline
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+    """)
+    unwritable = tmp_path / "no-such-directory" / "plan.txt"
+    assert plan_main(["--current", current, "--proposed", "none",
+                      "--report", str(unwritable)]) == 1
+    assert "could not write" in capsys.readouterr().err
+
+
+def test_reading_no_documents_does_not_claim_to_have_read_some(tmp_path):
+    # The form that runs in a pull request with no cluster. "The same
+    # documents in this sample" and "in the sample" would both be
+    # sentences about documents this run never saw -- and the second one
+    # would sit directly under the number a reviewer acts on.
+    current = specs(tmp_path, "in_force.py", """
+        from voyd import guard, deadline
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+    """)
+    text = render(plan(current, current, lambda _c: iter(())))
+    assert "the policy files only; no documents were read" in text
+    assert "the two policies declare the same boundary" in text
+    assert "in the sample" not in text

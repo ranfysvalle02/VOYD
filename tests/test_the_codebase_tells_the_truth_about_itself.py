@@ -43,7 +43,9 @@ SOURCES = sorted(
      if not any(x in p.parts for x in (".venv", "__pycache__", "dist",
                                        ".mypy_cache", ".pytest_cache"))]
     + [ROOT / n for n in ("README.md", "blog.md", "pyproject.toml",
-                          "Dockerfile", ".github/workflows/test.yml")])
+                          "Dockerfile", "action.yml",
+                          ".github/workflows/test.yml",
+                          ".github/workflows/policy-plan.yml")])
 
 REFERENCE = re.compile(
     r"\b((?:tests/|docs/|examples/|voyd/|scanner/|tools/)?"
@@ -63,6 +65,10 @@ NOT_OURS = {
     # tests into `tmp_path` and named for what they stand for. The
     # `.new.` one is the placeholder in the README's own command line.
     "in_force.py", "proposed.py", "voydfile.new.py",
+    # Written into $RUNNER_TEMP by the action that names them -- the
+    # policy in force, read out of the base commit, and the comment body
+    # -- and gone with the runner.
+    "voyd-in-force.py", "voyd-plan-comment.md",
 }
 
 

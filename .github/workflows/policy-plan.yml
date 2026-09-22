@@ -1,0 +1,44 @@
+name: policy-plan
+
+# This repository runs the check it ships. `voydfile.py` at the root is
+# the example policy, and a pull request that edits it gets the same
+# report a user's would -- which is the only way the action stays true:
+# a delivery mechanism nobody exercises rots exactly like a man page.
+#
+# No cluster and no secret here. The structural half needs neither, and
+# it is the half that carries `guard_removed` and `tenant_removed` --
+# the findings a reviewer is least equipped to spot in a diff.
+
+on:
+  pull_request:
+    paths:
+      - voydfile.py
+      - action.yml
+      - voyd/engine/plan.py
+      - voyd/wire/plan.py
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: policy-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The action reads the policy in force out of git, so the base
+          # commit has to be in the clone. A shallow one would send it
+          # looking for an object that is not there and report the change
+          # as "the first voydfile", which is the wrong answer in the
+          # admitting direction.
+          fetch-depth: 0
+
+      - uses: ./
+        with:
+          policy: voydfile.py

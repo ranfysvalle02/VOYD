@@ -195,12 +195,20 @@ def render(result: Plan, *, missing: list[str] | None = None) -> str:
         say("")
 
     if not result.changed:
-        say("no difference: the two policies admit and refuse the same "
-            + ("documents in this collection" if result.exhaustive
-               else "documents in this sample"))
+        if not result.sampled and not result.exhaustive:
+            # No cluster was read, so the honest claim is about the two
+            # files and nothing else. "The same documents" would be a
+            # sentence about documents this run never saw.
+            say("no difference: the two policies declare the same boundary")
+        else:
+            say("no difference: the two policies admit and refuse the same "
+                + ("documents in this collection" if result.exhaustive
+                   else "documents in this sample"))
         say("")
 
-    scope = f"{result.sampled} documents, {_looked(result)}"
+    scope = (f"{result.sampled} documents, {_looked(result)}"
+             if result.sampled or result.exhaustive
+             else "the policy files only; no documents were read")
     if result.when is not None:
         scope += f", as of {result.when.isoformat()}"
     if result.caller is not None:
@@ -209,10 +217,13 @@ def render(result: Plan, *, missing: list[str] | None = None) -> str:
     # The one sentence that must be true. A sample supports a statement
     # about the sample; the claim "nothing becomes reachable" is about the
     # collection, and only --all earns it.
-    say("newly reachable: "
-        f"{result.newly_reachable_total}"
-        + ("" if result.fails_open or result.exhaustive
-           else "  (in the sample; --all to say it about the collection)"))
+    if result.fails_open or result.exhaustive:
+        qualifier = ""
+    elif not result.sampled:
+        qualifier = "  (no documents were read; --target to count them)"
+    else:
+        qualifier = "  (in the sample; --all to say it about the collection)"
+    say(f"newly reachable: {result.newly_reachable_total}{qualifier}")
     return "\n".join(out)
 
 
@@ -292,14 +303,38 @@ def _caller(spec: str | None) -> dict | None:
     return claims
 
 
+NO_POLICY = "none"
+
+
+def _policy(path: str) -> dict:
+    """A voydfile, or the literal ``none`` for *there is not one*.
+
+    The pull request that adds the first ``voydfile.py`` has no policy in
+    force, and the one that deletes the last has none proposed. Both are
+    real changes to the boundary and both are the moments a plan is most
+    worth having -- so "no policy" has to be sayable, and it cannot be an
+    empty file: ``load`` refuses one of those on purpose, because a
+    voydfile with no ``@guard`` in it would start a proxy that refuses
+    nothing, silently.
+
+    Symmetric on both flags. ``--proposed none`` is a policy being removed
+    entirely, which is the loudest fail-open this tool can report, and a
+    check that could not express it would go quiet exactly when it should
+    not.
+    """
+    return {} if path == NO_POLICY else load(path)
+
+
 def build(argv: list[str] | None = None) -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="voyd-plan",
         description="What a policy change would let through, before it ships.")
     ap.add_argument("--current", required=True,
-                    help="the voydfile in force")
+                    help="the voydfile in force, or `none` when there is "
+                         "not one yet")
     ap.add_argument("--proposed", required=True,
-                    help="the voydfile being proposed")
+                    help="the voydfile being proposed, or `none` when the "
+                         "change removes it")
     ap.add_argument("--target",
                     help="a MongoDB URI to sample documents from. Without "
                          "it the plan reports structural findings only, "
@@ -322,6 +357,11 @@ def build(argv: list[str] | None = None) -> argparse.ArgumentParser:
                          "claims: inline JSON, or a path to a JSON file")
     ap.add_argument("--json", action="store_true",
                     help="machine-readable output")
+    ap.add_argument("--report", metavar="PATH",
+                    help="also write the human rendering here. A caller "
+                         "that wants both forms gets them from one run, "
+                         "which with --target is one pass over the data "
+                         "rather than two")
     ap.add_argument("--version", action="version", version=__version__)
     return ap
 
@@ -329,8 +369,13 @@ def build(argv: list[str] | None = None) -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build().parse_args(argv)
     try:
-        current = load(args.current)
-        proposed = load(args.proposed)
+        current = _policy(args.current)
+        proposed = _policy(args.proposed)
+        if not current and not proposed:
+            raise ValueError(
+                "--current and --proposed are both `none`. There is no "
+                "change to plan, and reporting one would be a verdict about "
+                "nothing")
         when = _when(args.at)
         caller = _caller(args.claims)
     except Exception as exc:                                  # noqa: BLE001
@@ -364,10 +409,20 @@ def main(argv: list[str] | None = None) -> int:
     if sampler is not None:
         missing = sampler.missing
 
-    if args.json:
-        print(json.dumps(as_json(result, missing=missing), indent=2))
-    else:
-        print(render(result, missing=missing))
+    text = render(result, missing=missing)
+    if args.report:
+        try:
+            with open(args.report, "w") as handle:
+                handle.write(text + "\n")
+        except OSError as exc:
+            # The verdict is already computed and is the thing that
+            # matters, so a report that could not be written is said and
+            # stepped over rather than turned into exit 2 -- which would
+            # be reporting "could not plan" about a plan that exists.
+            print(f"voyd-plan: could not write {args.report}: {exc}",
+                  file=sys.stderr)
+    print(json.dumps(as_json(result, missing=missing), indent=2)
+          if args.json else text)
     return 1 if result.fails_open else 0
 
 
