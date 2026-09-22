@@ -109,6 +109,20 @@ def living(at_field: str = "expire_at", *, when: datetime | None = None) -> dict
     even when a TTL index exists.
     """
     instant = aware(when) or now()
+    # Three arms, and the middle one is **redundant on purpose**. In
+    # MongoDB `{field: null}` already matches documents where the field is
+    # *missing* as well as those where it is null -- so the first arm
+    # covers both and removing the second changes nothing. Verified by
+    # removing it: `test_a_rules_two_halves_agree.py` stayed green.
+    #
+    # It stays because the asymmetry runs the other way and is the kind of
+    # thing that gets "simplified" wrongly. `{$exists: false}` does *not*
+    # match a field that is present and null, so somebody deleting the
+    # first arm instead -- on the reasonable-looking theory that `$exists`
+    # is the general case -- would start hiding every pinned row that
+    # spells "no deadline" as an explicit null. That is a silent
+    # narrowing of the clause below the guarantee, which is the one
+    # failure this file's callers cannot see.
     return {"$or": [
         {at_field: None},
         {at_field: {"$exists": False}},

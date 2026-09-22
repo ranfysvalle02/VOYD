@@ -213,6 +213,13 @@ THROUGH_THE_HANDLE = {
         "it pins the shape `_forget_pipeline` mirrors. The proxy does not "
         "call this code -- it emits the same update itself -- and the "
         "whole value of the file is that both have to leave the same row",
+    "tests/test_a_rules_two_halves_agree.py":
+        "it compares a rule's query half against its per-document half, "
+        "which is a property of the rule and of MongoDB's query semantics. "
+        "The database is the *subject* -- the whole point is to run the "
+        "clause on a real server rather than reimplement `$exists` and "
+        "null-matching in Python -- and a boundary in the middle would "
+        "add nothing but a socket",
     "tests/test_the_suite_does_not_leak_databases.py":
         "it is about this suite's own housekeeping, not about the "
         "boundary. The database it touches is the subject, not the route",
