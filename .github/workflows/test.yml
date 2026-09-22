@@ -138,14 +138,20 @@ jobs:
       - name: End to end, real driver through a real boundary
         # Atlas Local is a real mongod and a real mongot, not a mock.
         #
-        # `-m ""` clears the default deselection, and the one `slow` test it
-        # lets in skips by name here: server-side embedding needs a cluster
-        # that has registered a model, and Atlas Local *declines* an
-        # `auto_embed` declaration rather than honouring it. A run that
-        # accepted the fallback would assert the opposite of what it claims.
-        # Set VOYD_ATLAS_URI to have it actually run.
+        # `-m ""` clears the default deselection. The one `slow` test it
+        # lets in needs a cluster that has registered an embedding model:
+        # Atlas Local *declines* an `auto_embed` declaration rather than
+        # honouring it, and a run that accepted the fallback would assert
+        # the opposite of what it claims.
+        #
+        # So the secret is passed through if the repository has one and
+        # the test skips by name if it does not -- a fork's CI is green
+        # for a reason it can read, rather than red for one it cannot fix.
+        # `-rs` prints every skip, because a claim that quietly stopped
+        # being checked is the failure this suite exists to notice.
         env:
           VOYD_TEST_MONGO_URI: mongodb://localhost:27018/?directConnection=true
+          VOYD_ATLAS_URI: ${{ secrets.VOYD_ATLAS_URI }}
         run: uv run --no-sync pytest -q -rs -m "" tests/
 
       - name: The examples are the documentation, so they have to run

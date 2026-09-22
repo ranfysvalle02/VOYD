@@ -43,8 +43,6 @@ from __future__ import annotations
 
 from .erasure import cascade_first, cascade_first_for_one, erase_first
 from .guarding import SUPPLIABLE_CLAIMS, Budgets, Guard, enforce
-from .guarding import _collection_of as _collection_of
-from .guarding import _FRESH_TAB as _FRESH_TAB
 from .guarding import _wants_a_caller as _wants_a_caller
 from .guarding import guard_for, judge, unsuppliable_claims
 from .handshake import TOPOLOGY_FIELDS, rewrite_topology, strip_compression
@@ -52,12 +50,10 @@ from .reads import (DERIVED_COMMANDS, FOREIGN_STAGES, LEADING_STAGES,
                     PRESERVING_STAGES, blinded_find, blinds_a_subject,
                     deciding_fields, expressible_clauses, pins_the_tenant,
                     projection_blinds, reducing_stage, rewrite_derived_read)
-from .reads import _and_in as _and_in
 from .reads import _was_reduced as _was_reduced
 from .refusals import (EXFILTRATING_STAGES, UNREWRITABLE,
                        client_vector_on_server_index, refuse_client_vector,
                        refuse_unrewritable, seal_refusal, writes_elsewhere)
-from .refusals import _refuse as _refuse
 from .verbs import (delete_reply, derive_on_insert,
                     revoke_instead_of_delete,
                     revoke_instead_of_find_and_delete)
@@ -89,9 +85,11 @@ __all__ = [
     "erase_first", "cascade_first", "cascade_first_for_one",
 ]
 
-# Imported by the transport and by tests, and private only in the sense
-# that a policy file has no use for them. Named here so that "what does
-# `proxy.py` reach into?" is answerable from this file rather than by
-# grepping the package.
-_INTERNAL = ("_wants_a_caller", "_was_reduced", "_refuse", "_and_in",
-             "_collection_of", "_FRESH_TAB")
+# The whole of what the transport reaches past `__all__` for, so "what
+# does `proxy.py` know about this package that a policy file does not?"
+# is answerable from this file rather than by grepping it. Private
+# because a policy file has no use for them, re-exported because
+# something outside this package does -- and the list is exactly that
+# long, which a test holds it to. Everything else private here is used
+# by its own siblings and stays where it is defined.
+_INTERNAL = ("_wants_a_caller", "_was_reduced")

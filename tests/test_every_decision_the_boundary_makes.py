@@ -470,3 +470,32 @@ def test_the_transport_decides_nothing_a_policy_should():
         assert verb not in proxy, (
             f"{verb!r} is decided in proxy.py; that decision belongs in "
             f"the policy package")
+
+
+def test_the_transport_reaches_past_the_public_list_for_exactly_two_names():
+    """`__all__` is the promise; `_INTERNAL` is the rest of the truth.
+
+    A package that re-exports every private helper has an index that
+    describes nothing. This one lists what the *transport* needs and
+    holds itself to it, so a new private import from `proxy.py` is a line
+    somebody adds here on purpose rather than one that appears.
+    """
+    import re
+    from pathlib import Path
+
+    import voyd.wire.policy as policy
+
+    proxy = Path("voyd/wire/proxy.py").read_text()
+    names = re.search(r"from \.policy import \(([^)]*)\)", proxy).group(1)
+    # Whole identifiers. `\w*_\w*` also matches the middle of
+    # `refuse_client_vector`, which is how this first reported that the
+    # transport reaches for `_client_vector`.
+    imported = {n for n in re.findall(r"\b\w+\b", names)
+                if n.startswith("_")}
+    assert imported == set(policy._INTERNAL), (
+        f"proxy.py reaches for {sorted(imported)}; the package says it "
+        f"exposes {sorted(policy._INTERNAL)}")
+    for name in policy._INTERNAL:
+        assert hasattr(policy, name)
+        assert name not in policy.__all__, (
+            f"{name} is private and public at once, which is neither")
