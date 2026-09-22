@@ -7,8 +7,10 @@ forgotten -- in any driver, in any language, with no import and no code.
     voyd-wire --config voydfile.py --target localhost:27017
 
     policy      every decision about a message: what a verb may mean,
-                what a read may see, what is refused outright. One file,
-                so "can this be bypassed?" is one file to read.
+                what a read may see, what is refused outright. One
+                package, grouped by the kind of decision, so "can this be
+                bypassed?" is one import list to read and one category at
+                a time to check.
     codec       the wire as bytes: framing, OP_MSG, compression
     proxy       transport: accept, pump both directions, fork, drain
     upstream    where it forwards to, and how an election is followed
