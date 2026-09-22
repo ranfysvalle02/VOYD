@@ -25,7 +25,8 @@ from pathlib import Path
 
 import pytest
 
-from voyd.wire import proxy as w
+from voyd.wire import codec
+from voyd.wire import policy
 
 from .conftest import free_port, mongo_host  # noqa: E402
 
@@ -48,11 +49,11 @@ HELLO = {
 
 
 def rewritten(reply: dict) -> dict:
-    raw = w.encode_op_msg(1, 2, 0, reply)
-    out = w.rewrite_topology(raw, 1, 2, HERE)
+    raw = codec.encode_op_msg(1, 2, 0, reply)
+    out = policy.rewrite_topology(raw, 1, 2, HERE)
     if out is None:
         return reply
-    return w.decode_op_msg(out)[1]
+    return codec.decode_op_msg(out)[1]
 
 
 def test_the_client_is_told_this_boundary_is_the_whole_cluster():
@@ -105,16 +106,16 @@ def test_a_reply_that_is_not_hello_is_left_alone():
     for reply in ({"ok": 1.0, "n": 1},
                   {"cursor": {"id": 0, "ns": "a.b", "firstBatch": []}, "ok": 1.0},
                   {"ok": 0.0, "code": 10107}):
-        raw = w.encode_op_msg(1, 2, 0, reply)
-        assert w.rewrite_topology(raw, 1, 2, HERE) is None
+        raw = codec.encode_op_msg(1, 2, 0, reply)
+        assert policy.rewrite_topology(raw, 1, 2, HERE) is None
 
 
 def test_a_hello_that_is_already_correct_is_not_re_encoded():
     """A standalone advertises no hosts. Re-framing a message that needed no
     change is a chance to introduce a bug for no benefit."""
     standalone = {"isWritablePrimary": True, "maxWireVersion": 25, "ok": 1.0}
-    raw = w.encode_op_msg(1, 2, 0, standalone)
-    assert w.rewrite_topology(raw, 1, 2, HERE) is None
+    raw = codec.encode_op_msg(1, 2, 0, standalone)
+    assert policy.rewrite_topology(raw, 1, 2, HERE) is None
 
 
 def test_a_driver_with_no_direct_connection_stays_on_the_boundary(db, tmp_path):

@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from voyd.wire import codec
 from voyd.wire import proxy as w
 
 from .conftest import free_port, mongo_host  # noqa: E402
@@ -246,14 +247,14 @@ def test_connections_past_the_limit_are_closed_rather_than_queued(db, tmp_path):
     (-1, "negative: skips the read loop and desynchronises the stream"),
     (2_000_000_000, "two gigabytes: one header is a memory blowup"),
     (4, "smaller than the header it claims to contain"),
-    (w.MAX_MESSAGE + 1, "one byte past MongoDB's own ceiling"),
+    (codec.MAX_MESSAGE + 1, "one byte past MongoDB's own ceiling"),
 ], ids=["negative", "huge", "undersized", "just-over"])
 def test_a_malformed_length_is_refused_rather_than_allocated(length, why):
     a, b = socket.socketpair()
     try:
         a.sendall(struct.pack("<i", length) + struct.pack("<iiI", 1, 0, 2013))
-        with pytest.raises(w.ProtocolError):
-            w.read_message(b)
+        with pytest.raises(codec.ProtocolError):
+            codec.read_message(b)
     finally:
         a.close()
         b.close()
@@ -263,10 +264,10 @@ def test_a_well_formed_message_still_reads():
     """The cap must not be so eager it rejects real traffic."""
     a, b = socket.socketpair()
     try:
-        raw = w.encode_sections(7, 0, 0, {"find": "notes"})
+        raw = codec.encode_sections(7, 0, 0, {"find": "notes"})
         a.sendall(raw)
-        got, _length, req_id, _resp_to, opcode = w.read_message(b)
-        assert got == raw and req_id == 7 and opcode == w.OP_MSG
+        got, _length, req_id, _resp_to, opcode = codec.read_message(b)
+        assert got == raw and req_id == 7 and opcode == codec.OP_MSG
     finally:
         a.close()
         b.close()

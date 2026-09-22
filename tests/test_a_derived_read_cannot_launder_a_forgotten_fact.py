@@ -30,7 +30,8 @@ from __future__ import annotations
 import pytest
 
 bson = pytest.importorskip("bson")
-from voyd.wire import proxy as w
+from voyd.wire import codec
+from voyd.wire import policy
 
 from voyd.engine.admission.rules import Deadline, revoked  # noqa: E402
 from voyd.engine.admission.spec import AdmissionSpec  # noqa: E402
@@ -38,26 +39,26 @@ from voyd.engine.admission.spec import AdmissionSpec  # noqa: E402
 GUARDED = "notes"
 
 
-def guards(*, tenant: str | None = None, rules=None) -> dict[str, w.Guard]:
+def guards(*, tenant: str | None = None, rules=None) -> dict[str, policy.Guard]:
     spec = AdmissionSpec(GUARDED, tenant=tenant,
                          rules=rules if rules is not None
                          else (Deadline(at_field="expire_at"),
                                revoked("forgotten")))
-    return {GUARDED: w.Guard(spec)}
+    return {GUARDED: policy.Guard(spec)}
 
 
 def through(body: dict, *, tenant: str | None = None, rules=None):
     """`(pipeline_or_query_after_rewrite, refusal_reason)` for one command."""
-    raw = w.encode_op_msg(11, 0, 0, {**body, "$db": "app"})
-    pushed, refusal = w.rewrite_derived_read(
+    raw = codec.encode_op_msg(11, 0, 0, {**body, "$db": "app"})
+    pushed, refusal = policy.rewrite_derived_read(
         raw, 11, 11, guards(tenant=tenant, rules=rules), False)
     if refusal is not None:
-        _flags, err = w.decode_op_msg(refusal)
+        _flags, err = codec.decode_op_msg(refusal)
         assert err["ok"] == 0.0
         return None, err["errmsg"]
     if pushed is None:
         return None, None
-    _flags, out = w.decode_op_msg(pushed)
+    _flags, out = codec.decode_op_msg(pushed)
     return out, None
 
 

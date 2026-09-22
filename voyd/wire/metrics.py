@@ -68,6 +68,12 @@ GLOBAL = (
     "connections_open",
     "connections_total",
     "connections_refused_total",
+    # A connection whose loop raised something other than a disconnect.
+    # It prints a traceback, which is where it stopped: a traceback goes
+    # to a log nobody is alerting on, and a proxy shedding one connection
+    # a second looks healthy from outside. This is the series that does
+    # not.
+    "connections_failed_total",
     "upstream_reresolve_total",
     "messages_from_client_total",
     "messages_from_upstream_total",
@@ -105,7 +111,8 @@ class Layout:
         for field in GLOBAL:
             self.names.append((field, None, None))
         for collection in self.collections:
-            for field in ("admitted_total", "refused_total", "revoked_total"):
+            for field in ("admitted_total", "refused_total", "revoked_total",
+                          "cascaded_total"):
                 self.names.append((field, collection, None))
             for reason in (*REASONS, OTHER):
                 self.names.append(("refused_by_reason_total", collection,
@@ -249,6 +256,7 @@ class Meter:
     connections_open: int
     connections_total: int
     connections_refused_total: int
+    connections_failed_total: int
     upstream_reresolve_total: int
     messages_from_client_total: int
     messages_from_upstream_total: int
@@ -301,6 +309,7 @@ class Meter:
             values[self.layout.index("admitted_total", name)] = guard.admitted
             values[self.layout.index("refused_total", name)] = guard.refused
             values[self.layout.index("revoked_total", name)] = guard.revoked
+            values[self.layout.index("cascaded_total", name)] = guard.cascaded
             spare = 0
             for reason, count in guard.reasons().items():
                 if reason in REASONS:
@@ -320,6 +329,11 @@ class Meter:
 HELP = {
     "connections_open": ("gauge", "Client connections currently open."),
     "connections_total": ("counter", "Client connections accepted."),
+    "connections_failed_total": (
+        "counter",
+        "Connections whose loop raised. Not a disconnect -- those are "
+        "ordinary and uncounted. Anything here is a defect, and the "
+        "traceback is in the worker's log."),
     "connections_refused_total": (
         "counter", "Connections closed at the limit rather than queued."),
     "upstream_reresolve_total": (
@@ -362,6 +376,14 @@ HELP = {
     "admitted_total": ("counter", "Documents a prompt was allowed to see."),
     "refused_total": ("counter", "Documents refused on the read path."),
     "revoked_total": ("counter", "Deletes rewritten as revocations."),
+    "cascaded_total": (
+        "counter",
+        "Documents marked because they were *derived from* something a "
+        "caller revoked, rather than named by one. Watch it beside "
+        "`revoked_total`: on a collection declaring `lineage_field`, "
+        "revocations climbing while this stays flat means the cascade "
+        "stopped and an erasure is reaching the source and nothing "
+        "built on it."),
     "sealed_writes_total": (
         "counter",
         "Documents whose sealed fields this boundary encrypted on the way "

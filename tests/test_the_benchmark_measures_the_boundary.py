@@ -22,7 +22,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 from voyd.wire import bench as b
-from voyd.wire import proxy as w
+from voyd.wire import codec
+from voyd.wire import policy
 
 
 def test_the_canned_reply_is_a_cursor_batch_the_boundary_will_admit():
@@ -30,28 +31,28 @@ def test_the_canned_reply_is_a_cursor_batch_the_boundary_will_admit():
     it untouched -- and the benchmark would be timing a plain TCP relay
     while reporting it as the cost of refusal."""
     raw = b.reply(docs=10, refuse_every=5, pad=8)
-    decoded = w.decode_op_msg(raw)
+    decoded = codec.decode_op_msg(raw)
     assert decoded is not None
     _flags, body = decoded
     assert body["cursor"]["ns"] == b.NAMESPACE
     assert len(body["cursor"]["firstBatch"]) == 10
-    assert w._collection_of(body) == b.COLLECTION
+    assert policy._collection_of(body) == b.COLLECTION
 
 
 def test_the_batch_actually_contains_refusable_documents():
     """`enforce` returns the original bytes when nothing was refused, so a
     fully admissible batch measures the decode and skips the re-encode --
     half the work, and the cheaper half."""
-    batch = w.decode_op_msg(b.reply(100, 10, 8))[1]["cursor"]["firstBatch"]
+    batch = codec.decode_op_msg(b.reply(100, 10, 8))[1]["cursor"]["firstBatch"]
     revoked = [d for d in batch if d.get("forgotten")]
     assert len(revoked) == 10, "one in ten, which is what the sweep reports"
 
 
 def test_the_guard_refuses_exactly_the_share_the_sweep_checks_for():
     """The whole enforcement check in the benchmark rests on this ratio."""
-    guard = w.Guard.defaults(b.COLLECTION, at_field="expire_at",
+    guard = policy.Guard.defaults(b.COLLECTION, at_field="expire_at",
                              mark_field="forgotten")
-    batch = w.decode_op_msg(b.reply(100, 10, 8))[1]["cursor"]["firstBatch"]
+    batch = codec.decode_op_msg(b.reply(100, 10, 8))[1]["cursor"]["firstBatch"]
     kept = guard.filter(batch)
     assert len(kept) == 90 and guard.refused == 10
 
@@ -95,7 +96,7 @@ def test_the_sweep_runs_end_to_end_and_the_control_beats_the_proxy():
 
 def test_the_batch_can_carry_embeddings_because_the_workload_does():
     raw = b.reply(docs=4, refuse_every=0, pad=10, dims=8)
-    batch = w.decode_op_msg(raw)[1]["cursor"]["firstBatch"]
+    batch = codec.decode_op_msg(raw)[1]["cursor"]["firstBatch"]
     assert len(batch) == 4
     assert all(len(d["embedding"]) == 8 for d in batch), (
         "a proxy benchmarked only on short documents is being asked the "
@@ -109,15 +110,15 @@ def test_no_dimensions_is_the_old_shape_so_the_old_rows_stay_comparable():
     default changed their shape, they would have to be deleted rather than
     compared against -- so the default is pinned, not assumed.
     """
-    batch = w.decode_op_msg(b.reply(docs=3, refuse_every=0, pad=10))[1]
+    batch = codec.decode_op_msg(b.reply(docs=3, refuse_every=0, pad=10))[1]
     for doc in batch["cursor"]["firstBatch"]:
         assert "embedding" not in doc
 
 
 def test_embeddings_do_not_disturb_which_documents_are_refusable():
     """The vector is payload; the verdict must still come from the mark."""
-    plain = w.decode_op_msg(b.reply(docs=20, refuse_every=5, pad=10))[1]
-    fat = w.decode_op_msg(b.reply(docs=20, refuse_every=5, pad=10, dims=4))[1]
+    plain = codec.decode_op_msg(b.reply(docs=20, refuse_every=5, pad=10))[1]
+    fat = codec.decode_op_msg(b.reply(docs=20, refuse_every=5, pad=10, dims=4))[1]
     marked = [[d["_id"] for d in r["cursor"]["firstBatch"] if d.get("forgotten")]
               for r in (plain, fat)]
     assert marked[0] == marked[1] == [0, 5, 10, 15]

@@ -28,7 +28,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
-from voyd.wire import proxy as w
+from voyd.wire import codec
 
 from .conftest import MONGO_URI, free_port, mongo_host  # noqa: E402
 
@@ -46,14 +46,14 @@ ASK = None          # built lazily; encoding needs the proxy imported
 def ask() -> bytes:
     global ASK
     if ASK is None:
-        ASK = w.encode_sections(1, 0, 0, {"find": "bench", "$db": "benchdb"})
+        ASK = codec.encode_sections(1, 0, 0, {"find": "bench", "$db": "benchdb"})
     return ASK
 
 
 def read_one(sock: socket.socket) -> bytes:
-    hdr = w.read_exact(sock, w.HEADER)
-    length, _rid, _rt, _op = w.frame(hdr)
-    return hdr + w.read_exact(sock, length - w.HEADER)
+    hdr = codec.read_exact(sock, codec.HEADER)
+    length, _rid, _rt, _op = codec.frame(hdr)
+    return hdr + codec.read_exact(sock, length - codec.HEADER)
 
 
 def listening(port: int, proc, seconds: float = 20.0) -> None:
@@ -125,17 +125,17 @@ async def test_a_clean_eof_is_a_different_event_from_a_truncated_message():
     left, right = socket.socketpair()
     left.close()
     reader, writer = await asyncio.open_connection(sock=right)
-    with pytest.raises(w.Hangup):
-        await w.read_message_async(reader)
+    with pytest.raises(codec.Hangup):
+        await codec.read_message_async(reader)
     writer.close()
 
     left, right = socket.socketpair()
-    left.sendall(struct.pack("<iiiI", 400, 1, 0, w.OP_MSG) + b"only a bit")
+    left.sendall(struct.pack("<iiiI", 400, 1, 0, codec.OP_MSG) + b"only a bit")
     left.close()
     reader, writer = await asyncio.open_connection(sock=right)
     with pytest.raises(ConnectionError) as blew:
-        await w.read_message_async(reader)
-    assert not isinstance(blew.value, w.Hangup), \
+        await codec.read_message_async(reader)
+    assert not isinstance(blew.value, codec.Hangup), \
         "a truncated message is not a polite goodbye"
     writer.close()
 
@@ -155,7 +155,7 @@ def test_a_half_closed_client_still_receives_the_reply_it_asked_for(wired):
         sock.sendall(ask())
         sock.shutdown(socket.SHUT_WR)
         reply = read_one(sock)
-        assert len(reply) > w.HEADER
+        assert len(reply) > codec.HEADER
     finally:
         sock.close()
 
@@ -227,7 +227,7 @@ def test_a_storm_of_resets_costs_connections_and_not_the_listener(wired):
     survivor.settimeout(15)
     try:
         survivor.sendall(ask())
-        assert len(read_one(survivor)) > w.HEADER
+        assert len(read_one(survivor)) > codec.HEADER
     finally:
         survivor.close()
 
@@ -244,7 +244,7 @@ def test_garbage_costs_one_connection(wired):
     good.settimeout(15)
     try:
         good.sendall(ask())
-        assert len(read_one(good)) > w.HEADER
+        assert len(read_one(good)) > codec.HEADER
     finally:
         good.close()
 
@@ -311,7 +311,7 @@ def test_a_killed_worker_is_replaced_exactly_once_and_counted(wired):
     sock.settimeout(15)
     try:
         sock.sendall(ask())
-        assert len(read_one(sock)) > w.HEADER, "still serving after a restart"
+        assert len(read_one(sock)) > codec.HEADER, "still serving after a restart"
     finally:
         sock.close()
 

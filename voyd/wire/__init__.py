@@ -6,8 +6,11 @@ forgotten -- in any driver, in any language, with no import and no code.
 
     voyd-wire --config voydfile.py --target localhost:27017
 
-    proxy       the boundary: framing, codec, dispatch, every enforcement
-                decision. `main()` is the CLI.
+    policy      every decision about a message: what a verb may mean,
+                what a read may see, what is refused outright. One file,
+                so "can this be bypassed?" is one file to read.
+    codec       the wire as bytes: framing, OP_MSG, compression
+    proxy       transport and dispatch -- sockets, workers, the CLI
     cascade     a revocation reaching what was derived from the fact
     seal        `--key-vault`: ciphertext at rest, a key per scope
     ensure      `--ensure`: build what the policy declares

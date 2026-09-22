@@ -29,6 +29,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+from voyd.wire import codec
+from voyd.wire import policy
 from voyd.wire import proxy as w
 
 from .conftest import free_port, mongo_host  # noqa: E402
@@ -60,7 +62,7 @@ def _wait(port, proc, seconds=20):
 # One length rule, two readers.
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("length", [-1, 2_000_000_000, 4, w.MAX_MESSAGE + 1],
+@pytest.mark.parametrize("length", [-1, 2_000_000_000, 4, codec.MAX_MESSAGE + 1],
                          ids=["negative", "huge", "undersized", "just-over"])
 def test_both_readers_obey_the_same_cap(length):
     """The cap is the security property; the socket is a detail.
@@ -70,27 +72,27 @@ def test_both_readers_obey_the_same_cap(length):
     nobody tested. They share `frame`, and this is what says so.
     """
     hdr = struct.pack("<i", length) + struct.pack("<iiI", 1, 0, 2013)
-    with pytest.raises(w.ProtocolError):
-        w.frame(hdr)
+    with pytest.raises(codec.ProtocolError):
+        codec.frame(hdr)
 
 
 def test_the_async_reader_reads_what_the_sync_one_reads():
     import asyncio
 
-    raw = w.encode_sections(7, 0, 0, {"find": "notes"})
+    raw = codec.encode_sections(7, 0, 0, {"find": "notes"})
 
     async def go():
         a, b = socket.socketpair()
         a.sendall(raw)
         reader, writer = await asyncio.open_connection(sock=b)
         try:
-            return await w.read_message_async(reader)
+            return await codec.read_message_async(reader)
         finally:
             writer.close()
             a.close()
 
     got, _len, req_id, _resp_to, opcode = asyncio.run(go())
-    assert got == raw and req_id == 7 and opcode == w.OP_MSG
+    assert got == raw and req_id == 7 and opcode == codec.OP_MSG
 
 
 def test_a_peer_that_vanishes_mid_message_is_a_disconnect():
@@ -105,7 +107,7 @@ def test_a_peer_that_vanishes_mid_message_is_a_disconnect():
         reader, writer = await asyncio.open_connection(sock=b)
         try:
             with pytest.raises(ConnectionError):
-                await w.read_message_async(reader)
+                await codec.read_message_async(reader)
         finally:
             writer.close()
 
@@ -136,7 +138,7 @@ def test_a_tally_survives_the_pipe_it_is_sent_through():
     JSON-serialisable would be dropped -- and a dropped tally is an
     undercount, which is the one direction this number must never be
     wrong in."""
-    guard = w.Guard.defaults("notes", at_field="expire_at",
+    guard = policy.Guard.defaults("notes", at_field="expire_at",
                              mark_field="forgotten")
     guard.filter([{"forgotten": True}, {"text": "fine"}])
     counts = w.tally({"notes": guard})

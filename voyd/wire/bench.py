@@ -53,6 +53,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import codec
 from . import proxy as w
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -152,9 +153,9 @@ def be_upstream(port: int, docs: int, refuse_every: int, pad: int,
     def serve_one(conn: socket.socket) -> None:
         try:
             while True:
-                hdr = w.read_exact(conn, w.HEADER)
-                msg_len, req_id, _resp_to, _op = w.frame(hdr)
-                w.read_exact(conn, msg_len - w.HEADER)
+                hdr = codec.read_exact(conn, codec.HEADER)
+                msg_len, req_id, _resp_to, _op = codec.frame(hdr)
+                codec.read_exact(conn, msg_len - codec.HEADER)
                 # Four bytes of `responseTo` is the whole of the work. A
                 # driver would care about more; this is deliberately not a
                 # driver.
@@ -192,9 +193,9 @@ def be_client(port: int, seconds: float, pipeline: int, out_fd: int) -> None:
         conn.sendall(msg * pipeline)
         end = time.monotonic() + seconds
         while time.monotonic() < end:
-            hdr = w.read_exact(conn, w.HEADER)
-            msg_len, _rid, _rt, _op = w.frame(hdr)
-            w.read_exact(conn, msg_len - w.HEADER)
+            hdr = codec.read_exact(conn, codec.HEADER)
+            msg_len, _rid, _rt, _op = codec.frame(hdr)
+            codec.read_exact(conn, msg_len - codec.HEADER)
             replies += 1
             conn.sendall(msg)
     except (OSError, ConnectionError, w.ProtocolError):

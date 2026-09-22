@@ -65,7 +65,7 @@ def test_both_erasure_paths_null_every_declared_derived_field():
     is a vector that survives its document depending on which path the
     erasure took.
     """
-    from voyd.wire import proxy as w
+    from voyd.wire import policy
 
     from voyd.engine.admission.rules import Deadline, revoked
     from voyd.engine.admission.spec import AdmissionSpec
@@ -73,7 +73,7 @@ def test_both_erasure_paths_null_every_declared_derived_field():
     spec = AdmissionSpec("notes", derived_fields=("embedding", "summary_vec"),
                          rules=(Deadline(at_field="expire_at"),
                                 revoked("forgotten")))
-    stage = w._forget_pipeline(spec, "erased")[0]["$set"]
+    stage = policy._forget_pipeline(spec, "erased")[0]["$set"]
 
     for name in spec.derived_fields:
         assert name in stage, (
@@ -85,7 +85,7 @@ def test_both_erasure_paths_null_every_declared_derived_field():
 def test_a_collection_with_no_derived_fields_is_left_alone():
     """The default is `("embedding",)`, and a policy may declare none. An
     erasure that invented a null field would be writing schema."""
-    from voyd.wire import proxy as w
+    from voyd.wire import policy
 
     from voyd.engine.admission.rules import Deadline, revoked
     from voyd.engine.admission.spec import AdmissionSpec
@@ -93,7 +93,7 @@ def test_a_collection_with_no_derived_fields_is_left_alone():
     spec = AdmissionSpec("notes", derived_fields=(),
                          rules=(Deadline(at_field="expire_at"),
                                 revoked("forgotten")))
-    stage = w._forget_pipeline(spec, "erased")[0]["$set"]
+    stage = policy._forget_pipeline(spec, "erased")[0]["$set"]
     assert set(stage) == {"forgotten", "expire_at"}
 
 
@@ -152,7 +152,7 @@ async def test_both_doors_leave_the_same_row(adb):
     """The drift check with teeth. The wire builds its own update and the
     library builds another; this asserts the row they leave is the same
     shape, which is what the wire's docstring already promises."""
-    from voyd.wire import proxy as w
+    from voyd.wire import policy
 
     notes = _notes(adb)
     await adb.notes.insert_one({"_id": 1, "text": "x", "embedding": VEC})
@@ -162,7 +162,7 @@ async def test_both_doors_leave_the_same_row(adb):
     await adb.notes.insert_one({"_id": 2, "text": "x", "embedding": VEC})
     spec = notes.spec
     await adb.notes.update_one(
-        {"_id": 2}, w._forget_pipeline(spec, "erasure request"))
+        {"_id": 2}, policy._forget_pipeline(spec, "erasure request"))
     by_wire = await adb.notes.find_one({"_id": 2})
 
     assert set(by_library) == set(by_wire), (

@@ -36,6 +36,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+from voyd.wire import codec
+from voyd.wire import policy
 from voyd.wire import proxy as w
 
 from voyd.declare import OPTIONS, load  # noqa: E402
@@ -153,13 +155,13 @@ def vector_search(collection: str, **stage) -> dict:
 
 def test_a_client_vector_on_a_server_owned_index_is_refused():
     body = vector_search("notes", queryVector=[0.1] * 8, limit=10)
-    assert w.client_vector_on_server_index(body, EMBEDS) == "notes"
+    assert policy.client_vector_on_server_index(body, EMBEDS) == "notes"
 
 
 def test_query_text_is_the_form_that_passes():
     """The whole point: send the text and let the index embed it."""
     body = vector_search("notes", query="what is the fault code", limit=10)
-    assert w.client_vector_on_server_index(body, EMBEDS) is None
+    assert policy.client_vector_on_server_index(body, EMBEDS) is None
 
 
 def test_a_collection_the_server_does_not_embed_is_untouched():
@@ -170,18 +172,18 @@ def test_a_collection_the_server_does_not_embed_is_untouched():
     `$vectorSearch`.
     """
     body = vector_search("other", queryVector=[0.1] * 8, limit=10)
-    assert w.client_vector_on_server_index(body, EMBEDS) is None
+    assert policy.client_vector_on_server_index(body, EMBEDS) is None
 
 
 def test_nothing_is_refused_when_nothing_declared_auto_embed():
     body = vector_search("notes", queryVector=[0.1] * 8, limit=10)
-    assert w.client_vector_on_server_index(body, {}) is None
+    assert policy.client_vector_on_server_index(body, {}) is None
 
 
 def test_an_ordinary_read_is_not_a_vector_search():
-    assert w.client_vector_on_server_index(
+    assert policy.client_vector_on_server_index(
         {"find": "notes", "filter": {}}, EMBEDS) is None
-    assert w.client_vector_on_server_index(
+    assert policy.client_vector_on_server_index(
         {"aggregate": "notes", "pipeline": [{"$match": {"a": 1}}]},
         EMBEDS) is None
 
@@ -194,23 +196,23 @@ def test_the_stage_is_found_wherever_it_sits_in_the_pipeline():
         {"$match": {"tenant_id": "acme"}},
         {"$vectorSearch": {"queryVector": [0.1] * 8, "limit": 10}},
     ]}
-    assert w.client_vector_on_server_index(body, EMBEDS) == "notes"
+    assert policy.client_vector_on_server_index(body, EMBEDS) == "notes"
 
 
 def test_a_malformed_pipeline_is_not_a_crash():
     """Bytes arrive from the wire. This is handed whatever was in them."""
     for pipeline in (None, "not a list", [None], [{"$vectorSearch": "no"}], []):
         body = {"aggregate": "notes", "pipeline": pipeline}
-        assert w.client_vector_on_server_index(body, EMBEDS) is None
+        assert policy.client_vector_on_server_index(body, EMBEDS) is None
 
 
 def test_the_refusal_names_the_model_and_the_remedy():
     """An error that does not say what to do instead is a dead end."""
-    raw = w.encode_op_msg(1, 0, 0, vector_search(
+    raw = codec.encode_op_msg(1, 0, 0, vector_search(
         "notes", queryVector=[0.1] * 8, limit=10))
-    answer = w.refuse_client_vector(raw, 1, 1, EMBEDS)
+    answer = policy.refuse_client_vector(raw, 1, 1, EMBEDS)
     assert answer is not None
-    reply = w.decode_op_msg(answer)[1]
+    reply = codec.decode_op_msg(answer)[1]
     assert reply["ok"] == 0.0
     assert "voyage-4" in reply["errmsg"]
     assert "$vectorSearch.query" in reply["errmsg"], (

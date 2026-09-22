@@ -263,42 +263,42 @@ def test_a_claim_the_wire_cannot_supply_is_announced_at_boot():
     file. Announced at boot instead, which is the only place it is cheap
     to notice.
     """
-    from voyd.wire import proxy as w
+    from voyd.wire import policy
 
     from voyd.engine.admission.rules import Clearance, Deadline, revoked
     from voyd.engine.admission.spec import AdmissionSpec
 
-    unfillable = w.Guard(AdmissionSpec(
+    unfillable = policy.Guard(AdmissionSpec(
         "papers", rules=(Clearance(order=("public", "secret")),)))
-    assert w.unsuppliable_claims(unfillable) == ["clearance"]
+    assert policy.unsuppliable_claims(unfillable) == ["clearance"]
 
-    fine = w.Guard(AdmissionSpec("memos", rules=(
+    fine = policy.Guard(AdmissionSpec("memos", rules=(
         Deadline(at_field="expire_at"), revoked("forgotten"))))
-    assert w.unsuppliable_claims(fine) == []
+    assert policy.unsuppliable_claims(fine) == []
 
 
 def test_a_groups_rule_is_not_announced_because_it_can_be_answered():
     """The other half of the control. A warning that fired on the rule
     this boundary *can* enforce would train people to ignore it."""
-    from voyd.wire import proxy as w
+    from voyd.wire import policy
 
     from voyd.engine.admission.rules import Restricted
     from voyd.engine.admission.spec import AdmissionSpec
 
-    ok = w.Guard(AdmissionSpec(
+    ok = policy.Guard(AdmissionSpec(
         "memos", rules=(Restricted(field="audience", claim="groups"),)))
-    assert w.unsuppliable_claims(ok) == []
+    assert policy.unsuppliable_claims(ok) == []
 
 
 def test_the_claims_the_wire_supplies_are_what_connection_status_gives():
     """The two lists have to agree or the warning above is decoration."""
-    from voyd.wire import proxy as w
+    from voyd.wire import policy, proxy as w
 
     claims = w.claims_from({"authInfo": {
         "authenticatedUsers": [{"user": "alice", "db": "admin"}],
         "authenticatedUserRoles": [{"role": "legal", "db": "app"},
                                    {"role": "read", "db": "app"}]}})
-    assert set(claims) == w.SUPPLIABLE_CLAIMS
+    assert set(claims) == policy.SUPPLIABLE_CLAIMS
     assert claims["user"] == "alice" and claims["db"] == "admin"
     assert claims["groups"] == ["legal", "read"] == claims["roles"]
 

@@ -166,7 +166,7 @@ def test_an_unknown_reason_is_bucketed_rather_than_dropped():
     meter = m.Meter(layout, slab, 0)
 
     class Fake:
-        admitted, refused, revoked = 5, 3, 0
+        admitted, refused, revoked, cascaded = 5, 3, 0, 0
 
         def reasons(self):
             return {R.DEADLINE: 1, "a_reason_from_the_future": 2}
@@ -179,13 +179,39 @@ def test_an_unknown_reason_is_bucketed_rather_than_dropped():
     assert totals[layout.index("refused_total", "notes")] == 3
 
 
+def test_the_cascade_has_a_series_of_its_own():
+    """Counted apart from `revoked_total`, because the two diverging is the
+    only way to see from outside that a cascade stopped running.
+
+    "3 facts revoked" and "3 facts revoked and 41 things made out of them
+    went too" are different sentences, and on a collection declaring
+    `lineage_field` only the second one answers an erasure request.
+    """
+    layout = m.Layout(("notes",))
+    slab = m.Slab(1, layout)
+    meter = m.Meter(layout, slab, 0)
+
+    class Fake:
+        admitted, refused, revoked, cascaded = 0, 0, 3, 41
+
+        def reasons(self):
+            return {}
+
+    meter.flush({"notes": Fake()})
+    totals, _ = slab.read()
+    assert totals[layout.index("revoked_total", "notes")] == 3
+    assert totals[layout.index("cascaded_total", "notes")] == 41
+    assert "cascaded_total" in m.HELP, (
+        "a counter nobody can interpret is barely better than none")
+
+
 def test_a_collection_with_no_guard_is_not_written_into_a_neighbours_slot():
     layout = m.Layout(("notes",))
     slab = m.Slab(1, layout)
     meter = m.Meter(layout, slab, 0)
 
     class Fake:
-        admitted, refused, revoked = 1, 1, 1
+        admitted, refused, revoked, cascaded = 1, 1, 1, 1
 
         def reasons(self):
             return {}
