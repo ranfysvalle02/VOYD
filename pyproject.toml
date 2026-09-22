@@ -123,19 +123,18 @@ select = ["E4", "E7", "E9", "F"]
 "tests/*" = ["E402"]
 
 [tool.mypy]
-# Everything this repository ships or runs, which now includes `tools/`.
+# Everything this repository ships or runs, the boundary included.
 #
 # `scanner` is here because it ships as its own distribution and judges
 # somebody else's repository -- the one piece of this project that runs
 # against code nobody here has seen.
 #
-# `tools/` was excluded for a long time, and the exclusion outlived its
-# reason. It was justified here by a count -- "voyd_wire.py has 31 errors"
-# -- which had reached 59 by the time anybody re-measured, in the 3,180-line
-# file with the concurrency, the failover and the byte-level protocol
-# rewriting in it. The hardest code in the repository was the least
-# statically checked, and the stale number was the argument for leaving it
-# that way.
+# The proxy was excluded for a long time, and the exclusion outlived its
+# reason. It was justified by a count -- "31 errors" -- which had reached
+# 59 by the time anybody re-measured, in the file holding the concurrency,
+# the failover and the byte-level protocol rewriting. The hardest code in
+# the repository was the least statically checked, and the stale number
+# was the argument for leaving it that way.
 #
 # It is zero now, and the 59 were not 59 problems. Seventeen were one
 # dynamic-attribute decision in `Meter`; sixteen were one unannotated dict

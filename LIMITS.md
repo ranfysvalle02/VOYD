@@ -796,11 +796,11 @@ costs a stranger nothing to try is worth exactly as much as the last time
 somebody tried it that way.
 
 **`mypy` reads `voyd/wire/` now, and the exclusion is gone.** This entry used to
-explain why it did not, and the explanation was a count: *`voyd_wire.py` has
-31 errors*. By the time anybody re-measured it was 59, in a file that had
-grown to 3,180 lines and holds the concurrency, the failover and the
-byte-level protocol rewriting -- the hardest code here, and the least
-statically checked, kept that way by a stale number acting as an argument.
+explain why it did not, and the explanation was a count: *31 errors*. By
+the time anybody re-measured it was 59, in a file that had grown past
+3,000 lines and held the concurrency, the failover and the byte-level
+protocol rewriting -- the hardest code here, and the least statically
+checked, kept that way by a stale number acting as an argument.
 
 It is zero. And the 59 were never 59 problems, which is the part worth
 recording: **two root causes were a third of the total.** Seventeen
@@ -853,7 +853,7 @@ from the connection string, and a hardcoded `(8, 1)` floor that told every
 8.0 deployment it could not fuse ranks. Both are now tests. A regression
 that is only described in a comment is one that can come back.
 
-**Consider:** the suite is fast by default (473 tests, ~150 seconds) with
+**Consider:** the suite is fast by default (506 tests, ~150 seconds) with
 real index builds and the live-Atlas tests deselected. `-m ""` includes
 them and takes minutes, varying with cloud latency -- that variance is the
 flag working, not a flake, and it is worth knowing before somebody reports
@@ -931,7 +931,7 @@ cannot destroy one.
   2.3**, because it decrypts before it refuses. That ordering is not a
   preference: it is the order `Admission._unsealed` uses, and the two must
   agree or the same document would be admitted through the library and
-  refused through the wire. Measured by `voyd_bench.py --seal` against a
+  refused through the wire. Measured by `voyd-bench --seal` against a
   real key vault: decrypt 5.8us, stable to a hundredth across passes;
   encrypt ~8.7us warm and ~26us on the first pass, while libmongocrypt's
   key cache fills; refusal 2.3us. The benchmark prints the spread rather

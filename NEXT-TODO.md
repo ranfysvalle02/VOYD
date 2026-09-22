@@ -1,7 +1,8 @@
 # NEXT-TODO — what the next level needs, measured
 
-Written after the clearance ladder landed, tree clean. 509 tests, all passing: 508 in the
-default run plus the Atlas one, which is run isolated.
+Written after the boundary was split into decide / encode / move, tree
+clean. 510 tests, all passing: 509 in the default run plus the Atlas one,
+which is run isolated.
 
 Everything below is measured at that commit. Where a previous note
 guessed, it was wrong; the habit that caused it is recorded at the bottom.
@@ -23,44 +24,39 @@ on this list with a reason".
 
 Do it before the next claim is added, not after.
 
-## 2. `voyd/wire/proxy.py` is 4,382 lines
+## 2. The two duplicated dispatch blocks
 
-The single biggest structural risk in the repository, and it holds every
-enforcement decision. Splitting framing / codec / dispatch / policy would
-make "can this be bypassed?" answerable by reading one file. The move into
-the package made this easier, not harder: it is a package now, so a split
-is new modules beside it rather than new entries on a `sys.path`.
+`proxy.py` is 2,795 lines now and the enforcement decisions are all in
+`policy.py`, so "can this be bypassed?" is one file. What the split did
+not fix is the one hazard underneath it.
 
-Two specific hazards, both load-bearing:
+**The plain path and the fan-out `Conversation` hold duplicated blocks**
+— the `judge(...)` call, the delete rewrites, the cascade, the
+`killCursors` cleanup. They are duplicated on purpose: both paths must
+agree about what a command means, and the way to be sure is that both
+call the same function rather than one calling the other. But nothing
+enforces that they *stay* in step. `s.count(old) == 1` assertions in a
+patch script catch a drift while you are editing; nothing catches one at
+rest, and a boundary that means two different things depending on
+whether `--fan-out` is set is the drift this project is about.
 
-- **16 broad `except Exception` handlers in this one file**, several in
-  the request loop, where a swallowed exception reads as green.
-- **The plain path and the fan-out `Conversation` hold duplicated
-  blocks** — the `judge(...)` call, the delete rewrites, the cascade.
-  Duplicated on purpose (both paths must agree, and the way to be sure is
-  that both call the same function rather than one calling the other),
-  but nothing enforces that they stay in step. `s.count(old) == 1`
-  assertions catch a drift while you are editing; nothing catches one at
-  rest.
+A test that drives the same command down both paths and asserts the
+replies are byte-identical would close it. It is not free — the fan-out
+path needs a replica set — but it is the assertion the duplication is
+asking for.
 
-## 3. The cascade is not on a dashboard, and its cost is unmeasured
+## 3. What the cascade costs is unmeasured
 
-`Guard.cascaded` is counted per collection, summed in `tally`, merged
-across workers and printed by `summarise`. It is **not** in
-`metrics.Layout`, so Prometheus cannot see it.
+`voyd_cascaded_total` is on the dashboard now, per collection, beside
+`revoked_total`: the two diverging on a collection declaring
+`lineage_field` is how a stopped cascade becomes visible from outside.
 
-That matters for the reason the erasure counters are paired:
-`revoked_total` climbing while `cascaded_total` stays flat on a
-collection declaring `lineage_field` means the cascade stopped, and the
-only way to see it from outside is that the two series diverge. Adding a
-counter means touching `Layout`, which is shared memory allocated before
-the fork — read the note in `metrics.py` before widening it.
-
-Also unmeasured: **what the cascade costs**. A delete on a lineage
+What is still an assumption is the **price**. A delete on a lineage
 collection is a find plus an update before the forwarded command, and an
 insert naming a parent is a find before it. `voyd-bench` measures the
-ordinary paths and not this one, so "one extra round trip" is an
-assumption rather than a number.
+ordinary paths and not this one, so "one extra round trip" is a sentence
+in a docstring rather than a number, in a repository whose entire
+argument is the difference between those.
 
 ## 4. The no-database subset is neither, and one cause is a shutdown bug
 

@@ -18,13 +18,9 @@ Duck typing. Inherit nothing. This module is the contract, not a framework:
             await self.db[self.collection].create_index("published")
             return True
 
-    events = engine.model("events", tenant="tenant_id")
-    events.use(Outbox)
-
-Pinned settings (clock, codecs, tenant field type) are the other half of the
-picture: the engine fixes them on its own handle rather than inheriting
-whatever the caller's client happened to be configured with. A trait is what
-you *add*; a pinned setting is what the engine *refuses to guess*.
+Anything with that shape can be provisioned beside the ones this package
+ships. `voyd-wire --ensure` builds each trait a policy declares; a trait
+somebody else wrote is built the same way, with no privileged path.
 """
 
 from __future__ import annotations

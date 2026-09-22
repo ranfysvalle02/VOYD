@@ -446,12 +446,16 @@ class Clearance:
     So sensitivity is a field on the document and clearance is a claim on the
     caller, compared per hit, in the layer that already refuses things:
 
-        docs = engine.model("docs", tenant="t").admitting(
-            Deadline(), revoked(),
-            Clearance(order=("public", "internal", "secret")))
+        # voydfile.py
+        @guard("docs")
+        class Docs:
+            tenant_id = tenant()
+            classification = clearance(
+                order=("public", "internal", "secret"),
+                roles={"analyst": "internal"})
 
-        await docs.for_caller({"clearance": "internal"}).search(vector)
-        # "secret" documents are not lower-ranked. They are not returned.
+        # An analyst's read returns no "secret" documents. They are not
+        # lower-ranked; they are not returned.
 
     **It fails closed in three directions**, which is the whole reason this
     is a rule object rather than a comparison somebody writes at a call site:
@@ -648,8 +652,13 @@ class Distinct:
     retrieval, outside whatever governs the read -- which is the second
     enforcement point this package exists to abolish.
 
-        docs = engine.model("notes").admitting(
-            Deadline(), revoked(), Budget(limit=8000), Distinct("chunk_hash"))
+        # voydfile.py
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+            forgotten = revocable()
+            tokens = budget(8000)
+            chunk_hash = distinct()
 
     ``on`` is the identity of the content, not of the row: a hash a pipeline
     already computed, or any callable over the document. It is required and
@@ -746,8 +755,14 @@ class Budget:
     feature: a reason with nothing to do with erasure, expressed in the same
     shape as one that is.
 
-        docs = engine.model("notes").admitting(Deadline(), Budget(limit=8000))
-        page = await docs.search(vector, limit=20)   # stops at ~8000 tokens
+        # voydfile.py
+        @guard("notes")
+        class Notes:
+            expire_at = deadline()
+            tokens = budget(8000)
+
+        # A page stops at ~8000 tokens, however many batches the client
+        # asked for it in.
 
     **Cost is the caller's to define, never guessed.** ``cost`` is a callable
     over the document; by default it reads an integer ``cost_field`` (a

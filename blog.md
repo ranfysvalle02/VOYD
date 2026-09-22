@@ -121,7 +121,7 @@ Version three is the one that feels like cheating.
 **Move the boundary to the wire.**
 
 ```bash
-python demo-wire.py --serve --target "mongodb+srv://…"
+voyd-wire --config voydfile.py --target "mongodb+srv://…"
 ```
 
 It speaks the MongoDB protocol. It sits between any driver and any cluster.
@@ -131,8 +131,9 @@ then:
 - there is nothing to import, so nothing to forget;
 - it works from Node, Go, Compass and `mongosh`, none of which know it
   exists;
-- the raw-read guard, the scanner and the CI gate become unnecessary,
-  because **there is no raw read**.
+- the CI gate stopping your own team reaching past a handle becomes
+  unnecessary, because **there is no raw read** and no handle to reach
+  past.
 
 An abstraction that deletes its own guardrails was in the right place. That
 is the tell.
@@ -288,14 +289,17 @@ Delete is a wish. Refuse is a contract. Say no at the door.
 
 ## A. Running the demo
 
-`demo-wire.py` is one file, one dependency, four acts. It is written to be a
-seed for something else rather than a library to depend on — copy it, keep
-what you want, delete the rest.
+Four acts, one dependency, and the boundary is a command rather than a
+file to copy.
 
 ```bash
-pip install "pymongo[encryption]"
-python demo-wire.py                 # all four acts
-python demo-wire.py --serve         # just the boundary; point anything at it
+pip install "voyd[crypto]"
+voyd-wire --config voydfile.py --target localhost:27017
+
+# and the acts, one file each, against a throwaway database
+python examples/refuse.py           # act one and two
+python examples/shred.py            # act three
+python examples/clearance.py        # act four (needs an authenticated set)
 ```
 
 | act | needs |
@@ -491,15 +495,15 @@ Things that cost time and are cheap to inherit:
 Split by whether *you* can reproduce them from the demo in this post, because
 a number nobody can re-run is a claim wearing a lab coat.
 
-**Reproducible with `demo-wire.py`:**
+**Reproducible from `examples/`:**
 
 | claim | number | how |
 |---|---|---|
 | per-document check | **128ns** p50, 140ns p99 | 30 × 1000 documents, `refuses()` alone, this laptop |
-| ciphertext on disk | **130 bytes**, BSON subtype 6 | act 3 prints it; plaintext absent, checked in the bytes |
-| key destroyed → unreadable | `EncryptionError` | act 3, after one `delete_one` on the key vault |
+| ciphertext on disk | **130 bytes**, BSON subtype 6 | `examples/shred.py` prints it; plaintext absent, checked in the bytes |
+| key destroyed → unreachable | refused, immediately | `examples/shred.py`, after one `delete_one` on the key vault -- the boundary revokes the documents *before* the key dies, so there is no cache window to wait out |
 | autoembed models on Atlas | `voyage-4`, `voyage-4-lite`, `voyage-code-4`, `voyage-code-3`, `voyage-4-large` | the server reports the set in its own error |
-| refusal on the `$vectorSearch` path | expired hit refused, **0** client-side vectors stored | act 4, against a live cluster |
+| refusal on the `$vectorSearch` path | ranked hit refused, **0** client-side vectors stored | `tests/test_search_refuses_on_the_path_that_bypasses_the_query.py`, against a live Atlas cluster |
 
 Put that 128ns beside a model call. A five-hundred-millisecond generation is
 roughly **four million times** the cost of asking whether the document was
