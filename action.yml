@@ -150,19 +150,30 @@ runs:
       env:
         VOYD_TARGET: ${{ inputs.target }}
       run: |
+        # `set +e` first, and it is the whole correctness of this step.
+        # A composite action runs under `bash --noprofile --norc -e -o
+        # pipefail`, so the shell aborts on the first non-zero status --
+        # and the non-zero status this step exists to *read* is
+        # voyd-plan's own exit 1. Under the inherited `-e` the step dies
+        # at the moment it succeeds, the comment never gets posted, and
+        # the job fails with no plan attached to say why.
+        set +e
         set -uo pipefail
         report="${RUNNER_TEMP}/voyd-plan.txt"
         blob="${RUNNER_TEMP}/voyd-plan.json"
         proposed='${{ inputs.policy }}'
-        [ -f "$proposed" ] || proposed=none
+        if [ ! -f "$proposed" ]; then proposed=none; fi
 
+        # `if` rather than `[ -n x ] && args+=(...)`: an AND-list whose
+        # test fails takes the status of the test, which under `-e` is
+        # the second way this step used to end before it started.
         args=(--current '${{ steps.before.outputs.path }}' --proposed "$proposed")
-        [ -n "${VOYD_TARGET}" ] && args+=(--target "${VOYD_TARGET}")
-        [ -n '${{ inputs.database }}' ] && args+=(--database '${{ inputs.database }}')
-        [ -n '${{ inputs.at }}' ] && args+=(--at '${{ inputs.at }}')
-        [ -n '${{ inputs.as }}' ] && args+=(--as '${{ inputs.as }}')
+        if [ -n "${VOYD_TARGET}" ]; then args+=(--target "${VOYD_TARGET}"); fi
+        if [ -n '${{ inputs.database }}' ]; then args+=(--database '${{ inputs.database }}'); fi
+        if [ -n '${{ inputs.at }}' ]; then args+=(--at '${{ inputs.at }}'); fi
+        if [ -n '${{ inputs.as }}' ]; then args+=(--as '${{ inputs.as }}'); fi
         args+=(--sample '${{ inputs.sample }}')
-        [ '${{ inputs.all }}' = 'true' ] && args+=(--all)
+        if [ '${{ inputs.all }}' = 'true' ]; then args+=(--all); fi
 
         # One run, both forms. Two runs would be two passes over the
         # cluster under --target, and on --all that is the whole
@@ -184,7 +195,7 @@ runs:
         fi
 
         open=false
-        [ "$code" = "1" ] && open=true
+        if [ "$code" = "1" ]; then open=true; fi
         echo "fails-open=$open" >> "$GITHUB_OUTPUT"
         reachable=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['newly_reachable_total'])" "$blob" 2>/dev/null || echo 0)
         echo "newly-reachable=$reachable" >> "$GITHUB_OUTPUT"

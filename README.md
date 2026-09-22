@@ -239,10 +239,13 @@ A check nobody runs is a man page, so the plan ships as an action:
 ```yaml
 - uses: actions/checkout@v4
   with: { fetch-depth: 0 }   # the policy in force is read out of git
-- uses: ranfysvalle02/VOYD@main
+- uses: ranfysvalle02/VOYD@main   # or a tag, which pins both halves
 ```
 
-That is the whole configuration. It reads the voydfile at the pull
+That is the whole configuration. The action installs `voyd` from its own
+checkout rather than from PyPI, so pinning its ref pins the planner and
+the policy vocabulary together — a voydfile that loads in the check has
+to be one that loads at the boundary. It reads the voydfile at the pull
 request's base, compares it to the one on the branch, posts the plan as a
 comment it updates in place, and fails the job if the boundary opened. No
 cluster and no secret: the structural findings are facts about the policy,

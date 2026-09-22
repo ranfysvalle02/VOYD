@@ -685,3 +685,34 @@ def test_reading_no_documents_does_not_claim_to_have_read_some(tmp_path):
     assert "the policy files only; no documents were read" in text
     assert "the two policies declare the same boundary" in text
     assert "in the sample" not in text
+
+
+def test_the_sampler_asks_the_cluster_what_exists_once(tmp_path):
+    # It was asking per collection, which on a twenty-collection policy is
+    # twenty `listCollections` commands for one answer -- and an answer
+    # that changed mid-run would make the report incoherent anyway, since
+    # a collection appearing halfway through would be counted for some
+    # findings and not others.
+    from voyd.wire.plan import Sampler
+
+    class CountingDatabase:
+        def __init__(self):
+            self.asked = 0
+
+        def list_collection_names(self):
+            self.asked += 1
+            return ["notes"]
+
+        def __getitem__(self, name):
+            class Coll:
+                @staticmethod
+                def aggregate(_pipeline):
+                    return iter([{"expire_at": FUTURE}])
+            return Coll()
+
+    db = CountingDatabase()
+    sampler = Sampler(db, size=10)
+    for name in ("notes", "cases", "notes", "ledger"):
+        list(sampler(name))
+    assert db.asked == 1
+    assert sampler.missing == ["cases", "ledger"]

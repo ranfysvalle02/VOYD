@@ -80,9 +80,6 @@ class SetAside:
     rule: str
     why: str
 
-    def describe(self) -> str:
-        return f"{self.collection}.{self.rule} ({self.why})"
-
 
 @dataclass(frozen=True)
 class Structural:

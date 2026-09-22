@@ -63,10 +63,23 @@ class Sampler:
         self.size = size
         self.everything = everything
         self.missing: list[str] = []
+        self._names: set[str] | None = None
+
+    def _exists(self, collection: str) -> bool:
+        """Is this collection on the cluster? Asked once, not per policy.
+
+        A plan over twenty collections was issuing twenty `listCollections`
+        commands to answer the same question, and the answer cannot change
+        underneath one run without making the report incoherent anyway --
+        a collection that appeared halfway through would be counted for
+        some findings and not others.
+        """
+        if self._names is None:
+            self._names = set(self.db.list_collection_names())
+        return collection in self._names
 
     def __call__(self, collection: str) -> Iterable[Mapping]:
-        names = self.db.list_collection_names()
-        if collection not in names:
+        if not self._exists(collection):
             # Not an error. A policy is allowed to declare a collection the
             # cluster has not seen yet, and the structural findings for it
             # are still worth printing -- so this is recorded and rendered
@@ -325,7 +338,7 @@ def _policy(path: str) -> dict:
     return {} if path == NO_POLICY else load(path)
 
 
-def build(argv: list[str] | None = None) -> argparse.ArgumentParser:
+def build() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="voyd-plan",
         description="What a policy change would let through, before it ships.")
