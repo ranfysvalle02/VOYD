@@ -236,13 +236,32 @@ reorders a list it was handed by reference.
 
 ```python
 # voydfile.py
-@transform("notes")
+rerank("notes", diversity=0.3)          # the one that ships
+
+@transform("notes")                      # or your own, any code
 class Diversify:
-    name = "mmr"
+    name = "whatever you call it"
 
     def on_egress(self, docs, *, request):
-        return mmr(docs, diversity=0.7)     # your code, any code
+        return my_reranker(docs)
 ```
+
+`rerank()` is maximal marginal relevance. A vector index returns the most
+similar documents, which on a real corpus means the most similar
+documents *to each other* — ten chunks of one contract outranking one
+chunk each from ten contracts:
+
+```
+index order        a0 a1 a2 a3 a4 a5    one cluster, six deep
+diversity=0.0      a0 a1 a2 a3 a4 a5    exactly the index's order
+diversity=0.7      a0 b0 c0 a1 a2 a3    one from each, then the rest
+```
+
+Relevance comes from **arrival order**, not from a query vector: a wire
+boundary does not reliably have one, and every ranked page already
+carries the index's own judgement. That makes this rank-based MMR rather
+than the textbook form, which is a real technique and not the same one,
+so it is named as what it is.
 
 It runs **inside**:
 
@@ -279,6 +298,20 @@ charges the page that is *served* rather than the one that was proposed
 and then reranked down.
 
 A collection with no transforms runs the loop it always ran.
+
+**What it costs.** One laptop, 1024-dimension vectors, measured rather
+than estimated:
+
+```
+                    page of 10   page of 50   page of 200
+voyd[rerank]              ~2ms         ~2ms          ~9ms
+pure Python               ~3ms        ~72ms      declines
+```
+
+NumPy is an accelerant, not a dependency. Without it the same arithmetic
+runs in Python, and past a measured ceiling the transform **declines and
+says so** rather than adding a second to every read — an optimisation is
+not allowed to be the slow part.
 
 ---
 

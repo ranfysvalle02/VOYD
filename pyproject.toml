@@ -39,12 +39,20 @@ dependencies = [
 crypto = [
     "pymongo[encryption]>=4.9",
 ]
+# Page-shaping arithmetic. `rerank()` is quadratic in the page and
+# linear in the dimension, which is a millisecond in NumPy and seconds
+# in CPython -- so without this the transform declines to run on a large
+# page and says so, rather than silently making every read slow.
+rerank = [
+    "numpy>=1.26",
+]
 # Everything optional, which is one thing. Nothing here computes an
 # embedding: `auto_embed` means the index owns the vector and the server
 # produces it, so a client-side embedding library is not a dependency this
 # package has an opinion about.
 all = [
     "voyd[crypto]",
+    "voyd[rerank]",
 ]
 # Every tool the suite and CI actually invoke, declared rather than inherited.
 # A linter or type checker that arrives transitively is advisory -- it holds
@@ -57,6 +65,10 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",   # rule set is pinned in [tool.ruff.lint], so the tool may float
     "mypy>=1.11",
+    # The reranker has two arithmetic paths and the suite runs both. A
+    # fallback that is only exercised on machines that happen to lack a
+    # library is a fallback nobody has run.
+    "numpy>=1.26",
     # The suite runs the shipped GitHub action's own shell, which means
     # reading `action.yml`. A rig that retyped those steps would pass
     # while the file people actually run was broken.

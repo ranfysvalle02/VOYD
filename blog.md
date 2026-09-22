@@ -221,6 +221,17 @@ microseconds per document — so it can run again, last, on whatever the
 transform returned. Reordered, merged, restored from a cache, invented
 outright: all of it is checked before it leaves.
 
+```python
+# voydfile.py — the security rule and the magic rule, one file
+@guard("notes")
+class Notes:
+    expire_at = deadline()
+    forgotten = revocable()
+    tenant_id = tenant()
+
+rerank("notes", diversity=0.3)
+```
+
 > **A transform cannot widen what a read returns.** Not because it was
 > reviewed. Because the boundary is downstream of it.
 

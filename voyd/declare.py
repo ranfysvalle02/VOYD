@@ -461,6 +461,32 @@ def transform(collection: str):
     return decorate
 
 
+def rerank(collection: str, *, diversity: float = 0.3,
+           vector: str = "embedding", top: int | None = None):
+    """Diversify this collection's pages. A built-in transform.
+
+        # voydfile.py
+        rerank("notes", diversity=0.3, vector="embedding")
+
+    A function rather than a decorator because there is no class body to
+    write: `@transform` is for a reader's own code, and this is the one
+    that ships. Both land in the same egress path and neither is an
+    enforcement point.
+
+    A vector index returns the most similar documents, which on a real
+    corpus means the most similar documents *to each other* -- ten chunks
+    of one contract outranking one chunk each from ten contracts. MMR
+    trades a little relevance for coverage.
+
+    ``diversity`` is ``1 - lambda``: 0 keeps the index's order, 1 ignores
+    relevance entirely. Small values are the useful ones.
+    """
+    from .engine.admission.rerank import MMR
+
+    made = MMR(vector_field=vector, diversity=diversity, top=top)
+    return transform(collection)(made)
+
+
 def guard(collection: str, *, lineage_field: str | None = None,
           on_delete: str = "forward"):
     """Declare the rules for one collection. Returns the class unchanged.

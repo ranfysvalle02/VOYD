@@ -140,7 +140,7 @@ def test_the_public_surface_is_deliberate():
         # is declared in the same file, and a vocabulary split across two
         # imports is one people get wrong. What it is *not* is an
         # enforcement point -- see `transforms.py` for why that is safe.
-        "transform",
+        "transform", "rerank",
         "__version__"}, (
         "the policy vocabulary changed; that is the package's whole public "
         "surface, so it is a deliberate edit and not an incidental one")
