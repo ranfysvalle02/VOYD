@@ -90,6 +90,17 @@ class AdmissionSpec:
     # -- application-supplied, non-optional, loud when missing -- and for the
     # same reason.
     subject_key: str | None = None
+    # Page-shaping declared beside the rules and enforced *before* them.
+    # Empty is the ordinary case and costs one attribute read on a path
+    # that is otherwise byte-for-byte what it was: a collection with no
+    # transforms runs the loop it always ran.
+    #
+    # They are part of the spec, and therefore part of identity, for the
+    # reason ``tenant`` is: handles are deduplicated per collection by
+    # spec equality, so two declarations that disagree about what shapes
+    # the page must collide loudly rather than resolve to whichever was
+    # imported first.
+    transforms: tuple = ()
     # A stable label for *this* configuration of rules, carried into a stored
     # ``record_use`` so a consequence can be tied to the policy that produced
     # it. Part of identity on purpose: ``Budget(100)`` and ``Budget(10000)``
@@ -228,7 +239,8 @@ def why_refused(doc: dict, spec: AdmissionSpec,
                     *, when: datetime | None = None,
                     caller: dict | None = None,
                     tab=None,
-                    only_unbypassable: bool = False) -> str | None:
+                    only_unbypassable: bool = False,
+                    pure_only: bool = False) -> str | None:
     """The first reason this document may not reach a prompt, or ``None``.
 
     Asks each declared rule and returns the first refusal. Among the *pure*
@@ -258,9 +270,26 @@ def why_refused(doc: dict, spec: AdmissionSpec,
     refusal and named, because an exception inside a filter is how the
     filter gets skipped -- the failure this module exists to prevent, and it
     must not come back through a third-party rule.
+
+    ``pure_only`` asks only the rules that are functions of one document,
+    skipping the cumulative ones. It is not a weaker check to be used
+    when the real one is inconvenient -- it is the *first* half of a
+    sandwich whose second half asks everything, and the only caller is
+    ``AdmissionCore._egress``.
     """
     for rule in asking_order(spec):
         if only_unbypassable and getattr(rule, "bypassable", True):
+            continue
+        # ``pure_only`` asks the order-independent, side-effect-free half
+        # and nothing else. It exists for the egress sandwich in
+        # ``core._egress``: a transform is shown documents that have
+        # already survived every pure rule, and the cumulative rules are
+        # held back for the terminal pass so a budget charges the page
+        # that is actually served rather than the one that was proposed.
+        # Asking a cumulative rule twice would charge it twice, and
+        # ``Tab.charge`` promising that ``Page.spent`` is the sum of what
+        # was admitted is the thing that would stop being true.
+        if pure_only and getattr(rule, "needs_tab", False):
             continue
         try:
             reason = _ask(rule, doc, when=when, caller=caller, tab=tab)

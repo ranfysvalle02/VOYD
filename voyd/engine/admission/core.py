@@ -31,6 +31,8 @@ from .reasons import OFF_SCOPE, UNNAMED
 from .receipts import Receipts
 from .rules import Rule, Tabs
 from .spec import AdmissionSpec, why_refused
+from .transforms import apply as apply_transforms
+from .transforms import request_for as transform_request
 
 # A tenant id a caller could legitimately pass -- ``None``, ``0``, ``""`` --
 # must not be mistaken for "no tenant bound", so the sentinel is an object no
@@ -474,7 +476,8 @@ class AdmissionCore:
         return Tabs(states) if states else None
 
     def _admit(self, doc: dict | None, *, when: datetime | None = None,
-               tally: dict[str, int] | None = None, tab: Tabs | None = None):
+               tally: dict[str, int] | None = None, tab: Tabs | None = None,
+               pure_only: bool = False):
         """The authoritative check, on the way out.
 
         The query above is an optimisation. *This* is the guarantee, and it is
@@ -502,7 +505,8 @@ class AdmissionCore:
             return None
         reason = why_refused(doc, self.spec, when=when,
                              caller=self._caller, tab=tab,
-                             only_unbypassable=self._include)
+                             only_unbypassable=self._include,
+                             pure_only=pure_only)
         if reason is None:
             return self._redact(doc, when=when, tally=tally)
         if tally is None:
@@ -659,6 +663,61 @@ class AdmissionCore:
             out.append({k: v for k, v in doc.items() if k != _REDACTED})
         return out, total
 
+    def _egress(self, candidates: list[dict], *,
+                when: datetime | None = None,
+                tab: Any = None,
+                vector_search: bool = False) -> list[dict]:
+        """Everything between a candidate set and the wire, in one place.
+
+        The shape is a sandwich and the ordering is the guarantee:
+
+            pure rules  ->  transforms  ->  every rule, terminally
+
+        **The terminal pass is not optional and is not orderable.** It is
+        not a stage in a pipeline an operator composes, it is the last
+        thing that touches a document on the way out, always, and a
+        transform cannot be placed after it because there is nowhere
+        after it. That is what makes it safe to run somebody's reranker
+        inside the boundary: whatever it returns -- reordered, merged,
+        restored from a cache, invented -- is checked before it leaves.
+
+        The first pass exists for a different reason and is defence in
+        depth rather than the guarantee: a transform should not be shown
+        a document that has been forgotten, even though it could not
+        successfully emit one. Code that never receives a fact cannot
+        mishandle it.
+
+        Cumulative rules are held back from the first pass. A budget must
+        charge the page that is served and not the one that was proposed
+        and then reranked down -- the same argument ``why_refused``
+        already makes about asking ``charges`` rules last. It means a
+        budget is asked exactly once per document, in the terminal pass,
+        which is also the only pass that can know what the page finally
+        contains.
+
+        With no transforms declared this is the loop it replaced: one
+        ``_admit`` per document, no pre-pass, no allocation, no cost.
+        """
+        transforms = getattr(self.spec, "transforms", ())
+        if not transforms:
+            return [d for d in (self._admit(doc, when=when, tab=tab)
+                                for doc in candidates) if d is not None]
+
+        # Pure rules only: no tab, so nothing is charged, and no
+        # cumulative rule is asked a question it would be asked again.
+        shown = [d for d in (self._admit(doc, when=when, tab=None,
+                                         pure_only=True)
+                             for doc in candidates) if d is not None]
+        shaped = apply_transforms(
+            transforms, shown,
+            request=transform_request(caller=self._caller,
+                                      collection=self.collection,
+                                      vector_search=vector_search))
+        # Terminal. Every rule, including the cumulative ones, on
+        # whatever the transforms produced.
+        return [d for d in (self._admit(doc, when=when, tab=tab)
+                            for doc in shaped) if d is not None]
+
     def reachable(self, docs: Iterable[dict], *,
                   when: datetime | None = None,
                   tab: Any = _UNSET) -> list[dict]:
@@ -710,11 +769,7 @@ class AdmissionCore:
         # it anyway, on the only read path the proxy uses. The redaction
         # *count* genuinely has nowhere to go on a path returning a bare
         # list; the redaction itself is not optional.
-        kept = []
-        for doc in candidates:
-            admitted = self._admit(doc, when=when, tab=tab)
-            if admitted is not None:
-                kept.append(admitted)
+        kept = self._egress(candidates, when=when, tab=tab)
         # The count still has nowhere to go -- this returns a list, not a
         # `Page` -- so `_harvest` below takes the private mark off without
         # reporting the number. The removal is not optional; the tally is.

@@ -88,7 +88,7 @@ from __future__ import annotations
 
 from .declare import (auto_embed, budget, clearance, deadline, distinct,
                       embedded_with, guard, holdable, restricted_to,
-                      revocable, sealed, subjects, tenant)
+                      revocable, sealed, subjects, tenant, transform)
 
 __version__ = "0.1.0"
 
@@ -97,5 +97,9 @@ __all__ = [
     "guard", "deadline", "revocable", "holdable", "tenant",
     "restricted_to", "clearance", "embedded_with", "budget", "distinct",
     "sealed", "auto_embed", "subjects",
+    # Page-shaping, which is not a rule and is exported beside them
+    # anyway: it is declared in the same file, and a vocabulary split
+    # across two imports is a vocabulary people get wrong.
+    "transform",
     "__version__",
 ]

@@ -387,6 +387,80 @@ def _as_rule(collection: str, name: str, value: Any) -> Any:
     return value
 
 
+# Page-shaping declared per collection, by the same registry mechanism
+# the rules use. Kept apart from REGISTRY because the two are different
+# kinds of claim and must not be confusable: a rule is a guarantee that
+# `voyd-plan` can reason about, and a transform is an optimisation that
+# it explicitly cannot.
+TRANSFORMS: dict[str, list] = {}
+
+
+def transform(collection: str):
+    """Declare page-shaping for one collection. Returns the class unchanged.
+
+        @transform("notes")
+        class Diversify:
+            name = "mmr"
+
+            def on_egress(self, docs, *, request):
+                return mmr(docs, diversity=0.7)
+
+    It runs **inside** the boundary, which is the entire point and the
+    only reason offering this is safe. A transform is shown documents
+    that have already survived every pure rule, and everything it
+    returns -- reordered, merged, restored from a cache, invented --
+    goes through the authoritative check afterwards. So:
+
+        **a transform cannot widen what a read returns.** Not because it
+        was reviewed. Because the boundary is downstream of it.
+
+    The corollary is a rule about how to write one. A transform is *not*
+    an enforcement point and must never be used as one. Dropping a
+    document for a security reason here duplicates a rule badly: the
+    rule is the place, the rule is what is re-asked terminally, and the
+    rule is the half `voyd-plan` can tell you about before you ship it.
+    A transform that refuses gets no credit and no attestation.
+
+    Two members, checked at load for the same reason a half-written rule
+    is: a `name` and an `on_egress`, and the two ways to get that wrong
+    are to omit one and to misspell one. From a loader they look
+    identical, and a skipped transform is a boundary that comes up
+    announcing a page shape it is not applying.
+    """
+    def decorate(cls):
+        made = cls() if isinstance(cls, type) else cls
+        name = getattr(made, "name", None)
+        egress = getattr(made, "on_egress", None)
+        missing = [what for what, got in (("name", name),
+                                          ("on_egress", egress))
+                   if got is None]
+        if missing:
+            raise TypeError(
+                f"{collection}: @transform on "
+                f"{getattr(cls, '__name__', cls)!r} is missing "
+                f"{' and '.join(missing)}. A transform is two members -- a "
+                f"name to report it by and an on_egress(docs, *, request) "
+                f"-- and one that is half-written would be silently skipped")
+        if not callable(egress):
+            raise TypeError(
+                f"{collection}: {name!r}.on_egress is not callable")
+        if not isinstance(name, str) or not name.strip():
+            raise TypeError(
+                f"{collection}: a transform's name must be a non-empty "
+                f"string; it is what a skipped one is reported by")
+        TRANSFORMS.setdefault(collection, []).append(made)
+        # Declaration order is application order, so a transform declared
+        # after a `@guard` has to reach back into the spec it belongs to.
+        # Frozen, so this is a replace rather than an assignment.
+        if collection in REGISTRY:
+            from dataclasses import replace as _replace
+            REGISTRY[collection] = _replace(
+                REGISTRY[collection],
+                transforms=tuple(TRANSFORMS[collection]))
+        return cls
+    return decorate
+
+
 def guard(collection: str, *, lineage_field: str | None = None,
           on_delete: str = "forward"):
     """Declare the rules for one collection. Returns the class unchanged.
@@ -514,7 +588,14 @@ def guard(collection: str, *, lineage_field: str | None = None,
         REGISTRY[collection] = AdmissionSpec(
             collection, rules=tuple(rules), tenant=tenant_field,
             lineage_field=lineage_field, subjects=subject_path,
-            subject_key=subject_key)
+            subject_key=subject_key,
+            # A `@transform` declared *above* the `@guard` is already
+            # registered by the time this runs; one declared below reaches
+            # back. Either order works and neither is the documented one,
+            # because a policy file that behaved differently depending on
+            # decorator order would be the exact class of surprise this
+            # loader exists to refuse.
+            transforms=tuple(TRANSFORMS.get(collection, ())))
         OPTIONS[collection] = {"on_delete": on_delete,
                                "sealed": tuple(sealed_fields),
                                "scope_field": tenant_field,
@@ -533,6 +614,7 @@ def load(path: str) -> dict[str, AdmissionSpec]:
     import runpy
     REGISTRY.clear()
     OPTIONS.clear()
+    TRANSFORMS.clear()
     runpy.run_path(path, run_name="voydfile")
     if not REGISTRY:
         raise ValueError(

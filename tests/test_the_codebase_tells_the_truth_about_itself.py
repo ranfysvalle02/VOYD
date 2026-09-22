@@ -135,7 +135,13 @@ def test_the_public_surface_is_deliberate():
     assert set(voyd.__all__) == {
         "guard", "deadline", "revocable", "holdable", "tenant",
         "restricted_to", "clearance", "embedded_with", "budget", "distinct",
-        "sealed", "auto_embed", "subjects", "__version__"}, (
+        "sealed", "auto_embed", "subjects",
+        # Not a rule, and exported beside them deliberately: a transform
+        # is declared in the same file, and a vocabulary split across two
+        # imports is one people get wrong. What it is *not* is an
+        # enforcement point -- see `transforms.py` for why that is safe.
+        "transform",
+        "__version__"}, (
         "the policy vocabulary changed; that is the package's whole public "
         "surface, so it is a deliberate edit and not an incidental one")
 
