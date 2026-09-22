@@ -14,6 +14,6 @@ from voyd import deadline, guard, revocable
 
 
 @guard("notes", on_delete="revoke")
-class Notes:
+class Notes:  # second push, same finding
     expire_at = deadline()
     forgotten = revocable()
