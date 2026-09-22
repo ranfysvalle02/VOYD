@@ -179,6 +179,61 @@ with *only* a query half would be a hole.
 
 ---
 
+## What a policy change would let through
+
+Because the per-document check is pure — a function of a document, a spec
+and a clock, with no database under it — it can be asked about a policy
+that is not deployed. `voyd-plan` asks it twice and reports the difference:
+
+```bash
+voyd-plan --current voydfile.py --proposed voydfile.new.py \
+          --target $URI --database app --all
+```
+
+```
+the boundary moves, in the admitting direction
+  notes  tenant_removed
+    reads were scoped by 'tenant_id' and no longer are: a read can
+    return documents belonging to any tenant
+
+documents that become reachable
+  notes  +9 of 200 read
+           9  were refused as revoked
+
+200 documents, read
+newly reachable: 9
+```
+
+**The exit code is the product.** `1` when something becomes reachable, `0`
+when nothing does — so a policy change that opens the boundary fails a pull
+request and says which documents and why. A change that *closes* it exits
+zero on purpose: a tool that blocked those would teach people to bypass it,
+and a read path that got shorter is visible to whoever it refused.
+
+Without `--target` it reports the structural half only, which needs no
+cluster and no credentials: a `@guard` deleted, a `tenant()` dropped, a
+`subjects()` array that stops being subjects. Those are facts about the
+policy, so they are not weakened by a sample and do not disappear against
+an empty collection.
+
+**It refuses to answer three questions, by name.** `budget()` and
+`distinct()` are set-relative — they refuse a document because of the other
+documents on the page, and a sample is not a page — so they are set aside
+and printed rather than evaluated one document at a time. `clearance()` and
+`restricted_to()` decide by who is asking, so they are planned only against
+a caller you name with `--as`. And the tenant is enforced by the handle
+against the scope a read is bound to rather than by a rule, so a plan
+reports that the boundary moved, not which rows crossed it. A plan that
+quietly folded any of the three into a total would be this project's own
+complaint, one level up.
+
+`--at` runs the clock at another instant, which makes *"what would this
+policy have refused last Tuesday?"* a real question — a deadline and a hold
+are both functions of time. It moves the clock and not the data: nothing
+here keeps history, and the documents are the ones on disk now.
+
+---
+
 ## The server owns the encoding
 
 An embedding is not a vector, it is a `(vector, model)` pair, and a vector
@@ -239,7 +294,8 @@ uv run pytest -q -m ""                  # everything
 ```
 
 The pure files — the per-document check, every decision in the policy
-package, the wire codec, the custody rungs and the sweep below — need no
+package, the planner that asks it about a policy nobody deployed, the wire
+codec, the custody rungs and the sweep below — need no
 database at all, and CI runs them in a step with no `services:`. If that
 step ever needs one, the boundary has stopped being pure.
 
@@ -312,5 +368,8 @@ the second language.
 - No policy file can see an index created somewhere else. `sealed()` on a
   field that an Atlas index auto-embeds is a contradiction nothing here can
   detect.
+- `voyd-plan --at` replays the clock against today's documents. Answering
+  it against the documents as they *were* needs history this package does
+  not keep.
 
 MIT.

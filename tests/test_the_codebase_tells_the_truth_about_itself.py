@@ -59,6 +59,10 @@ NOT_OURS = {
     "settings.py", "conftest.py", "setup.py", "requirements.txt",
     # Written by a test into its own tmp_path.
     "one.py", "two.py", "voydfile.py",
+    # The two policy files `voyd-plan` compares, written by its
+    # tests into `tmp_path` and named for what they stand for. The
+    # `.new.` one is the placeholder in the README's own command line.
+    "in_force.py", "proposed.py", "voydfile.new.py",
 }
 
 

@@ -73,6 +73,9 @@ build-backend = "hatchling.build"
 # serve a policy file, not only the vocabulary to write one.
 voyd-wire = "voyd.wire.cli:main"
 voyd-bench = "voyd.wire.bench:main"
+# Reads two policy files and, optionally, a cluster. Writes nothing:
+# the whole command is a question about a policy that is not deployed.
+voyd-plan = "voyd.wire.plan:main"
 voyd-wire-health = "voyd.wire.health:main"
 
 [tool.hatch.build.targets.wheel]
