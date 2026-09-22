@@ -42,8 +42,8 @@ forwarded intact.
 
 **One upstream per client, and one request loop.** A read is served by the
 deployment the client was pointed at. There is no second path that routes
-some reads elsewhere -- see `LIMITS.md` section 8 for the one that existed
-and why it was removed.
+some reads elsewhere, and `LIMITS.md` section 8 says why ranking on a
+replica is not one.
 
 **Concurrency is this file's problem and nobody else's.** Every function
 in `policy.py` that rewrites bytes is `bytes -> bytes` and touches no

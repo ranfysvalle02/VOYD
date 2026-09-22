@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "docker-compose.yml"
 
 # Where a reader could meet one of these commands.
-DOCS = ("README.md", "LIMITS.md", "CLAIMS.md", "blog.md",
+DOCS = ("README.md", "LIMITS.md", "CLAIMS.md", "SHADOW_MODE.md",
         "scanner/README.md", ".github/workflows/test.yml")
 
 # `docker compose up ... <service>` with any flags in between. The service

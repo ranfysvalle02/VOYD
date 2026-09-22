@@ -120,12 +120,11 @@ Neither is a way to go quiet:
 is the ratchet: the unjudged column can be driven to zero and then *held*
 there by CI, which is something a number nobody can act on cannot do.
 
-VOYD's own repository passes `voyd-scan --strict voyd/`. It used to need one
-`# voyd: filtered` claim to get there, on an aggregate in the store layer
-where the handle's own `match()` was the deadline. That layer was cut in the
-pivot to the wire, so the claim went with it and the package now has none —
-which is the honest reading of a zero here: the code a scanner can see got
-smaller, not safer.
+VOYD's own repository passes `voyd-scan --strict voyd/` with no claims at
+all, and that is the weaker reading rather than the stronger one: nothing in
+this package reads a guarded collection, so there is little here for a
+scanner to see. A zero means the visible surface is small, not that it is
+safe.
 
 ## Exit codes
 
@@ -204,15 +203,13 @@ The JSON carries the evidence for every mark — which field, by what route, on
 what support — so an inferred finding can be argued with on its evidence
 rather than accepted on faith.
 
-**On a large repository the report groups rather than enumerates.** This was a
-real defect, not a nicety: on a 2,000-file tree it printed 1,682 findings
-whose message bodies were, every one of them, the same sentence. The inference
-genuinely does get stronger with scale and the printout got proportionally
-less usable — true of the analysis, false of the thing a person reads. Now the
-shared reason and the shared path prefix are stated once, findings are grouped
-by directory worst-first so a thousand leaks read as the one module they
-usually are, and the same scan prints 32 lines instead of 1,690. `--all` still
-lists everything.
+**On a large repository the report groups rather than enumerates.** The
+inference gets stronger with scale and a flat printout gets proportionally
+less usable — true of the analysis, false of the thing a person reads. So the
+shared reason and the shared path prefix are stated once and findings are
+grouped by directory worst-first, because a thousand leaks are usually the one
+module they live in: a 2,000-file tree that would print 1,690 lines prints 32.
+`--all` still lists everything.
 
 ## Why it is a separate package
 
@@ -251,13 +248,10 @@ incident.
 A leak is a read that can hand a prompt a document the collection's own rule
 calls gone. Route it through a filter on the mark — and if you would rather
 that be enforced structurally than remembered by every person who opens the
-file, that is what [VOYD](../README.md) is for. The same abstraction runs at
-both ends: what this infers statically from your conventions, VOYD's handle
-enforces at runtime as a `Rule` — and that sentence is a test rather than a
-sales line. `tests/test_the_scanner_and_the_handle_are_one_idea.py` drives
-both halves off the same rule objects: every rule's query half names a field,
-this scanner recovers that field from a hand-rolled repository without being
-told it, and the read that forgot it is the finding.
+file, that is what [VOYD](../README.md) is for. It is one abstraction at both
+ends: what this infers statically from your conventions is what a `Rule`'s
+`clause()` states declaratively and the boundary enforces on every read, for
+every driver, with nothing to remember.
 
 **Where that stops, and why it is the interesting part.** Some rules have no
 query half at all — a token budget refuses a document because of the *other*
@@ -270,8 +264,8 @@ half, which is why a per-document check on the way out is not an optimisation
 of this tool but the only place the rest can live.
 
 The classifier's judgements — and the two ways it could lie about its own
-result — are pinned by `tests/test_leak_scan.py` in the parent repository,
-because an instrument that hands a stranger "you have N leaks" earns nothing
-if N is noise.
+result — are pinned by `tests/test_the_scanner_is_not_confidently_wrong.py`
+in the parent repository, because an instrument that hands a stranger "you
+have N leaks" earns nothing if N is noise.
 
 MIT.

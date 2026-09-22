@@ -28,12 +28,10 @@ rather than assumed.
 This module issues `listIndexes`, `$listSearchIndexes` and `listCollections`.
 It creates nothing, alters nothing and drops nothing.
 
-That distinction is load-bearing, because conflating it with the *other*
-thing -- creating the index from the declaration -- is what kept this from
-being written for a while. Creating an index is a schema change against
-somebody else's cluster and deserves the caution. Reading one back is a
-query. The risk of the first is not a reason to skip the second, and
-`LIMITS.md` §5 used to say otherwise.
+That distinction is load-bearing. Creating an index from the declaration is
+a schema change against somebody else's cluster and deserves the caution --
+which is why it is `--ensure`, a separate flag. Reading one back is a query.
+The risk of the first is not a reason to skip the second.
 
 ## What it does not become
 

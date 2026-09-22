@@ -15,10 +15,10 @@ something*. The difference between "we believe this" and "this is held up by
 a named file that runs in CI" is the entire distance this project is about.
 
 **What it cannot do**, said here rather than discovered: a test can be
-attached and still be weak. One on this page was —
-`test_one_erased_tenant_does_not_fail_the_page` had a docstring about a page
-of fifty and asserted a page of one, and it passed under sabotage. See
-`LIMITS.md` §1. Attachment is a floor, not a ceiling.
+attached and still be weak. A docstring describing a page of fifty over an
+assertion about a page of one passes under sabotage and counts as evidence
+here. Attachment is a floor, not a ceiling — `LIMITS.md` §4 says what it is
+worth.
 
 ---
 

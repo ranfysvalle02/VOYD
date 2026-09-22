@@ -22,8 +22,13 @@ revoked credential is in a prompt and the dashboard is green.
 
 So: **ranking is not permission.** Delete does not help either — MongoDB's
 TTL monitor runs about once a minute (measured here: 60.0s), an S3 lifecycle
-rule about once a day, and in that window the index keeps returning the
-deleted document as a normal, well-scored result. Delete is a wish.
+rule about once a day, and in that window a retrieval keeps returning the
+fact as a normal, well-scored result. Not because the index is stale: it is
+returning a row that is genuinely still there, correctly, because nothing
+has swept it yet. Measured on a real `mongot` by `examples/drift.py` —
+**40.8s of being ranked, with the row on disk the whole time.** Which is
+why a faster index does not close this and a faster sweeper only narrows it.
+Delete is a wish.
 **Refuse is a contract** — answered on every read, immediately, whatever the
 sweeper is doing.
 
@@ -37,47 +42,43 @@ the whole design, because a boundary you can forget to use is not one.
 
 That is the thesis underneath all of it, and it is bigger than vector
 search. Everything above is one instance of it, and so is every defect this
-project has found in itself:
+project finds in itself:
 
-| the intent | the window it actually had | found in |
-|---|---|---|
-| `delete` removes the fact | ~60s of TTL monitor lag | the premise above |
-| a destroyed key makes it unreadable | ~60s of libmongocrypt key cache | `voyd/wire/seal.py` |
-| a replica's copy is current | unbounded replication lag | `LIMITS.md` §8 |
-| the index embeds with the declared model | nobody had ever asked it | `voyd/wire/preflight.py` |
-| this test proves the claim in its name | it asserted a page of one | `LIMITS.md` §1 |
-| this counter is on a dashboard | it was never flushed | `voyd/wire/metrics.py` |
+| the intent | the window it actually has |
+|---|---|
+| `delete` removes the fact | ~60s of TTL monitor lag |
+| a destroyed key makes it unreadable | ~60s of libmongocrypt key cache |
+| a replica's copy is current | unbounded replication lag |
+| the index embeds with the declared model | nothing ever asks it |
+| this test proves the claim in its name | it can assert a page of one |
+| this counter is on a dashboard | it can never be flushed |
 
-Three unrelated subsystems, three independent discoveries, one defect: a
-*delete-is-a-wish window*. Then the same shape again in the configuration,
-the test suite, and the metrics. The lesson generalises past data entirely —
-**what did you verify, versus what did you declare and assume?**
+Three unrelated subsystems, one defect: a *delete-is-a-wish window*. Then
+the same shape again in the configuration, the test suite, and the metrics.
+The lesson generalises past data entirely — **what did you verify, versus
+what did you declare and assume?**
 
 So this repository applies it to itself, and not as a slogan:
 
 - **[CLAIMS.md](CLAIMS.md)** maps every guarantee to the file that would go
   red if it stopped holding. The mapping is checked in both directions by
   `tests/test_every_claim_names_its_evidence.py` — a claim with no test, or
-  a test no claim points at, fails the suite. Currently 37 claims across 36
-  files — lineage is two of them, because the cascade on read and the
-  ancestry closed on write fail separately.
+  a test no claim points at, fails the suite. 37 claims across 36 files;
+  lineage is two of them, because the cascade on read and the ancestry
+  closed on write fail separately.
 - **[LIMITS.md](LIMITS.md)** counts this project's own defects, names its
-  own bad numbers, and opens with the one that matters: nobody has used this
-  but its author.
+  own bad numbers, and opens with the one that matters: nobody has used
+  this but its author.
 - Every performance figure comes from `voyd/wire/bench.py`, which checks
   the boundary was still refusing while it was being fast.
 
 None of that makes the code correct. It makes the difference between *a
 claim* and *an attached claim* visible, which is the only honest thing a
-README can offer — and it is the floor, not the ceiling. One of the tests on
-that map was a screenshot for two commits.
+README can offer — and it is a floor, not a ceiling.
 
 ---
 
 ## Three ways to make a fact go away, and only one is immediate
-
-The mechanics, in one table. Every claim below is a consequence of it, and
-the last column is the part that decides which one you actually need:
 
 | | when | reaches |
 |---|---|---|
@@ -87,15 +88,16 @@ the last column is the part that decides which one you actually need:
 
 Nothing here replaces your TTL index; the bottom row is MongoDB doing its
 job. What the top two add is the two questions it cannot answer — *may this
-reach a prompt **now***, and *what about the backup nobody has restored yet*.
+reach a prompt **now***, and *what about the backup nobody has restored
+yet*.
 
-**They cover each other exactly, which is the argument for having both rather
-than choosing.** Refusal is instant and binds only this read path, so a
-restored snapshot walks straight past it. A destroyed key binds every copy
-and is *not* instant — a reader that decrypted a moment ago keeps decrypting
-until its key cache turns over. So each one's window is the other's
-guarantee, and the boundary orders them that way on purpose: **unreachable
-first, unreadable second.**
+**They cover each other exactly, which is the argument for having both
+rather than choosing.** Refusal is instant and binds only this read path,
+so a restored snapshot walks straight past it. A destroyed key binds every
+copy and is *not* instant — a reader that decrypted a moment ago keeps
+decrypting until its key cache turns over. So each one's window is the
+other's guarantee, and the boundary orders them that way on purpose:
+**unreachable first, unreadable second.**
 
 ---
 
@@ -144,21 +146,22 @@ clear every document it had just refused to serve.
 **It follows a failover.** The upstream is resolved lazily and cached, and
 invalidated by the server's own `NotWritablePrimary` — including the one
 nested inside a batch's `writeErrors`, which is where it hides on exactly
-the command this rewrites. The next connection re-resolves. A health check is
-a guess about the future; that error is the server describing the present, on
-the message that proves it, which the client was getting anyway.
+the command this rewrites. The next connection re-resolves. A health check
+is a guess about the future; that error is the server describing the
+present, on the message that proves it, which the client was getting
+anyway.
 
 Then change one connection string. **That is the whole integration.** No
-import is added to your application, no handle replaces a collection, no read
-path is rewritten, and nobody has to remember anything.
+import is added to your application, no handle replaces a collection, no
+read path is rewritten, and nobody has to remember anything.
 
 What your driver keeps, because this is the question that decides whether
-the sentence above is true for *you*: sessions, multi-statement transactions
-and retryable writes all cross the boundary intact, and every satisfiable
-read preference is served and still refused. Every read lands on the one
-upstream you pointed it at. The details, and the tests that hold them, are
-[below](#known-gaps). Run it with `--advertise-self` or reach it with
-`directConnection=true`; without one of the two your driver reads the
+the sentence above is true for *you*: sessions, multi-statement
+transactions and retryable writes all cross the boundary intact, and every
+satisfiable read preference is served and still refused. Every read lands
+on the one upstream you pointed it at. The details, and the tests that hold
+them, are [below](#known-gaps). Run it with `--advertise-self` or reach it
+with `directConnection=true`; without one of the two your driver reads the
 cluster's own host list and connects straight past the boundary.
 
 ### Reads refuse
@@ -189,39 +192,39 @@ And the verb already in everybody's code gets the better meaning:
                         on the schedule they already had
 ```
 
-**Both delete verbs**, because they are different wire commands and covering
-one is worse than covering neither: `deleteOne`/`deleteMany` (`delete`) and
-`findOneAndDelete` (`findAndModify`), which still hands the caller the
-document back. And the verbs that *cannot* be a revocation — `drop`,
-`dropDatabase`, `renameCollection` — are **refused with a reason** rather than
-forwarded, because a drop takes the marks with it and leaves no evidence that
-anything was ever forgotten.
+**Both delete verbs**, because they are different wire commands and
+covering one is worse than covering neither: `deleteOne`/`deleteMany`
+(`delete`) and `findOneAndDelete` (`findAndModify`), which still hands the
+caller the document back. And the verbs that *cannot* be a revocation —
+`drop`, `dropDatabase`, `renameCollection` — are **refused with a reason**
+rather than forwarded, because a drop takes the marks with it and leaves no
+evidence that anything was ever forgotten.
 
-Delete is a wish — eventually, best effort, unprovable. Refuse is a contract.
-They asked for the wish and got the contract, and the bytes still go, on the
-deadline they already had. A credential you need out of prompts *now* and on
-disk *for the investigation* are contradictory requirements for `DELETE` and
-the same requirement for this.
+Delete is a wish — eventually, best effort, unprovable. Refuse is a
+contract. They asked for the wish and got the contract, and the bytes still
+go, on the deadline they already had. A credential you need out of prompts
+*now* and on disk *for the investigation* are contradictory requirements
+for `DELETE` and the same requirement for this.
 
 `on_delete="revoke"` is opt-in, because silently redefining `delete` for an
 operator who did not ask is the kind of surprise this project exists to
 remove — and because somebody, somewhere, means it. Left alone, a delete
-really deletes. Declaring it without a `revocable()` field to write the mark
-into is refused at load: there would be nowhere to record that the fact was
-forgotten, and the delete would quietly do nothing.
+really deletes. Declaring it without a `revocable()` field to write the
+mark into is refused at load: there would be nowhere to record that the
+fact was forgotten, and the delete would quietly do nothing.
 
-The update it emits is the same pipeline `Admission.revoke()` writes — the
-literal mark, the deadline moved *earlier only*, the derived encodings nulled
-— so a fact forgotten through the wire and one forgotten through the library
-are the same document afterwards. Two spellings producing different rows would
-be the drift this whole package is about.
+The update it emits writes the literal mark, pulls the deadline *earlier
+only*, and nulls the derived encodings — one spelling of a forgotten
+document, so an audit reading rows cannot tell which verb produced one.
 
 Run it: `uv run python examples/wire.py`.
 
-The proxy holds no database connection of its own. The per-document check is
-pure — handed documents, returns the ones a prompt may see — which is what
-makes it movable to a wire at all. One flag spends that, deliberately and in
-one place: [`--key-vault`](#the-erasure-refusal-cannot-perform).
+The proxy holds no database connection of its own on the read path. The
+per-document check is pure — handed documents, returns the ones a prompt
+may see — which is what makes it movable to a wire at all. The connections
+it does open are named in `--help` rather than discovered:
+[`--key-vault`](#the-erasure-refusal-cannot-perform), `--ensure`, and a
+policy declaring `lineage_field`.
 
 ## The vocabulary
 
@@ -232,6 +235,8 @@ one place: [`--key-vault`](#the-erasure-refusal-cannot-perform).
 | `holdable()` | the reversible kind: a hypothesis, not an instruction |
 | `tenant()` | the tenant id — required in every query *and* checked per document |
 | `restricted_to(claim)` | admit only callers whose claim overlaps this audience |
+| `clearance(order, roles)` | an ordered ladder, with the caller's rung read from their roles |
+| `subjects(key=...)` | an array whose elements are subjects in their own right |
 | `embedded_with(model)` | refuse a vector from a different embedding model |
 | `budget(n)` | refuse once the prompt has no room left |
 | `distinct()` | refuse a repeat of content already on the page |
@@ -241,20 +246,20 @@ one place: [`--key-vault`](#the-erasure-refusal-cannot-perform).
 `budget(n)` and `distinct()` are **set-relative**: they refuse a document
 because of the *other* documents on the page, so the same document is
 admitted alone and refused in company. No index filter and no policy engine
-can express that —
-`$vectorSearch` decides each candidate before the page exists, and
-`enforce(subject, object, action)` has nowhere to put the rest of the set.
+can express that — `$vectorSearch` decides each candidate before the page
+exists, and `enforce(subject, object, action)` has nowhere to put the rest
+of the set.
 
-A policy file that is wrong fails when it is *loaded*, not when a query comes
-back with the wrong rows.
+A policy file that is wrong fails when it is *loaded*, not when a query
+comes back with the wrong rows.
 
 ### Rules that ask who is calling, and where the answer comes from
 
 The question is not how to pass claims to the boundary — it is why the
 boundary should believe any. A rule that accepted `{"clearance":
 "secret"}` because a client sent one **would be an authorisation system
-whose only input is the attacker's**, and a proxy is worse off than a
-library here, because the client is the only thing talking to it.
+whose only input is the attacker's**, and the client is the only thing
+talking to this process.
 
 So the boundary does not accept claims. It asks the deployment:
 
@@ -263,9 +268,9 @@ connectionStatus  ->  authenticatedUsers:     [{user: "lawyer", db: "app"}]
                       authenticatedUserRoles: [{role: "legal",  db: "app"}]
 ```
 
-Run on the client's *own* connection, so the socket, the authentication
-and the identity are all theirs — and the answer is the server's account
-of who authenticated there, which no client can forge without forging the
+Run on the client's *own* connection, so the socket, the authentication and
+the identity are all theirs — and the answer is the server's account of who
+authenticated there, which no client can forge without forging the
 authentication itself. A role **is** a group: `db.createRole({role:
 "legal"})` is how a deployment already spells this, so
 
@@ -282,13 +287,13 @@ seller  ->  find({})  ->  a different set, same query, same proxy
 ```
 
 Asked once per connection, lazily, and only for a collection whose rules
-ask — an authenticated connection cannot become somebody else, and a
-policy with no caller-aware rule never pays the round trip.
+ask — an authenticated connection cannot become somebody else, and a policy
+with no caller-aware rule never pays the round trip.
 
 **And an ordered ladder, which takes one more line.** A role says who
 somebody *is*, not how far up a ladder they stand — nothing in
-`db.createRole({role: "analyst"})` carries a level. So the policy file
-says which rung each role is on, once, beside everything else it says:
+`db.createRole({role: "analyst"})` carries a level. So the policy file says
+which rung each role is on, once, beside everything else it says:
 
 ```python
 classification = clearance(
@@ -313,10 +318,10 @@ supply one rather than letting it look like broken reads.
 
 Every rule above reads a *top-level* field, which is right until the
 document has parts. A book with chapters, a ticket with comments, a case
-file with notes — the embedded pattern MongoDB recommends, and
-increasingly the shape retrieval works over. A chapter carrying the exact
-mark `revocable()` writes reaches a prompt with its parent, counted
-nowhere, reported as "nothing was refused".
+file with notes — the embedded pattern MongoDB recommends, and increasingly
+the shape retrieval works over. A chapter carrying the exact mark
+`revocable()` writes would otherwise reach a prompt with its parent,
+counted nowhere, reported as "nothing was refused".
 
 ```python
 @guard("books")
@@ -328,15 +333,15 @@ class Books:
 
 The refused elements are removed and the parent is served without them,
 because a book is not erased by one retracted chapter. `key` is required:
-an anonymous subject is refusable on read and can never be *addressed*,
-and an erasure request names a thing — so an element carrying no key is
-refused rather than admitted.
+an anonymous subject is refusable on read and can never be *addressed*, and
+an erasure request names a thing — so an element carrying no key is refused
+rather than admitted.
 
 **And a projection that would hide an element's marks is refused.**
-Everywhere else a blinding projection has a remedy — the rule goes into
-the filter and the server drops the refused documents before the
-projection can hide anything. No query removes an array element, so here
-there is none, and the error names the fields to ask for instead.
+Everywhere else a blinding projection has a remedy — the rule goes into the
+filter and the server drops the refused documents before the projection can
+hide anything. No query removes an array element, so here there is none,
+and the error names the fields to ask for instead.
 
 ## The vocabulary is not a fixed list
 
@@ -378,27 +383,25 @@ voyd-wire: guarding notes: notes: refuses on [deadline, revoked, wrong_region]
 ```
 
 The attribute name binds the field, the reason is announced at boot and
-counted under its own name on `/metrics`, and nothing in `voyd/` knows
-what a region is. That is the extension point: the interesting refusals
-are domain refusals, and the boundary should not have to learn your
-domain to enforce them.
+counted under its own name on `/metrics`, and nothing in `voyd/` knows what
+a region is. That is the extension point: the interesting refusals are
+domain refusals, and the boundary should not have to learn your domain to
+enforce them.
 
 **And a rule that is only half written fails when the file is loaded.**
-This is the half worth having. A rule object in a class body used to be
-skipped — not a declared field, so not installed — and the proxy came up
-announcing `refuses on [deadline, revoked]` while serving every document
-the rule existed to refuse. No error, no warning, a policy file that
-looked exactly like a working one. Anything with one or two of the three
-members now raises at load, by name, because a misspelled `refuses` and a
+This is the half worth having. Anything carrying one or two of the three
+members raises at load, by name — because a misspelled `refuses` and a
 missing one are indistinguishable from the loader and identical in
-consequence.
+consequence, and the failure they share is a boundary that comes up
+announcing `refuses on [deadline, revoked]` while serving every document
+the third rule exists to refuse.
 
-The set-relative rules are the same protocol used harder: `budget()` and
-`distinct()` compare a document against the *page so far* rather than
-against the clock, which is a thing no index filter and no policy engine
-can express — `$vectorSearch` decides each candidate before the page
-exists, and `enforce(subject, object, action)` has nowhere to put the rest
-of the set.
+**The two halves have to agree, and that is a test rather than a
+convention.** `refuses(doc)` is the guarantee and `clause()` is an
+optimisation the server can apply; a clause narrower than its rule silently
+loses reachable data, and a clause wider than it silently serves refused
+data. `tests/test_a_rules_two_halves_agree.py` generates documents
+and asserts the two answers match for every rule in the vocabulary.
 
 ## It sizes its own fetch
 
@@ -407,54 +410,47 @@ sized for `limit` on a collection where half of what the index ranks is
 already forgotten, and you get half a page back and pay for another round
 trip to find out.
 
-**No other component can compute the right number.** The index does not know
-your deadline, so it cannot know what fraction of what it ranks is already
-gone. The driver does not. The only thing that knows the refusal rate is the
-thing doing the refusing — and on the search path its count is *exact*,
-because a `$vectorSearch` hit passes through no query, so every candidate is
-either admitted or counted.
+**No other component can compute the right number.** The index does not
+know your deadline, so it cannot know what fraction of what it ranks is
+already gone. The driver does not. The only thing that knows the refusal
+rate is the thing doing the refusing — and on the search path its count is
+*exact*, because a `$vectorSearch` hit passes through no query, so every
+candidate is either admitted or counted.
 
 So the boundary sizes the pool from measurement: `1 / (1 - refusal rate)`,
 which is the expected over-fetch exactly rather than a heuristic. It only
 ever raises the ask, it needs a minimum sample before it infers anything,
 and it is capped — because a scope refusing 99% should not ask for a pool
 the size of the collection. Refill still guarantees the page; this just
-stops it needing three trips to get there. `receipts()["over_fetch"]` shows
-the number.
+stops it needing three trips to get there.
 
 ## There is no in-process form
 
 A boundary you can forget to route a read through is not a boundary, so
 there is no handle to hold and no `find()` to call. `pip install voyd`
-gives you `voyd-wire` and the vocabulary a `voydfile.py` is written in —
-`guard`, `deadline`, `revocable`, `tenant`, `restricted_to`, `sealed`,
-`auto_embed` — plus what `--ensure` and `--verify` provision with. Your
-application imports nothing.
+gives you `voyd-wire` and the vocabulary a `voydfile.py` is written in,
+plus what `--ensure` and `--verify` provision with. Your application
+imports nothing.
 
-Two front doors onto one guarantee is the gap this project exists to make
-visible, and having one would mean having it here: a claim that holds
-through an import and not through the connection string is a claim a
-reader cannot check. Everything in [CLAIMS.md](CLAIMS.md) holds through
-the port.
+One guarantee, one door. A claim that held through an import and not
+through the connection string would be a claim a reader cannot check, so
+everything in [CLAIMS.md](CLAIMS.md) holds through the port, and the
+mapping test enforces it: a cited test must drive the boundary or touch no
+database at all.
 
-The one thing you do run in your own process is a **measurement**, and
-only because a boundary would defeat the point of it: `examples/shadow.py`
+The one thing you do run in your own process is a **measurement**, and only
+because a boundary would defeat the point of it: `examples/shadow.py`
 counts how many documents your existing read path serves that your own
 database has already marked as gone, and changes nothing while it does.
 When that number convinces somebody, the same rules become a policy file.
-Two proposals argue that measurement is the thing to ship first, and both
-name the result that would mean this project should stop.
-[INDEX_DRIFT.md](INDEX_DRIFT.md) is the sharper one: it measures how long
-a deleted document keeps coming back from a vector index — the half of
-this README's opening paragraph that is currently inferred rather than
-measured. [SHADOW_MODE.md](SHADOW_MODE.md) measures the other axis, what
-your existing read path serves that your database already marked as gone.
+[SHADOW_MODE.md](SHADOW_MODE.md) argues that measurement is the thing to
+ship first, and names the result that would mean this project should stop.
 
 ## The server owns the encoding
 
 `embedded_with(model)` refuses a **document** whose stored vector came from
-the wrong model, and the measurement behind it is the reason this matters at
-all — two generations of one vendor's model, same width, same text:
+the wrong model, and the measurement behind it is the reason this matters
+at all — two generations of one vendor's model, same width, same text:
 
 ```
   identical text, old model vs new       cosine -0.053
@@ -465,7 +461,7 @@ A model swap does not degrade ranking, it **inverts** it: unrelated text
 scores five times higher than the document you were looking for. No error,
 no log, a healthy-looking `describe()`.
 
-Nothing refused the **query**, and that is the same failure one level up.
+Nothing refuses the **query**, and that is the same failure one level up.
 `auto_embed` takes the embedder out of the application entirely — the index
 holds the text, `mongot` embeds it on write, and embeds the query with the
 same model at read time. Nothing in your process computes a vector, so
@@ -508,29 +504,31 @@ beside the codec and the boundary itself. Run it:
 
 ### Two declarations of one thing have to agree
 
-`embedded_with("voyage-4")` beside `auto_embed("voyage-3.5")` is refused when
-the file is **loaded**. One says *refuse any vector not from voyage-4*; the
-other says *the server will produce them with voyage-3.5*. Every document the
-index embedded would be refused by the rule sitting next to it, and the
-collection would read as empty — which is the kind of wrong that looks like a
-data problem for a week.
+`embedded_with("voyage-4")` beside `auto_embed("voyage-3.5")` is refused
+when the file is **loaded**. One says *refuse any vector not from
+voyage-4*; the other says *the server will produce them with voyage-3.5*.
+Every document the index embedded would be refused by the rule sitting next
+to it, and the collection would read as empty — which is the kind of wrong
+that looks like a data problem for a week.
 
-And a field cannot be both `sealed()` and `auto_embed()`, because the server
-cannot be denied a field and also asked to embed it: it would either embed
-the ciphertext (vectors of noise, and a relevance failure nobody attributes)
-or be handed the plaintext you sealed it against. **In a policy file it cannot be written at all** — the path *is* the attribute name, so Python
-binds it once and the second declaration wins. That is one more answer to
-"why a class body rather than a dict": a shape where a contradiction has
-nowhere to live beats a shape that detects it. Sealing one field and
-embedding a *different* one is fine, and is allowed.
+And a field cannot be both `sealed()` and `auto_embed()`, because the
+server cannot be denied a field and also asked to embed it: it would either
+embed the ciphertext (vectors of noise, and a relevance failure nobody
+attributes) or be handed the plaintext you sealed it against. **In a policy
+file it cannot be written at all** — the path *is* the attribute name, so
+Python binds it once and the second declaration wins. That is one more
+answer to "why a class body rather than a dict": a shape where a
+contradiction has nowhere to live beats a shape that detects it. Sealing
+one field and embedding a *different* one is fine, and is allowed.
 
 ## The erasure refusal cannot perform
 
-Row two of the table at the top. Refusal binds this application's read path,
-so a replica, a snapshot, or a backup restored next year walks straight past
-it — none of them run it, the plaintext is on their disk, and no amount of
-refusing changes that ([LIMITS.md](LIMITS.md) §2). Destroying a key reaches
-all of them at once without visiting any. Declare which field:
+Row two of the table at the top. Refusal binds this application's read
+path, so a replica, a snapshot, or a backup restored next year walks
+straight past it — none of them run it, the plaintext is on their disk, and
+no amount of refusing changes that ([LIMITS.md](LIMITS.md) §2). Destroying
+a key reaches all of them at once without visiting any. Declare which
+field:
 
 ```python
 @guard("notes", on_delete="revoke")
@@ -546,8 +544,8 @@ voyd-wire --config voydfile.py --target "$ATLAS" \
     --key-vault app --kms local:/etc/voyd/master.key
 ```
 
-Then the same plain driver, with no encryption configured and no VOYD import
-in it:
+Then the same plain driver, with no encryption configured and no VOYD
+import in it:
 
 ```
   db.notes.insert_one({"tenant_id": "alice", "text": SECRET})
@@ -559,9 +557,9 @@ in it:
 **`sealed()` requires `tenant()`, and that is the whole design.** The key is
 the tenant's, so erasing one subject touches nobody else. A literal `keyId`
 would give one key per collection, and honouring one person's erasure
-request would make every other tenant's rows unreadable at the same instant.
-Declaring `sealed()` with nothing to scope it to is refused when the policy
-file is *loaded*.
+request would make every other tenant's rows unreadable at the same
+instant. Declaring `sealed()` with nothing to scope it to is refused when
+the policy file is *loaded*.
 
 ### Erasure is two things, in one order
 
@@ -583,19 +581,14 @@ ordering the table at the top ends on, and the entire correctness of the
 feature rather than a nicety. libmongocrypt caches data keys, so a shred on
 its own leaves the ciphertext readable for as long as somebody holds one:
 *a second delete-is-a-wish window, opened inside the feature that exists to
-close the first one*.
-
-Not theorised. The first working version of this did exactly that, and
-served a shredded tenant's plaintext for thirty seconds while reporting the
-erasure as done. It was found by pointing a driver at it, which is the
-subject of [LIMITS.md](LIMITS.md) §1.
+close the first one*. Sabotaging the ordering turns the suite red.
 
 ### It says what it did
 
 Sealing is invisible unless it is counted, and a boundary that silently
 stopped encrypting looks exactly like one that is encrypting. So the read
 half arrives in the refusal series an operator is already watching, and the
-write half got four of its own (`--metrics PORT`):
+write half has four of its own (`--metrics PORT`):
 
 ```
 voyd_sealed_writes_total 5              <- if this is flat, plaintext is landing
@@ -606,15 +599,15 @@ voyd_erasure_revocations_total 5        <- documents revoked ahead of the key
 ```
 
 **The last two are a pair, and the pair is the point.** `erasures_total`
-climbing while `erasure_revocations_total` stays flat *is* the ordering being
-lost — a key destroyed with nothing marked, readable for as long as somebody
-keeps it cached. It is the defect above, as a graph.
+climbing while `erasure_revocations_total` stays flat *is* the ordering
+being lost — a key destroyed with nothing marked, readable for as long as
+somebody keeps it cached.
 
-They also answer a question the per-reason series cannot. A revocation writes
-the mark *and* pulls the deadline in, so an erased subject is refused under
-`deadline` — the same reason a document that merely expired reports. Nothing
-in `refused_by_reason_total` can separate the two, because the boundary wrote
-the same marks for both. These two can.
+They also answer a question the per-reason series cannot. A revocation
+writes the mark *and* pulls the deadline in, so an erased subject is
+refused under `deadline` — the same reason a document that merely expired
+reports. Nothing in `refused_by_reason_total` can separate the two, because
+the boundary wrote the same marks for both. These two can.
 
 ### What this costs, stated rather than discovered
 
@@ -636,13 +629,11 @@ voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database connection of its
   destroying it is somebody else's audited operation. The default is
   ephemeral, does not survive a restart, and says so in capitals.
 - **A sealed read costs ~8.1µs per document instead of 2.3µs**, because it
-  decrypts before it refuses — the order the library uses, and the two must
-  agree or the same document would be admitted one way and refused the
-  other. Measured: `voyd/wire/bench.py --seal` reports **5.8µs** to
-  decrypt, stable across passes, and **~8.7µs** to encrypt warm (~26µs on
-  the first pass, while the key cache fills — which is why the benchmark
-  prints a spread rather than one draw). Unsealed collections still take
-  the pure path untouched.
+  decrypts before it refuses. Measured: `voyd-bench --seal` reports
+  **5.8µs** to decrypt, stable across passes, and **~8.7µs** to encrypt
+  warm (~26µs on the first pass, while the key cache fills — which is why
+  the benchmark prints a spread rather than one draw). Unsealed collections
+  still take the pure path untouched.
 - **A write it cannot seal is refused, never forwarded.** No tenant to scope
   a key to, a pipeline update that would assign a sealed field server-side,
   `$inc` on ciphertext. There is no safe fallback: an error is loud,
@@ -651,29 +642,53 @@ voyd-wire: THIS BOUNDARY NOW HOLDS KEYS. It has a database connection of its
 
 **What it buys is where the encryption sits.** A driver's own `schema_map`
 encrypts below the *application*, so no writer in that one process can
-forget. On the wire it encrypts below the *driver*, so no writer
-in any language can — not the Node service, not the migration script, not
-the shell, not the notebook, not the one written next year by somebody who
-has not read this file. That is the same upgrade the wire gave `delete`,
+forget. On the wire it encrypts below the *driver*, so no writer in any
+language can — not the Node service, not the migration script, not the
+shell, not the notebook, not the one written next year by somebody who has
+not read this file. That is the same upgrade the wire gave `delete`,
 applied to the stronger guarantee.
 
 Run it: `uv run python examples/seal.py`. The full trade, including what is
 still open, is [LIMITS.md](LIMITS.md) §5.
 
+## A revocation reaches what was derived from the fact
+
+A summary of a fact outlives the fact. Refuse the source and the paragraph
+written from it keeps answering prompts, with nothing saying so. Declare
+where a document records its parentage and the revocation follows it:
+
+```python
+@guard("notes", on_delete="revoke", lineage_field="derived_from")
+class Notes:
+    expire_at = deadline()
+    forgotten = revocable()
+```
+
+Descendants are marked **first**, the source second. A crash between the
+two leaves a visible half-erasure that an idempotent re-run fixes; the
+reverse order leaves the source refused and the summary of it still
+serving. The ids are resolved once and both halves pinned to them, because
+`deleteOne` asks the server to pick one of the matches and does not say
+which.
+
+The write side is what makes the read side one query: an insert naming a
+parent inherits that parent's closed ancestry and its earliest deadline,
+and is refused outright if a named parent is missing, out of scope, or
+already refused. So the cascade is one `$in` at any depth. It costs
+**+262µs** on an insert that names a parent and **+1.49ms** per erasure
+request, flat in the size of the subtree (`voyd-bench --cascade`).
+
 ## The policy is checked against the cluster
 
 A voydfile is a set of claims about a cluster this process does not own:
 *there is a TTL index on `expire_at`*, *the vector index embeds `body` with
-voyage-4*, *the server refuses plaintext in this sealed field*. Every one can
-be false, and when one is false nothing says so — the boundary goes on
+voyage-4*, *the server refuses plaintext in this sealed field*. Every one
+can be false, and when one is false nothing says so — the boundary goes on
 enforcing a policy the storage underneath it is not holding up.
 
-`capabilities.py` exists because this engine used to *infer* what a
-deployment could do, and both times it inferred it was wrong for months
-without a log line. Its own conclusion is the argument: **a version floor is
-a claim about software this package does not ship, with no expiry and nobody
-responsible for it.** `auto_embed("voyage-4")` is exactly that. So it is
-asked:
+**A version floor is a claim about software this package does not ship,
+with no expiry and nobody responsible for it.** `auto_embed("voyage-4")` is
+exactly that. So it is asked rather than inferred:
 
 ```bash
 voyd-wire --config voydfile.py --target "$ATLAS" \
@@ -696,33 +711,28 @@ voyd-wire: preflight warning [notes.deadline]: deadline() names 'expire_at'
 ```
 
 Four claims, four checks, and **every one of them read-only** —
-`listIndexes`, `$listSearchIndexes`, `listCollections`. It creates nothing.
-That distinction is what took a while to see: *creating* an index from the
-declaration is a schema change against somebody else's cluster and deserves
-caution, but *reading one back* is a query, and the risk of the first is not
-a reason to skip the second.
+`listIndexes`, `$listSearchIndexes`, `listCollections`. `--verify` creates
+nothing. *Creating* an index from the declaration is a schema change
+against somebody else's cluster, so it is a separate, explicit flag
+(`--ensure`), and the caution the first one deserves is not a reason to
+skip the second: reading an index back is just a query.
 
 **Fatal means a contradiction; a warning means a missing layer.** A
 declaration the index cannot satisfy is an outage discovered one query at a
-time, so the boundary refuses to start and names the line. A deadline with no
-TTL index, a tenant with no index leading with it, a sealed field the server
-still accepts plaintext into — refusal keeps working in all three, so they
-print and the boundary serves. A deployment that has run that way for a month
-should not have its next restart blocked by this noticing.
+time, so the boundary refuses to start and names the line. A deadline with
+no TTL index, a tenant with no index leading with it, a sealed field the
+server still accepts plaintext into — refusal keeps working in all three,
+so they print and the boundary serves. A deployment that has run that way
+for a month should not have its next restart blocked by this noticing.
 
-**Unreachable is not misconfigured.** They look identical from here and mean
-opposite things, so a probe that cannot run says why and the boundary starts
-anyway. And a probe that failed never reports a clean bill — "preflight found
-nothing" on a run where preflight never ran would be the confidently-wrong
-shape this whole project is named after.
+**Unreachable is not misconfigured.** They look identical from here and
+mean opposite things, so a probe that cannot run says why and the boundary
+starts anyway. And a probe that failed never reports a clean bill —
+"preflight found nothing" on a run where preflight never ran would be the
+confidently-wrong shape this whole project is named after.
 
-The connection is closed before the listener accepts anything, so this is not
-`--key-vault`: nothing here is on the read path.
-
-What is still *not* on the wire is **creating** an index from the
-declaration. That one stays with the library, deliberately — the detection
-half is a query and the creation half is a schema change against a cluster
-this process does not own. [LIMITS.md](LIMITS.md) §5.
+Both flags close their connection before the listener accepts anything, so
+neither is `--key-vault`: nothing here is on the read path.
 
 ## When you do not need this
 
@@ -735,8 +745,8 @@ for, and none of these is rare:
 - **One tenant, one audience, no erasure requests.** `tenant()`,
   `restricted_to()` and `sealed()` are most of the value here. Without them
   you are left with the deadline, and a TTL index plus
-  `{"expire_at": {"$gt": now}}` in the query is a smaller thing that
-  closes the same window — *provided* the bullet below holds.
+  `{"expire_at": {"$gt": now}}` in the query is a smaller thing that closes
+  the same window — *provided* the bullet below holds.
 - **You can put that filter in every query and trust every call site to
   keep doing it.** Then do that; it is genuinely cheaper than a proxy. This
   exists because *remembering* is the failure mode — a rule you have to
@@ -750,13 +760,12 @@ for, and none of these is rare:
   — if that is not true of your data, Queryable Encryption is the trade to
   look at, and it costs you the thing this is for: QE rejects a pointer
   `keyId`, so one key covers one field across the whole collection and
-  shredding it erases that field for everybody rather than for one subject.
-  Stated once, with the error message, in `voyd/engine/keyring.py`. It is
-  library-only and not reachable from the wire ([LIMITS.md](LIMITS.md) §5).
+  shredding it erases that field for everybody rather than for one subject
+  ([LIMITS.md](LIMITS.md) §5).
 
-What is left, and it is a narrow, real shape: **retrieval over a corpus where
-facts expire, get revoked, or belong to somebody** — and more than one thing
-reads it.
+What is left, and it is a narrow, real shape: **retrieval over a corpus
+where facts expire, get revoked, or belong to somebody** — and more than
+one thing reads it.
 
 ## Known gaps
 
@@ -788,89 +797,72 @@ Stated rather than discovered:
   primary, and strict `secondary` — the only mode that could have quietly
   become a primary read — is an error before a byte leaves the client. The
   driver performs its own retries, which is why this does not and must not.
-  Keeping `setName` in the rewritten `hello` is what buys the retryable-write
-  and session rows;
-  a driver that thinks it is talking to a standalone turns retries off and
-  tells nobody.
+  Keeping `setName` in the rewritten `hello` is what buys the
+  retryable-write and session rows; a driver that thinks it is talking to a
+  standalone turns retries off and tells nobody.
 - An upstream connection is **per client**, not pooled, and deliberately: a
   MongoDB connection carries authentication, sessions, cursors and
   transactions, so sharing one would hand a cursor to whoever asked second.
   What is bounded is how many exist at once (`--max-connections`).
 - **One coroutine pair per connection, `--workers N` across cores.** A
-  connection costs a coroutine and a socket, not two OS thread stacks: 3,000
-  idle connections are 19 threads and 92MB, where the threaded version was
-  9,001 threads and 365MB. One event loop still saturates one core at
-  100% of one core under load, because the per-message cost is BSON decode —
+  connection costs a coroutine and a socket, not an OS thread stack: 3,000
+  idle connections are 19 threads and 92MB. One event loop saturates one
+  core under load, because the per-message cost is BSON decode —
   `--workers N` pre-forks over one shared listening socket to use the rest,
   and scales 1.94x / 3.57x / 5.98x at 2 / 4 / 8 workers on fourteen cores.
   **Refusal costs ~2.3µs per document.** Counters are summed across workers
-  and printed once. `voyd-bench` reproduces all of it, and
-  checks the boundary was still refusing while it was being fast.
-  `--seal` measures what `--key-vault` adds per document instead.
+  and printed once. `voyd-bench` reproduces all of it, and checks the
+  boundary was still refusing while it was being fast. `--seal` measures
+  what `--key-vault` adds per document instead.
 - **`--metrics PORT`** serves Prometheus text while it runs: documents
   admitted and refused per collection, refusals by reason, connections,
   upstream re-resolutions. Summed across workers through a slab of shared
   memory with one writer per slot, flushed on a timer so the message path
   pays nothing for it (2.50 → 2.51µs/doc, noise). Loopback only, with no
   flag to change it — a refusal count by reason describes what a corpus
-  holds and who has been probing it.
+  holds and who has been probing it. `/health` on the same port asks
+  whether the *upstream* is reachable, which a probe on the listen port
+  cannot ([LIMITS.md](LIMITS.md) §6).
 - `on_delete="revoke"` covers both delete verbs and refuses the three that
   cannot be rewritten. An `update` that *overwrites* a fact is still an
-  ordinary update — that is mutation rather than forgetting, and treating it
-  otherwise would make every edit a revocation.
-- **Automatic encryption and server-side embedding are library-only.** Both
-  survive the trim and neither is reachable through the wire: decryption needs
-  the application's key context, which a proxy deliberately does not hold.
+  ordinary update — that is mutation rather than forgetting, and treating
+  it otherwise would make every edit a revocation.
 
 MIT.
 
 ## Status
 
-**One thing, on purpose.** This repository used to also be an HTTP service, an
-MCP server, a store layer, a job queue, a perimeter, a hash-chain ledger and
-a context index. All of it was cut, along with ~817 tests and ~35,000 words
-of documentation describing it. What is left is the boundary, the policy
-file, and the wire — which is the part that was load-bearing, and the part
-that is hard.
+**One thing, on purpose:** the boundary, the policy file, and the wire.
 
-That is a decision rather than a state. The cut is finished; nothing above is
-waiting on it.
+**What would actually change this project** is in [LIMITS.md](LIMITS.md) §1
+and it is not on this page: nobody has used it but its author. Zero
+external users, zero pilots, every claim here verified by the person who
+wrote it. The defects are not found by the suite going red — they come from
+*running* something, or from somebody asking why a paragraph said what it
+said. One team, two weeks, their own corpus is worth more than anything
+else that could be built next — see [SHADOW_MODE.md](SHADOW_MODE.md).
 
-**What would actually change this project** is in
-[LIMITS.md](LIMITS.md) §1 and it is not on this page: nobody has used it but
-its author. Zero external users, zero pilots, and every claim here verified
-by the person who wrote the claim. Nineteen defects last month, and not one
-of them was caught by the suite going red — they came from running it, or
-from somebody asking why a paragraph said what it said. One
-team, two weeks, their own corpus is worth more than anything else that
-could be built next.
-
-The suite is **588 tests**, and it is the foundation rather than a census —
+The suite is **588 tests**, and it is a foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie. Each one and the file that holds it up is
-**[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim with
-no test, or a test file no claim points at, fails the suite.
+**[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim
+with no test, or a test file no claim points at, fails the suite.
 
-Two of those rows are worth singling out. *A forgotten fact cannot reach a
-prompt* is asserted **with no database anywhere near it**, because a
-per-document check that cannot run without one is a check that could not
-have moved to a wire. And *a `$vectorSearch` hit is refused on the path that
-never passes through a query* runs against a **live Atlas cluster**, because
-that one cannot run anywhere else.
-
-That second one is worth its ninety seconds. Atlas Local registers no embedding
-models, so it *declines* an `auto_embed` declaration and falls back to a
-client-supplied vector — a test that accepted the fallback would assert the
-opposite of what it claims. Against a real cluster the application never
-computes a vector at all, the index owns the encoding, and the expired hit is
-still refused on the way out. Point it at your own cluster with
-`VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
+Two rows are worth singling out. *A forgotten fact cannot reach a prompt*
+is asserted **with no database anywhere near it** — a per-document check
+that cannot run without one could never have moved to a wire. And *a
+`$vectorSearch` hit is refused on the path that never passes through a
+query* runs against a **live Atlas cluster**, because Atlas Local declines
+an `auto_embed` declaration and falls back to a client-supplied vector, so
+a test that accepted the fallback would assert the opposite of its own
+name. Point it at your cluster with `VOYD_ATLAS_URI` (or a `.env`, which is
+gitignored).
 
 ```bash
 docker compose up -d --wait mongo rs    # the rs has auth; it is the only
                                         # deployment that can test identity
 
-pytest              # 584 tests, ~110 seconds -- the inner loop
+pytest              # the inner loop, ~110 seconds
 pytest -m ""        # everything, including the real index builds
 ```
 
@@ -892,18 +884,17 @@ uv build
 
 The Atlas test runs on its own because four index builds on one shared
 cluster outlast the poll budget. The examples loop exits non-zero on
-purpose: a gate that echoes `FAIL` and returns zero is not a gate, and
-this one let a broken example through once.
+purpose: a gate that echoes `FAIL` and returns zero is not a gate.
 
-**291 of those tests need no MongoDB at all**, and that is not a
-convenience. A per-document check that cannot run without a database is
-one that cannot move to a wire — so CI runs them in a step with no
-`services:` and nothing listening, naming the files explicitly rather
-than trusting a marker. If that step ever needs a database, the
-architecture has quietly changed.
+**309 of those tests need no MongoDB at all**, and that is not a
+convenience. A per-document check that cannot run without a database is one
+that cannot move to a wire — so CI runs them in a step with no `services:`
+and nothing listening, naming the files explicitly rather than trusting a
+marker. If that step ever needs a database, the architecture has quietly
+changed.
 
 The suite is checked against sabotage rather than trusted: disabling the
-delete rewrite, the tenant egress check, the tenant *shape* check, cascade,
-refusal itself, wire-side encryption, the revocation that must precede a
-shred, the refusal of a client-supplied query vector, or any of the
-preflight's four checks each turns it red.
+delete rewrite, the tenant egress check, the tenant *shape* check, the
+lineage cascade, refusal itself, wire-side encryption, the revocation that
+must precede a shred, the refusal of a client-supplied query vector, or any
+of the preflight's four checks each turns it red.
