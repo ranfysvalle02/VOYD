@@ -492,6 +492,15 @@ policy and admission, 6,340 of boundary under `voyd/wire/`. Well-targeted
 rather than thorough: the coverage is by *claim*, which is the right axis,
 but it is not line coverage and should not be mistaken for it.
 
+**There is a no-database subset and it is smaller than the marker
+suggests.** `needs_mongo` is applied per *file*, and only to files that
+are mixed, so `-m "not needs_mongo"` over the whole suite still selects
+plenty that starts a proxy. The honest set is the one CI names file by
+file in its "the core needs no database" step: **291 tests in 20
+seconds**, no `services:`, nothing listening. That step is the evidence
+for the property the whole proxy rests on -- the per-document check is
+pure -- so it names its files explicitly rather than trusting a label.
+
 **119 lines in one file are mentioned by no test file**, and it is
 defensible: `composition.py` declares the protocols a type checker reads
 and the runtime never imports. It used to be two files and 189 lines;
@@ -899,6 +908,50 @@ than the one it fixes. Undecided, and unclosed today.
 
 ## 6. Operational notes that will surprise somebody
 
+**A client talking to the boundary carries its own credentials.** It
+forwards SCRAM and authenticates for nobody, so against a deployment that
+requires auth an unauthenticated client gets `Unauthorized` *through* the
+proxy. Correct, and it looks like a proxy bug the first time.
+
+**A pinned `deleteOne` may not be `multi: true`.** The driver marks it
+retryable and the server rejects the combination with code 72. It is why
+the cascade takes `multi` from the clause rather than from the resolved
+set, which is the more accurate-looking and wrong choice.
+
+**Counts in prose go stale on every commit.** §4 here and `README.md`
+both carry test and line counts. Re-measure rather than adjust:
+
+```
+uv run --no-sync pytest -q -m "" --collect-only tests/ | tail -1
+grep -oE "tests/test_[a-z_]+\.py" CLAIMS.md | sort -u | wc -l
+find voyd -name '*.py' | xargs wc -l | tail -1
+```
+
+**Killing a pytest run leaks test databases.** The sweeper only runs at
+start-up:
+
+```
+docker exec voyd-mongo mongosh --quiet --eval 'const d=db.adminCommand({listDatabases:1,nameOnly:true}).databases.map(x=>x.name).filter(n=>n.startsWith("voyd_test")); for(const n of d) db.getSiblingDB(n).dropDatabase(); print(d.length)'
+```
+
+**`voyd-mongo` stepped down mid-run once** (`not primary`, code 10107),
+producing two dozen spurious errors. A cluster of fixture failures on
+`insert_many` is the container, not the code.
+
+**The Atlas test runs isolated, and its refusable row is revoked rather
+than expired.** `--ensure` builds the TTL index, the test waits minutes
+for a server-side index build, and the monitor collected an
+already-expired row mid-build -- the reaper winning a race against the
+test that exists to complain about the reaper. Four index builds on one
+shared cluster can still outlast the poll budget, so the deselection
+stands.
+
+**Do not report a caller count. Report the callers.** An audit here said
+"`saturate`: 2 callers, both inside `reads.py`". There were three, and
+the third was an example that a verification loop echoing `FAIL` and
+returning zero did not catch. A count with no list is an assertion about
+code nobody read; it has cost twice.
+
 **A search index is not free, and `mongot` is shared.** Nine abandoned
 databases carrying 24 search indexes between them was enough to starve new
 index builds and make a healthy test fail for a reason unrelated to
@@ -1156,6 +1209,21 @@ Reasons recorded so they are not relitigated every six months.
   erroring.
 - **Ledgering reads.** A write per refused hit, for a property the read path
   enforces anyway.
+
+Two things are kept on purpose, recorded here so nobody re-derives "no
+callers" and deletes them:
+
+- **`including_refused()`** has no caller outside this package. It is the
+  named, audit-gated break-glass read, referenced from a dozen docstrings
+  and from `scanner/`, and the reason it is a separate object rather than
+  a flag is so a review can grep for every place the guarantee was
+  waived. A feature with no caller yet is not a dead one.
+- **`authority.py` and `authorised_by()`** stay for that reason and one
+  more: four modules import the operation constants (`AUDIT`, `REVOKE`,
+  `QUARANTINE`, `RELEASE`, `SHRED`, `DERIVE`) from it, so deleting it
+  takes the write verbs with it. A working note once had it listed for
+  deletion as "only used by the handle's `authorised_by`", which was
+  measured by memory and wrong.
 - **Reading from a secondary.** This one was built, measured, exercised
   hostilely for a day, and then deleted, so the reasoning is worth more
   than the usual entry.

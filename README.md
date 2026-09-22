@@ -831,15 +831,40 @@ still refused on the way out. Point it at your own cluster with
 `VOYD_ATLAS_URI` (or a `.env`, which is gitignored).
 
 ```bash
+docker compose up -d --wait mongo rs    # the rs has auth; it is the only
+                                        # deployment that can test identity
+
 pytest              # 510 tests, ~100 seconds -- the inner loop
 pytest -m ""        # everything, including the real index builds
 ```
 
-Most files need no MongoDB, and that is not a convenience. A
-per-document check that cannot run without a database is one that cannot move
-to a wire — so if that ever stops being true, the architecture has quietly
-changed, and CI runs those three in a step with no database to make it
-obvious.
+All of it, the way CI runs it:
+
+```bash
+uv run --no-sync ruff check voyd/ tests/ examples/ scanner/
+uv run --no-sync mypy
+VOYD_TEST_MONGO_URI="mongodb://localhost:27018/?directConnection=true" \
+  uv run --no-sync pytest -q -m "" tests/ \
+  --deselect tests/test_search_refuses_on_the_path_that_bypasses_the_query.py::test_the_server_embeds_and_refusal_still_holds
+uv run --no-sync pytest -q -m "" \
+  tests/test_search_refuses_on_the_path_that_bypasses_the_query.py::test_the_server_embeds_and_refusal_still_holds
+python3 scanner/voyd_scan --strict voyd/ scanner/
+fail=0; for f in examples/*.py; do VOYD_MONGO_URI="mongodb://localhost:27018/?directConnection=true" \
+  uv run --no-sync python "$f" >/dev/null || { echo "FAIL $f"; fail=1; }; done; exit $fail
+uv build
+```
+
+The Atlas test runs on its own because four index builds on one shared
+cluster outlast the poll budget. The examples loop exits non-zero on
+purpose: a gate that echoes `FAIL` and returns zero is not a gate, and
+this one let a broken example through once.
+
+**291 of those tests need no MongoDB at all**, and that is not a
+convenience. A per-document check that cannot run without a database is
+one that cannot move to a wire — so CI runs them in a step with no
+`services:` and nothing listening, naming the files explicitly rather
+than trusting a marker. If that step ever needs a database, the
+architecture has quietly changed.
 
 The suite is checked against sabotage rather than trusted: disabling the
 delete rewrite, the tenant egress check, the tenant *shape* check, cascade,
