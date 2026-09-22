@@ -232,15 +232,16 @@ would take every other tenant's rows with it.
 ```bash
 uv sync --all-extras
 uv run pytest -q -m 'not needs_mongo'   # the pure half: no database, ~0.2s
+uv run --extra crypto pytest -q         # including the erasure path
 docker compose up -d mongo              # a real mongod and a real mongot
 uv run pytest -q                        # everything except `slow`
 uv run pytest -q -m ""                  # everything
 ```
 
-The pure files — the per-document check, the policy loader, the wire codec,
-and the sweep below — need no database at all, and CI runs them in a step
-with no `services:`. If that step ever needs one, the boundary has stopped
-being pure.
+The pure files — the per-document check, every decision in the policy
+package, the wire codec, the custody rungs and the sweep below — need no
+database at all, and CI runs them in a step with no `services:`. If that
+step ever needs one, the boundary has stopped being pure.
 
 The live files drive a real `voyd-wire` in front of a real deployment with a
 plain `pymongo` client that has never heard of this package, because the
@@ -265,6 +266,14 @@ cleanup that only runs on the happy path stops running exactly when a test
 starts leaving rows behind. The epoch in the name is what lets each run also
 sweep databases abandoned by an earlier one, bounded to a two-hour window so
 it can never reach a suite running concurrently on the same cluster.
+
+The erasure tests destroy a real key and then try to read the ciphertext
+back, so they need `pymongocrypt` and either `crypt_shared` or
+`mongocryptd` — neither of which is on PyPI. `voyd.engine.keyring.
+available()` is asked rather than assumed, and they skip by name when the
+answer is no, because a suite that passed silently without encryption
+would be reporting on the feature that matters most while testing none of
+it.
 
 `auto_embed` against a cluster that really embeds is marked `slow` and reads
 `VOYD_ATLAS_URI`. Atlas Local registers no model, so it *declines* the
