@@ -1,102 +1,129 @@
-# Ranking is not permission
+# Every bug in this story is disguised as its own opposite
 
-There is a question your retrieval layer is never asked.
+*Building a retrieval boundary, and then watching the genre eat the tool.*
 
-A vector index answers *what is most relevant to this?* — brilliantly,
-approximately, in single-digit milliseconds. It does not answer *may this
-fact reach a prompt?*, because nothing in the shape of an index has anywhere
-to put that question. So the answer gets supplied elsewhere: a tenant filter
-in the query, an `expire_at` clause beside it, a check in the service layer,
-a second check in the notebook somebody wrote for the analytics team.
+---
 
-Each of those is correct the day it is written. The problem is that there is
-no *one* of them.
+There is a particular kind of bug that does not announce itself, does not
+raise, does not page anyone, and makes the graph go up.
 
-## The failure returns more rows
+I want to tell you about four of them. Three are in the problem. The
+fourth is in the thing I built to catch the first three, which is the
+part of the story I did not plan and would not have believed if somebody
+had described it to me in advance.
 
-Consider what happens when one is missing.
+## Exhibit A: the filter you forgot returns more rows
 
-A missing authorization filter does not raise. It does not log. It returns
-*more* documents rather than fewer, and on a retrieval workload more
-documents look like better recall. There is no error to page on, no latency
-spike, no failed assertion. The dashboard is green while a revoked
-credential sits in somebody's context window.
+Somewhere in your codebase is a retrieval call with a tenant filter on
+it. Somewhere else is the one without.
 
-Compare that to the equivalent bug anywhere else in the stack. Miss an
-`WHERE org_id = ?` in SQL and somebody notices, usually quickly, because
-relational results are *counted* and *joined* and the wrong cardinality
-propagates into something a human reads. Miss an auth middleware on an HTTP
-route and your integration tests 200 where they should 403.
+Consider what the second one does when it runs. It does not throw. It
+does not log. It returns *more* documents than it should, which on a
+retrieval workload is indistinguishable from the thing you have been
+trying to achieve all quarter. Recall went up. The eval suite, which
+measures whether the right documents came back and not whether the wrong
+ones did, is delighted.
 
-Retrieval has neither property. The output is a ranked list of plausible
-text, consumed by a language model that will happily summarize whatever it
-is given. The wrong document does not look wrong. It looks like an answer.
+This is unusual. Most of the stack has the decency to fail in the
+direction of *less*. Drop a `WHERE org_id = ?` in SQL and the cardinality
+goes wrong somewhere a human eventually reads. Forget auth middleware on
+an HTTP route and your tests 200 where they should 403 — a red test, a
+diff, a Tuesday.
 
-## Deleting the row is not the fix
+Retrieval gives you a ranked list of plausible prose, handed to a model
+that will cheerfully summarise whatever it is given. The wrong document
+does not look wrong. It looks like an answer. It looks, specifically,
+like a *good* answer, because the index ranked it highly, and the index
+is not broken. The index was asked which documents are most relevant and
+it told you, accurately, at some speed you would put in a slide.
 
-The obvious objection is that forgotten facts should not be in the index at
-all. Delete them.
+Nothing asked the other question.
 
-MongoDB's TTL monitor runs about once a minute. S3 lifecycle rules run about
-once a day. Your cron runs whenever it last worked. In every one of those
-windows the document is genuinely, correctly still on disk — nothing is
-stale, nothing is broken, the sweeper simply has not arrived — and a search
-returns it as a normal, well-scored hit.
+## Exhibit B: `delete` is a wish with good branding
 
-This is not an implementation detail you can optimize away. It is the
-category the operation belongs to:
+The obvious reply is that forgotten facts should not be there to be
+found. Delete them.
+
+Fine. MongoDB's TTL monitor runs about once a minute. An object-lifecycle
+rule runs about once a day. Your cleanup cron runs whenever it last
+worked, a fact you will learn more about later.
+
+In every one of those windows the document is genuinely, correctly, still
+on disk. Nothing is stale. Nothing is broken. The sweeper simply has not
+arrived yet, because sweepers arrive when they arrive, and a search
+returns the document as a perfectly ordinary, well-scored hit.
+
+You cannot optimise your way out of this, because it is not an
+inefficiency. It is a category:
 
     deletion   is a storage event      eventually consistent, by nature
     refusal    is a retrieval promise  immediate, by construction
 
-A faster index does not close the gap, because the index is not wrong. A
-faster sweeper only narrows it, and narrowing a disclosure window is a
-strange thing to call a fix. The only operation that is immediate is the one
-that happens on the read: *may this reach a prompt?*, answered before
-anything is returned, whatever the sweeper is doing.
+A faster index does not help; the index is not wrong. A faster sweeper
+narrows the window, and narrowing a disclosure window is a strange thing
+to describe as a fix. There is exactly one operation that is immediate,
+and it happens on the read.
 
-Delete is a wish. Refuse is a contract.
+## Exhibit C: the orphan vector, or, cosine has no opinions
 
-## A guarantee you can forget to apply is a suggestion
+This is my favourite, in the sense that it keeps me up.
 
-So you add the check. Re-reading a deadline on the way out is four lines,
-and the author who just learned this lesson will write those four lines
-correctly in the read path they were thinking about at the time.
+An embedding is not a vector. An embedding is a `(vector, model)` pair,
+and a vector without its model is an orphan. The trouble is that
+comparing orphans *works*. It does not error. It returns a number
+between -1 and 1, like a professional.
 
-Then the service grows a second read path. Then an analytics job in a
-different language. Then a notebook, a migration script, an MCP server
-somebody stood up on a Friday, an agent framework that does its own
-retrieval. The rule is now only as good as the next author's memory of a
-conversation they were not in.
+Measured against a real embedding API — same text, both 1024 dimensions,
+two generations of one vendor's model:
 
-This is the part I want to insist on, because it is the whole argument and
-it is easy to nod past: **a rule you have to remember to apply is not
-enforced, it is suggested.** Every enforcement mechanism that actually works
-in a mature stack has the property that you cannot route around it by
-forgetting. Kernel permission bits are not a convention. Row-level security
-is not a code review checklist. They sit below the thing that would forget.
+```
+identical text, old model vs new       cosine -0.053
+unrelated text, both on the new one    cosine +0.301
+```
 
-Retrieval has no such layer. That is the gap.
+Read those twice. A model swap does not gently degrade your ranking. It
+**inverts** it. Unrelated text outscores the document you were actually
+looking for by a factor of five, with no error, no log, and a health
+check the colour of spring.
 
-## Put it where the connection is
+And the dimension guard you are thinking of — the one that catches a
+512-wide vector in a 1024-wide index — catches precisely none of this,
+because a whole generation of models shares a width. The safety net is
+real and the fall goes around it.
 
-Which brings the question round to placement, and placement turns out to be
-the entire design.
+## The pattern, stated once
 
-A library is the natural instinct — `from voyd import guarded_find` — and it
-fails the test above immediately. A library is a thing a call site imports,
-which makes it a thing a call site can decline to import. It also binds you
-to one language, and the second retrieval path in an organization of any
-size is rarely in the first language.
+Three failures, one genre. **Each is disguised as the good outcome
+nearest to it.**
 
-A sidecar or a framework middleware is better and still leaky: it governs
-the traffic that goes through it, and the notebook connects directly.
+| what went wrong | what it looks like |
+|---|---|
+| authorisation filter missing | better recall |
+| the row is still there | the sweeper is fine, and it is |
+| embeddings from two models | a ranking, of the usual shape |
 
-The one place every read passes through, in every language, from every tool
-— including Compass, including the shell, including code written next year
-by somebody who has never read your policy file — is **the connection**. So
-the boundary goes on the wire: a proxy speaking MongoDB's protocol, with the
-policy declared in one file that is not your application.
+This is why the problem is hard, and it is not because any individual
+piece is subtle. Each one is obvious once stated. They are hard because
+**the feedback signal points the wrong way.** Nothing in your monitoring
+is built to be suspicious of good news.
+
+## So you put the check somewhere it cannot be skipped
+
+If a rule can be forgotten, it is not enforced, it is *suggested*. That
+disposes of the library — `from voyd import guarded_find` is a thing a
+call site imports, which makes it a thing a call site can decline to
+import, and it binds you to one language besides. The second retrieval
+path in any organisation is rarely in the first language. It is usually
+in a notebook.
+
+The one place every read passes through — every driver, every language,
+Compass, the shell, the migration script, the MCP server somebody stood
+up on a Friday, the agent framework that does its own retrieval, code
+written next year by somebody who has never heard of your policy file —
+is **the connection**.
+
+So the boundary goes on the wire. One file that is not your application,
+and one changed connection string:
 
 ```python
 # voydfile.py
@@ -109,118 +136,165 @@ class Notes:
     tenant_id = tenant()
 ```
 
-```bash
-voyd-wire --config voydfile.py --target localhost:27017
-```
+The failure mode inverts, which is the entire point. Before, you had to
+remember to be safe. Now you have to deliberately connect somewhere else.
 
-Change one connection string. Nothing is imported, no handle replaces a
-collection, no read path is rewritten. The failure mode inverts: before, you
-had to remember to be safe; now you have to deliberately connect somewhere
-else.
+## The tax that turned out to be an inheritance
 
-## What the wire costs you, and what it buys
+Putting the check on the wire imposes a constraint that felt, at the
+time, like a tax: the per-document check has to be **pure**. No database
+underneath it, no connection, no I/O. Documents in, the admissible ones
+out. A proxy cannot phone home in the middle of a cursor batch.
 
-It is a process. It is a hop, a thing to deploy, a thing that can be down,
-and one more participant in your failover story. Those are real and I will
-not pretend the diagram got simpler.
+I want to be honest that I accepted this as a cost.
 
-What it buys is that the per-document check has to be **pure** — no
-database, no connection, no I/O, just documents in and the admissible ones
-out. That constraint is forced by the placement, and it turns out to be the
-most valuable thing about the design, for a reason that has nothing to do
-with performance.
+Then, some weeks later, a question arrived that I could not have asked
+otherwise: *what would this policy change actually let through?*
 
-A `$vectorSearch` hit does not pass through the collection query.
+Because here is the thing about a policy file. It gets reviewed like
+every access-control config gets reviewed — somebody reads the diff and
+forms an opinion. The diff says a line was deleted. The diff does not say
+that forty-one thousand documents just became reachable, and neither will
+anything downstream, because — see Exhibit A — the boundary opening wider
+does not look like a problem. It looks like recall.
 
-Read that again if you have ever pushed a filter down into an index and
-considered the matter closed. The filter you added to your `find` does not
-run on the search path. Which means every pushed-down clause is an
-optimization — cheap work the database does on your behalf — and the
-per-document check on the way out is the actual guarantee. Both halves
-exist; only one of them is load-bearing. The asymmetry runs one way only: a
-rule with no query half is merely slower, and a rule with *only* a query
-half is a hole.
-
-## A rule is a protocol, not a list
-
-Once refusal is a per-document function, the interesting question stops
-being "what reasons ship?" and becomes "what shape is a reason?"
-
-Three members: a `reason` that names it, `refuses(doc)` that decides, and
-`clause()` that offers the query half or `None`. Deadlines and revocations
-are two implementations. So is a clearance ladder, an embedding-model check,
-and a jurisdiction rule you write yourself in the policy file with no
-privileged path for the builtins.
-
-And then the category turns out to be bigger than access control, which is
-the part I did not expect. A *token budget* is the same shape: `may this
-reach the prompt?`, answered `no, there is no room`. So is a de-duplicator:
-`no, that passage is already in the context`.
-
-Those two are strange in a way worth naming. They are **set-relative** —
-they refuse a document because of the *other* documents on the page, so the
-same document is admitted alone and refused in company. Nothing else in the
-stack can express that. `$vectorSearch` decides each candidate before the
-page exists. A policy engine's `enforce(subject, object, action)` has no
-argument for the rest of the set. The usual answer is a de-duplication pass
-bolted on after retrieval, outside whatever governs the read — which is the
-second enforcement point all over again, the one that gets forgotten.
-
-## The embedding is not the vector
-
-One more, because it is the failure I find most unsettling and the one
-nothing warns you about.
-
-An embedding is a `(vector, model)` pair. A vector without its model is an
-orphan, and comparing orphans does not fail — it returns a number between -1
-and 1. Measured on a real API, the same text, both 1024-wide, two
-generations of one vendor's model:
+But if the check is pure, it is just a function. And a function can be
+asked about a policy that is not deployed. Or about an instant that is
+not now.
 
 ```
-identical text, old model vs new       cosine -0.053
-unrelated text, both on the new one    cosine +0.301
+$ voyd-plan --current voydfile.py --proposed voydfile.new.py \
+            --target $URI --database app --all
+
+the boundary moves, in the admitting direction
+  notes  tenant_removed
+    reads were scoped by 'tenant_id' and no longer are: a read can
+    return documents belonging to any tenant
+
+documents that become reachable
+  notes  +9 of 200 read
+           9  were refused as revoked
+
+200 documents, read
+newly reachable: 9
 ```
 
-A model swap does not degrade your ranking. It *inverts* it. Unrelated text
-outscores the right answer by five times, with no error, no log, and a
-perfectly healthy-looking health check. And when two models share a width —
-as a whole generation of them does — the dimension check that catches a
-512-in-1024 mistake catches none of this.
+Exit code 1. Which makes it a pull request check.
 
-So the model is part of what a document *is*, and a row embedded by anything
-else is refused rather than ranked. Better still, let the server own the
-encoding: the index holds text, mongot embeds it on write and embeds the
-query with the same model at read time, and nothing in your process ever
-computes a vector that could drift.
+A design decision I had filed under *compromise* turned out to be the
+only reason this feature can exist. If enforcement lived inside the
+query, there would be nowhere to stand to ask the question except the
+production cluster, and no way at all to ask it about a policy the
+cluster has never seen.
 
-At which point a client sending its own `queryVector` has put the embedder
-back, through a driver that never read your policy file. That caller is
-exactly who the boundary is for, so it is refused by name and told which
-form works.
+I did not earn this. I want to be clear that I did not see it coming. I
+am reporting it because it is the most interesting thing that happened:
+**purity was not a virtue I was practising, it was a constraint the
+placement forced, and it paid a dividend I could not have designed for.**
 
-## What refusal cannot do
+## Three questions it refuses to answer
 
-Refusal binds *this* read path. It has nothing whatsoever to say about a
-replica, a snapshot, or the backup somebody restores in eighteen months —
-none of those run it.
+The temptation with a tool like this is to produce a number for
+everything, because a number looks like coverage.
 
-I would rather say that here than have you discover it. The answer is
-cryptographic: a key per tenant, so destroying the key makes every copy
-unreadable at once, everywhere, including the copies you do not know about.
-That one is not immediate — a reader that decrypted a moment ago keeps
-decrypting until its key cache turns over, about a minute — which is
-precisely the window refusal covers.
+It declines, by name, in three places.
 
-    refusal          immediate    this application's read path
-    crypto erasure   ~60s         every copy that exists anywhere
+`budget()` and `distinct()` are *set-relative* — they refuse a document
+because of the **other** documents on the page, so the same document is
+admitted alone and refused in company. A sample is not a page. Evaluating
+them one document at a time would not be a weaker answer, it would be an
+answer to a different question, printed with total confidence. So they
+are set aside and named.
 
-Each one's window is the other's guarantee. That is an argument for having
-both, in that order: unreachable first, unreadable second.
+`clearance()` and `restricted_to()` decide by who is asking, so they are
+planned only against a caller you supply. Planning them against nobody
+would report every restricted document as refused under both policies and
+print a serene zero.
 
-## The generalization
+And the tenant is enforced by the handle rather than by a rule, so the
+plan says the boundary *moved* — it does not claim to know which rows
+crossed it.
 
-The thesis underneath all of this is larger than vector search, and it is
-the reason I keep finding the same bug in unrelated places:
+A tool that quietly folded any of those into a total would be this
+project's own complaint, one level up: a guarantee that looks complete
+with a hole in it that nothing announces. I have spent too long being
+annoyed about that to ship it.
+
+## Exhibit D: in which the genre comes for the tool
+
+A check nobody runs is a man page. So `voyd-plan` became a GitHub Action,
+because the moment the answer matters is the moment somebody is reading a
+diff and deciding whether one deleted line is fine — and at that moment
+the tool was in a terminal, being excellent, unobserved.
+
+I tested it properly. I built a throwaway repository, extracted the
+steps out of `action.yml`, and ran the actual shell rather than my
+description of it. I found and fixed three things doing that, one of
+which was that the YAML did not parse at all.
+
+Then I opened a real pull request, and it failed.
+
+Not *failed* as in "correctly reported a fail-open." Failed as in: no
+report, no comment, no output, exit 1 from the shell, nothing to read.
+
+Here is what happened. GitHub runs a composite action step under:
+
+```
+bash --noprofile --norc -e -o pipefail
+```
+
+That `-e` is not mine. It arrives with the shell. And the entire job of
+that step is to *read a non-zero exit status* — because exit 1 is how
+`voyd-plan` says the boundary opened.
+
+So the step died at the exact moment it succeeded. The plan was computed.
+The boundary had opened. The tool returned 1 to say so, correctly, and
+the shell killed it mid-sentence.
+
+Sit with the shape of that for a second, because it is Exhibit A wearing
+a different hat.
+
+A check that fails with **no output** does not look like a finding. It
+looks like an infrastructure flake. And what a team does about an
+infrastructure flake in a required check is not investigate it. It is
+mark the check non-blocking, ship the change, and put the fix in the
+backlog behind everything that has a customer attached.
+
+Which means the failure mode was not "the check is broken." It was **the
+check is broken in a way whose natural remedy is to disable the check**
+— which leaves you worse off than never having built it, because now you
+also believe you have one.
+
+The bug in the thing I built to catch invisible fail-open failures was
+itself an invisible fail-open failure. I have written a lot of software
+and I do not think I have previously been *out-argued by my own thesis*.
+
+The fix is two characters and a word: `set +e`, first line. The second
+instance was one line up — `[ -n "$x" ] && args+=(...)` takes the status
+of the test when the test fails, so an unsupplied optional input killed
+the step on the most ordinary path available.
+
+And the reason my local rig missed both is the actual lesson: it ran the
+steps with a bare `bash -c`. It was *nearly* a runner. Nearly a runner is
+a thing that passes.
+
+The suite now reads the steps out of `action.yml` and executes them under
+that exact invocation, against a throwaway two-commit repository.
+Reverting `set +e` fails two tests, which is the only evidence that a
+regression test is one.
+
+Then I opened the pull request again and watched a real runner print the
+report, post the comment, patch the same comment in place across three
+pushes, and fail the job with a sentence rather than a number — because
+on a structural finding the count is legitimately zero, and
+`0 documents become reachable` as the reason a build failed reads as a
+bug in the tool, and a red build that looks like a bug in the tool is,
+once again, an argument for turning the tool off.
+
+Everything in this domain wants to become invisible. You have to keep
+taking its hat off.
+
+## The generalisation, which is bigger than vector search
 
 | the intent | the window it actually has |
 |---|---|
@@ -228,23 +302,35 @@ the reason I keep finding the same bug in unrelated places:
 | a destroyed key makes it unreadable | ~60s of key cache |
 | a replica's copy is current | unbounded replication lag |
 | the index embeds with the declared model | nothing ever asks it |
+| the policy file says what we enforce | nobody diffed what it admits |
 
-Four subsystems, one defect: a statement of intent doing the work of a
-guarantee. The gap between *what you declared* and *what is verified* is
-where every one of these lives, and it does not announce itself, because
-declaring something is exactly what makes you stop checking it.
+Five subsystems, one defect: **a statement of intent doing the work of a
+guarantee.** The gap between what you declared and what is verified is
+where all of these live, and it does not announce itself, for a reason
+that is almost funny — declaring something is precisely what makes you
+stop checking it.
 
 A retrieval boundary does not fix that in general. It fixes it in the one
-place where the consequence is a fact reaching a model that was not supposed
-to have it — and it does it by making the check impossible to forget, which
-is the only kind of check that survives contact with a growing codebase.
+place where the consequence is a fact reaching a model that was not
+supposed to have it, and it does so by making the check impossible to
+forget, which is the only kind that survives contact with a codebase that
+is still growing.
 
 Ranking is not permission. Somebody has to ask the second question, once,
-somewhere nobody can route around.
+somewhere nobody can route around — and then, it turns out, somebody has
+to check that the question is still being asked, in the place where
+people decide to stop asking it.
 
 ---
 
-*VOYD is MIT-licensed and the code is at
+*VOYD is MIT-licensed, at
 [github.com/ranfysvalle02/VOYD](https://github.com/ranfysvalle02/VOYD).
-Nobody has run it but its author; every number above comes from one machine
-and one cluster.*
+The longer argument for the design is in
+[docs/ranking-is-not-permission.md](docs/ranking-is-not-permission.md).*
+
+*Nobody has run this but its author. Every number here comes from one
+machine and one cluster, and the one honest gap in the story above is
+that `voyd-plan --target` has never sampled a cluster from inside a CI
+runner — the structural half is proven end to end, and the sampling half
+is proven only on a laptop. Which is exactly the kind of distinction this
+whole project exists to insist on, so it would be poor form to bury it.*
