@@ -57,6 +57,10 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",   # rule set is pinned in [tool.ruff.lint], so the tool may float
     "mypy>=1.11",
+    # The suite runs the shipped GitHub action's own shell, which means
+    # reading `action.yml`. A rig that retyped those steps would pass
+    # while the file people actually run was broken.
+    "pyyaml>=6.0",
 ]
 
 [project.urls]
