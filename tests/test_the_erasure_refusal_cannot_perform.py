@@ -36,7 +36,7 @@ import pytest
 from voyd.engine.custody import (LOCAL_KEY_BYTES, Aws, Azure, Ephemeral, Gcp,
                                  Kmip, LocalFile, from_env)
 from voyd.engine.keyring import (KeyringSpec, Queryable, Sealed,
-                                 available)
+                                 _mongocryptd_spawn_args, available)
 
 UTC = timezone.utc
 
@@ -202,6 +202,25 @@ def test_this_deployment_says_which_half_of_encryption_it_is_missing():
     assert isinstance(ok, bool) and isinstance(why, str) and why
     if not ok:
         assert "pymongocrypt" in why or "crypt_shared" in why
+
+
+def test_the_spawned_daemon_does_not_litter_the_working_directory():
+    # Without `crypt_shared` the driver spawns `mongocryptd`, which writes
+    # its pid file to the current working directory unless it is told
+    # otherwise -- a repository root, a container's app directory. The
+    # daemon dies on idle and the file it leaves behind outlives it, so
+    # what is left is a stale pid pointing at nothing.
+    args = _mongocryptd_spawn_args()
+    pidfile = next(a.split("=", 1)[1] for a in args
+                   if a.startswith("--pidfilepath="))
+    assert os.path.isabs(pidfile)
+    assert os.path.dirname(pidfile) != os.getcwd()
+    # Two processes on one host must not fight over the name.
+    assert str(os.getpid()) in os.path.basename(pidfile)
+    # Passing spawn args *replaces* the driver's default list rather than
+    # extending it, so the idle timeout has to be restated or the daemon
+    # outlives the process that spawned it.
+    assert any(a.startswith("--idleShutdownTimeoutSecs=") for a in args)
 
 
 # ---- destroying a key, against a real deployment -----------------------

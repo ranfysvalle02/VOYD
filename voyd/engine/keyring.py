@@ -113,6 +113,7 @@ if TYPE_CHECKING:
 
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
 
 from pymongo.errors import CollectionInvalid
@@ -185,6 +186,24 @@ def available() -> tuple[bool, str]:
     return False, ("neither crypt_shared nor mongocryptd found; set "
                    "CRYPT_SHARED_LIB_PATH to the MongoDB Enterprise "
                    "mongo_crypt_v1 library")
+
+
+def _mongocryptd_spawn_args() -> list[str]:
+    """Spawn args that keep ``mongocryptd`` out of the working directory.
+
+    Without ``crypt_shared`` the driver spawns ``mongocryptd``, which writes
+    a pid file to wherever the process happens to be -- a repository root, a
+    container's app directory, whatever the operator ``cd``-ed into. The
+    daemon is per-process and dies on idle, so the file it leaves behind
+    outlives the thing it describes and is stale the moment it is read.
+
+    Pointed at the temp directory instead, keyed by pid so two processes on
+    one host do not fight over the name. The idle timeout is the driver's
+    own default, restated here because passing spawn args replaces the
+    default list rather than extending it.
+    """
+    pidfile = os.path.join(tempfile.gettempdir(), f"mongocryptd-{os.getpid()}.pid")
+    return ["--idleShutdownTimeoutSecs=60", f"--pidfilepath={pidfile}"]
 
 
 def crypt_shared_path() -> str | None:
@@ -548,6 +567,8 @@ class Keyring:
         path = crypt_shared_path()
         if path:
             extra["crypt_shared_lib_path"] = path
+        else:
+            extra["mongocryptd_spawn_args"] = _mongocryptd_spawn_args()
         if self.custody.tls_options():
             extra["kms_tls_options"] = self.custody.tls_options()
         schema = self.schema_map()
