@@ -20,10 +20,20 @@ blind.
 
 **Encode and decode `OP_MSG`.** Including the kind-1 document sequence that
 carries a write's documents outside the body, which is the part every
-hand-rolled parser gets wrong -- and the *lazy* codec, which is why this
-proxy costs microseconds rather than milliseconds: a reply is decoded into
-raw BSON views, so a vector never becomes a list of Python floats unless a
-rule actually reads it.
+hand-rolled parser gets wrong -- and the *lazy* codec, which is what keeps
+an unguarded reply cheap: it is decoded into raw BSON views, so a reply
+this boundary only inspects and forwards never materialises its documents
+at all.
+
+Be precise about what that does and does not buy, because the tempting
+version of this sentence is false. `RawBSONDocument` inflates the **whole
+document** on the first field read -- measured: touching `tenant_id`
+turns a 1024-float `embedding` in the same document into a Python list.
+So the saving is per *document nobody judges*, not per field nobody
+reads: a `find` on a collection no policy declared costs four reads of
+the reply envelope and never touches a document, while a guarded batch
+pays full decode for every document in it. Laziness here is a filter on
+which documents become real, not on which fields do.
 
 The framing -- header layout, `OP_MSG` sections, `OP_COMPRESSED` -- is
 lifted from `tools/wire_proxy.py` in the author's `mdb-embedded`

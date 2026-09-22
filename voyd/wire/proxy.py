@@ -224,7 +224,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 reader, draining if to_server else None)
             if meter is not None:
                 # One integer add per *message*, not per document. The
-                # per-document path is 2.3us and stays untouched.
+                # per-document path is microseconds and stays untouched.
                 if to_server:
                     meter.messages_from_client_total += 1
                 else:
@@ -806,7 +806,8 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         """Copy this worker's counters into shared memory, once a second.
 
         On the timer rather than on the message path: refusal costs about
-        2.3us per document and a shared-memory write per document would be
+        microseconds per document and a shared-memory write per document
+        would be
         a measurable tax on the number being reported. One second is finer
         than any scrape interval anybody configures, and the exposition
         publishes its own staleness so the tradeoff is visible rather than

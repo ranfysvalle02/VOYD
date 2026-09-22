@@ -20,7 +20,8 @@ right here:
   at all; the reader sums N slots. This is that.
 
 **Counters are flushed on a timer, not per document.** Refusal costs
-about 2.3us per document and a write to shared memory on that path would
+single-digit microseconds per document (`voyd-bench`, one laptop: 2.7us
+at the time of writing) and a write to shared memory on that path would
 be a measurable tax on the thing being measured. The loop copies its
 in-process integers into the slab once a second, which is finer than any
 scrape interval anybody will configure, and the hot path stays arithmetic

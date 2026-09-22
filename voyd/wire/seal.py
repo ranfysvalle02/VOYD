@@ -22,7 +22,7 @@ startup rather than discovered:
 
     the boundary holds a connection of its own      it is no longer pure
     the boundary holds KMS credentials              it is a custody holder
-    a sealed read decrypts before it refuses        it is no longer 2.3us
+    a sealed read decrypts before it refuses        it is no longer free
 
 What is bought is where the encryption sits. A driver's `schema_map`
 encrypts below the *application*, so no writer in that one process can

@@ -470,7 +470,8 @@ def seal_cost(uri: str, docs: int, pad: int, runs: int) -> int:
     is exactly the work the boundary does on the write and read paths.
 
     The number worth carrying away is the decrypt one. A read pays it per
-    document on top of refusal's ~2.3us; a write pays the encrypt once.
+    document on top of refusal's few microseconds; a write pays the
+    encrypt once.
     """
     import asyncio
     import statistics

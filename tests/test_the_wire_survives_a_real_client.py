@@ -419,3 +419,54 @@ def test_an_ordinary_write_error_is_not_read_as_an_election():
     assert stepped_down({"ok": 0, "code": 13, "codeName": "Unauthorized"}) \
         is None
     assert stepped_down({"writeErrors": "not a list of dicts"}) is None
+
+
+# ---- a bad connection is one connection -------------------------------
+
+@pytest.mark.needs_mongo
+def test_garbage_on_one_socket_does_not_take_the_listener_down(boundary,
+                                                               database):
+    """`pump` catches broadly so a defect sheds one connection, not the port.
+
+    That is a claim about a process serving other people's traffic, and it
+    is only worth anything if something has actually sent the garbage. So
+    this sends several shapes of it -- a length that is a lie, a header
+    and nothing else, random bytes, a half-written message -- and then
+    asks an ordinary driver to work.
+    """
+    import socket as sock
+    import struct
+
+    wire = boundary(POLICY)
+
+    hostile = [
+        struct.pack("<iiiI", 1 << 30, 1, 0, 2013),      # a length that lies
+        struct.pack("<iiiI", -1, 1, 0, 2013),           # a negative one
+        b"\x10\x00\x00\x00",                            # a header, truncated
+        b"not a mongodb message at all",
+        struct.pack("<iiiI", 64, 1, 0, 2013) + b"\x00" * 8,   # short body
+        bytes(range(256)),
+    ]
+    for payload in hostile:
+        s = sock.create_connection(("127.0.0.1", wire.port), timeout=5)
+        try:
+            s.sendall(payload)
+            s.settimeout(2)
+            try:
+                s.recv(64)          # a close or an error, either is fine
+            except (TimeoutError, OSError):
+                pass
+        finally:
+            s.close()
+
+    # The listener is still there, and still a boundary rather than a pipe.
+    client = MongoClient(wire.uri, serverSelectionTimeoutMS=20_000)
+    try:
+        notes = client[database].notes
+        notes.insert_many([
+            {"_id": "live", "tenant_id": "acme", "expire_at": future()},
+            {"_id": "gone", "tenant_id": "acme", "expire_at": past()},
+        ])
+        assert [d["_id"] for d in notes.find({"tenant_id": "acme"})] == ["live"]
+    finally:
+        client.close()

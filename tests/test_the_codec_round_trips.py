@@ -235,3 +235,39 @@ def test_a_compressor_this_process_cannot_read_says_so_rather_than_guessing():
     payload = struct.pack("<iiB", OP_MSG, 4, 99) + b"junk"
     raw = struct.pack("<iiiI", 16 + len(payload), 1, 0, OP_COMPRESSED) + payload
     assert uncompress_message(raw) is None
+
+
+# ---- what the lazy codec actually buys ---------------------------------
+
+def test_a_document_nobody_judges_is_never_materialised():
+    # The saving that is real: a reply this boundary inspects and forwards
+    # reads the envelope and never touches a document.
+    doc = {"cursor": {"id": 7, "ns": "db.notes",
+                      "firstBatch": [{"_id": 1, "embedding": [0.1] * 1024}]},
+           "ok": 1.0}
+    raw = encode_op_msg(1, 0, 0, doc)
+    _, lazy = decode_op_msg(raw, LAZY)
+    assert lazy["cursor"]["ns"] == "db.notes"
+    batch = lazy["cursor"]["firstBatch"]
+    # The batch is there, and its documents are still raw views.
+    assert len(batch) == 1
+    assert not isinstance(batch[0], dict) or isinstance(
+        batch[0], type(lazy)), "the documents were materialised to inspect a ns"
+
+
+def test_reading_one_field_inflates_the_whole_document():
+    """The tempting claim -- "a vector never becomes a list of floats
+    unless a rule reads it" -- is false, and the docstring says so because
+    of this test.
+
+    `RawBSONDocument` inflates on first access, whole. A rule reading a
+    deadline therefore pays for the embedding in the same document. That
+    is worth knowing before optimising a rule to touch fewer fields: it
+    would buy nothing.
+    """
+    raw = bson.encode({"tenant_id": "acme", "embedding": [0.1] * 512})
+    view = bson.decode(raw, LAZY)
+    assert view["tenant_id"] == "acme"      # one small field, nothing else
+    # ...and the vector is now a Python list, without anybody asking.
+    assert isinstance(view["embedding"], list)
+    assert len(view["embedding"]) == 512

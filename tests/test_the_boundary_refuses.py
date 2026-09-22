@@ -447,3 +447,95 @@ def test_a_cumulative_rule_with_nowhere_to_keep_its_total_is_refused():
 def test_the_clock_is_pinned_rather_than_inherited():
     assert now().tzinfo is UTC
     assert Marked(field="f", reason="r").refuses({"f": {"at": PAST}})
+
+
+# ---- the order is derived once, and deriving it changes nothing --------
+
+def test_the_asking_order_is_computed_once_and_is_not_part_of_identity():
+    """Memoising the rule order must not make two specs stop matching.
+
+    Handles are deduplicated per collection by spec equality, so a cache
+    that leaked into `__eq__` would silently hand one declaration's handle
+    to another's -- which is the exact failure `tenant` being part of the
+    spec exists to prevent, reintroduced by an optimisation.
+    """
+    from voyd.engine.admission.spec import asking_order
+
+    one = spec(Deadline(), revoked())
+    two = spec(Deadline(), revoked())
+    assert one == two and hash(type(one)) == hash(type(two))
+
+    first = asking_order(one)
+    assert asking_order(one) is first, "the order is derived per call"
+    # Asking one does not change how it compares to the other, before or
+    # after the other has been asked.
+    assert one == two
+    asking_order(two)
+    assert one == two
+    assert first == asking_order(two)
+
+
+def test_the_asking_order_is_the_order_why_refused_uses():
+    # The memoised tuple and the documented rule -- cumulative last, the
+    # ones that charge last of all -- have to be the same thing, or the
+    # cache is fast and wrong.
+    from voyd.engine.admission.spec import asking_order
+
+    budget, distinct, deadline = (Budget(limit=10), Distinct(on="chunk"),
+                                  Deadline())
+    order = asking_order(spec(budget, distinct, deadline))
+    assert order[0] is deadline, "a pure rule was asked after a cumulative one"
+    assert order[1] is distinct, "a rule that charges was asked too early"
+    assert order[2] is budget
+
+
+def test_a_spec_with_no_rules_still_derives_the_two_defaults():
+    # `with_defaults()` is inside the memoised path, so the defaults have
+    # to survive being computed once rather than per document.
+    from voyd.engine.admission.spec import asking_order
+
+    order = asking_order(AdmissionSpec("notes"))
+    assert {r.reason for r in order} == {DEADLINE, REVOKED}
+
+
+def test_an_invalid_spec_still_raises_on_first_use():
+    # Validation lives in `with_defaults()`, which is now called once. A
+    # policy that cannot be compiled must still say so.
+    from voyd.engine.admission.spec import asking_order
+
+    with pytest.raises(ValueError):
+        asking_order(AdmissionSpec("notes", subjects="a.b"))
+
+
+def test_the_order_is_derived_once_per_spec_not_once_per_document():
+    """The optimisation, asserted rather than trusted to stay.
+
+    `why_refused` used to rebuild the spec and re-sort its rules for every
+    document, which is a constant recomputed per row -- 22% of the time in
+    the admission path, and 3.51us per document end to end against
+    2.7-2.9us once it was hoisted (`voyd-bench --workers 1`, one laptop,
+    two runs either side).
+
+    A refactor that reintroduced the per-document sort would not fail any
+    other test here; it would just be slower, quietly, which is how it got
+    written the first time.
+    """
+    from voyd.engine.admission import spec as spec_module
+
+    s = spec(Deadline(), revoked())
+    calls = {"n": 0}
+    original = AdmissionSpec.with_defaults
+
+    def counted(self):
+        calls["n"] += 1
+        return original(self)
+
+    AdmissionSpec.with_defaults = counted            # type: ignore[method-assign]
+    try:
+        for i in range(50):
+            spec_module.why_refused({"_id": i}, s)
+    finally:
+        AdmissionSpec.with_defaults = original       # type: ignore[method-assign]
+    assert calls["n"] == 1, (
+        f"the spec was rebuilt {calls['n']} times for 50 documents; the "
+        f"asking order is a property of the spec, not of the row")
