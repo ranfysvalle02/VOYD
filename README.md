@@ -243,15 +243,18 @@ package, the wire codec, the custody rungs and the sweep below — need no
 database at all, and CI runs them in a step with no `services:`. If that
 step ever needs one, the boundary has stopped being pure.
 
-The live files drive a real `voyd-wire` in front of a real deployment with a
-plain `pymongo` client that has never heard of this package, because the
+The live tests drive a real `voyd-wire` in front of a real deployment with
+a plain `pymongo` client that has never heard of this package, because the
 claims are about queries and bytes and a mock would only prove the mock was
-filtered. One covers refusal — expired, revoked, off-scope, `delete` become
-a revocation, across every batch of a cursor. The other covers what a driver
-*keeps* when its connection string points here: sessions and causal
-consistency, multi-statement transactions committed and aborted, several
-cursors interleaved on one socket, eight clients paging at once, and a real
-election caused with `replSetStepDown` and followed without a restart.
+filtered. Between them they cover refusal (expired, revoked, off-scope, and
+`delete` become a revocation, holding across every batch of a cursor); what
+a driver *keeps* when its connection string points here (sessions and causal
+consistency, transactions committed and aborted, several cursors interleaved
+on one socket, eight clients paging at once, and a real election caused with
+`replSetStepDown` and followed without a restart); the erasure a refusal
+cannot perform (a key destroyed, and the ciphertext read back by a reader
+that never held it); and a refusal travelling to what was made out of the
+fact, children marked before the source.
 
 They need a cluster, which they find in `VOYD_TEST_MONGO_URI`,
 `VOYD_MONGO_URI` or a `.env` beside the compose file; with none of those they
