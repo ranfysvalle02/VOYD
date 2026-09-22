@@ -206,8 +206,30 @@ def test_this_deployment_says_which_half_of_encryption_it_is_missing():
 
 # ---- destroying a key, against a real deployment -----------------------
 
-crypto = pytest.mark.skipif(not available()[0],
-                            reason=f"automatic encryption: {available()[1]}")
+def _explicit_encryption_available() -> tuple[bool, str]:
+    """What these tests actually need, which is less than `available()`.
+
+    `available()` answers "can this process do *automatic* encryption",
+    and that needs `crypt_shared` or `mongocryptd` because the driver has
+    to analyse a command to know which fields to encrypt. Nothing below
+    asks it to: the boundary has already parsed the command and the
+    policy file already names the fields, so it calls `ce.encrypt()`
+    directly -- which `seal.py` calls a simplification rather than a
+    compromise, and which needs only the Python binding.
+
+    Gating these on the stricter question skipped every one of them in
+    CI, silently, on the claim this repository leads with. The gate is
+    the requirement, so it has to be the *real* requirement.
+    """
+    try:
+        import pymongocrypt  # noqa: F401
+    except ImportError:
+        return False, "pymongocrypt is not installed (install the crypto extra)"
+    return True, ""
+
+
+crypto = pytest.mark.skipif(not _explicit_encryption_available()[0],
+                            reason=_explicit_encryption_available()[1])
 
 
 @pytest.fixture

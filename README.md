@@ -271,12 +271,12 @@ sweep databases abandoned by an earlier one, bounded to a two-hour window so
 it can never reach a suite running concurrently on the same cluster.
 
 The erasure tests destroy a real key and then try to read the ciphertext
-back, so they need `pymongocrypt` and either `crypt_shared` or
-`mongocryptd` — neither of which is on PyPI. `voyd.engine.keyring.
-available()` is asked rather than assumed, and they skip by name when the
-answer is no, because a suite that passed silently without encryption
-would be reporting on the feature that matters most while testing none of
-it.
+back, so they need `pymongocrypt` — the `crypto` extra, and nothing else.
+They deliberately do *not* need `crypt_shared` or `mongocryptd`: those are
+for **automatic** encryption, where the driver must analyse a command to
+learn which fields to encrypt, and this boundary has already parsed the
+command and already knows. Gating them on the stricter question is how
+they came to skip in CI, silently, on the claim this file leads with.
 
 `auto_embed` against a cluster that really embeds is marked `slow` and reads
 `VOYD_ATLAS_URI`. Atlas Local registers no model, so it *declines* the
