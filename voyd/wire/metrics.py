@@ -27,12 +27,25 @@ scrape interval anybody will configure, and the hot path stays arithmetic
 on a Python int. The staleness is real and is stated in the exposition
 itself as `voyd_metrics_age_seconds`.
 
-**It binds loopback, always.** There is no flag to change that, for the
-same reason the proxy refuses to serve plaintext off-loopback: a refusal
-count broken down by reason is a description of what a corpus contains
-and who has been probing it. `deadline` climbing is the system working;
-`not_cleared` climbing is somebody trying doors. That second series is
-not something to hand to the network because it was convenient.
+**It binds loopback by default**, for the same reason the proxy refuses
+to serve plaintext off-loopback: a refusal count broken down by reason is
+a description of what a corpus contains and who has been probing it.
+`deadline` climbing is the system working; `not_cleared` climbing is
+somebody trying doors, and that second series is not something to hand to
+the network because it was convenient. `--metrics-bind` exists because a
+scrape in Kubernetes comes from another pod and loopback-only made the
+whole surface unreachable exactly where it matters -- but it is a flag an
+operator types, not a default, and what they are exposing is written in
+its help text.
+
+**`/health` is separate, and deliberately carries no numbers.** A
+readiness probe needs one bit, and one bit describes no corpus -- so it
+is safe to expose where the exposition is not. It answers the question a
+load balancer is actually asking: *can this process reach its upstream
+right now*. That matters because the alternative, a TCP check on the
+listen port, reports ready while the deployment behind it is
+unreachable -- measured, and it is how a rollout sends traffic to a pod
+that cannot serve a single read.
 """
 
 from __future__ import annotations
@@ -42,6 +55,7 @@ import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Callable
 
 from voyd.engine.admission import reasons as R
 
@@ -456,9 +470,14 @@ def _escape(value: str) -> str:
 
 class _Handler(BaseHTTPRequestHandler):
     slab: Slab
+    ready: "Callable[[], tuple[bool, str]] | None" = None
 
     def do_GET(self) -> None:          # noqa: N802 - http.server's spelling
-        if self.path.split("?")[0] not in ("/metrics", "/"):
+        route = self.path.split("?")[0]
+        if route == "/health":
+            self._health()
+            return
+        if route not in ("/metrics", "/"):
             self.send_error(404)
             return
         body = render(self.slab)
@@ -469,22 +488,63 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _health(self) -> None:
+        """200 when the upstream is reachable, 503 when it is not.
+
+        Deliberately not "am I listening". A bound socket is the easiest
+        thing in the world to answer with and it is the wrong answer: a
+        boundary whose deployment is unreachable accepts connections and
+        fails every read, so a TCP probe marks it ready and a rollout
+        routes traffic to it. The check goes one hop further, to the thing
+        this process cannot work without.
+
+        The body is a word, not a number. A probe that leaked counts would
+        put the exposition's own argument -- that a refusal breakdown
+        describes a corpus -- on an endpoint chosen for being reachable.
+        """
+        if self.ready is None:
+            ok, why = True, "no upstream configured"
+        else:
+            try:
+                ok, why = self.ready()
+            except Exception as exc:                          # noqa: BLE001
+                # A probe must answer. An exception here would hang the
+                # prober until its own timeout and read as a network
+                # problem rather than as this line being wrong.
+                ok, why = False, type(exc).__name__
+        body = (("ok" if ok else f"unavailable: {why}") + "\n").encode()
+        self.send_response(200 if ok else 503)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *_args) -> None:
         """Silent. A scrape every fifteen seconds would otherwise be the
         only thing in the log, and a log that is all heartbeat is a log
         nobody reads the real lines in."""
 
 
-def serve(port: int, slab: Slab) -> ThreadingHTTPServer:
-    """Start the exposition on loopback, in a daemon thread.
+def serve(port: int, slab: Slab, *, bind: str = "127.0.0.1",
+          ready: "Callable[[], tuple[bool, str]] | None" = None
+          ) -> ThreadingHTTPServer:
+    """Start the exposition and `/health`, in a daemon thread.
 
     A thread rather than a route on the event loop, deliberately: reading
     the slab touches no asyncio state, so a scrape cannot interleave with
     a connection's teardown, and a scraper that hangs mid-response cannot
-    occupy the loop that is supposed to be refusing documents.
+    occupy the loop that is supposed to be refusing documents. `ready` is
+    called on the probe thread for the same reason.
     """
-    handler = type("Handler", (_Handler,), {"slab": slab})
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    # `staticmethod`, and it has to be. A plain function in a class
+    # namespace becomes a *method*, so `self.ready()` passed the handler
+    # instance as the first argument and every probe answered 503 with a
+    # `TypeError` -- a readiness check that is reliably wrong in the
+    # direction that takes a healthy pod out of service.
+    handler = type("Handler", (_Handler,),
+                   {"slab": slab,
+                    "ready": staticmethod(ready) if ready else None})
+    httpd = ThreadingHTTPServer((bind, port), handler)
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True,
                      name="voyd-metrics").start()

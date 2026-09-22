@@ -326,10 +326,17 @@ def test_metrics_are_summed_across_workers_while_it_runs(db, tmp_path):
     assert 0 <= age < 5, f"counters are stale: {age}s"
 
 
-def test_the_metrics_port_is_loopback_only():
+def test_the_metrics_port_is_loopback_unless_somebody_says_otherwise():
     """A refusal count broken down by reason describes what a corpus holds
-    and who has been probing it. There is no flag to put that on a
-    network, and this is what says so.
+    and who has been probing it. `deadline` climbing is the system
+    working; `not_cleared` climbing is somebody trying doors.
+
+    That is a reason to make exposing it *explicit*, and for a while it
+    was a reason to make it impossible -- which made the whole surface
+    unreachable in Kubernetes, where the scrape comes from another pod. So
+    the default is what it was and the flag exists, and this test moved
+    from "there is no way to ask for anything else" to "nothing asks for
+    it by accident".
 
     Asserted on the bound address rather than by failing to reach it from
     outside: a host with no routable address of its own would make that
@@ -339,20 +346,37 @@ def test_the_metrics_port_is_loopback_only():
     slab = m.Slab(1, m.Layout(("notes",)))
     httpd = m.serve(free_port(), slab)
     try:
-        assert httpd.server_address[0] == "127.0.0.1"
+        assert httpd.server_address[0] == "127.0.0.1", (
+            "the default has to be loopback: an operator who did not think "
+            "about it must not have published the refusal breakdown")
     finally:
         httpd.shutdown()
         httpd.server_close()
 
-    # And there is no way to ask for anything else.
-    source = (ROOT / "voyd" / "wire" / "metrics.py").read_text()
-    assert source.count("0.0.0.0") == 0, \
-        "voyd_metrics must not be able to bind outward"
+    # The flag exists, and its help text says what is being exposed rather
+    # than only how. A knob whose consequence is undocumented is one
+    # somebody turns to make a scrape work and never reads again.
     helptext = subprocess.run(
-        [sys.executable, "-m", "voyd.wire.proxy", "--help"],
+        [sys.executable, "-m", "voyd.wire", "--help"],
         cwd=ROOT, capture_output=True, text=True).stdout
-    assert "--metrics PORT" in helptext
-    assert "--metrics-host" not in helptext and "--metrics-bind" not in helptext
+    assert "--metrics-bind ADDR" in helptext
+    assert "127.0.0.1" in helptext, "the default is not stated in --help"
+    for warned in ("corpus", "probing"):
+        assert warned in helptext, (
+            f"--metrics-bind does not say what it exposes ({warned!r} "
+            f"missing); the reason is the whole point of the flag")
+
+
+def test_binding_the_exposition_outward_takes_saying_so():
+    """The other half: the flag works, so the Kubernetes case is real
+    rather than a documented intention."""
+    slab = m.Slab(1, m.Layout(("notes",)))
+    httpd = m.serve(free_port(), slab, bind="0.0.0.0")
+    try:
+        assert httpd.server_address[0] == "0.0.0.0"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_a_scrape_of_something_that_is_not_metrics_is_a_404():

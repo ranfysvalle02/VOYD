@@ -23,6 +23,9 @@ and is pure -- no database, no connection, no I/O. That is what makes it
 movable to a wire at all.
 """
 
-from .proxy import main
-
-__all__ = ["main"]
+# Deliberately no imports. Importing `main` here made the package load
+# before `python -m voyd.wire.proxy` executed the module, which Python
+# reports as a `RuntimeWarning` on stderr -- the first line of every
+# container's log, read by somebody who is already worried. The console
+# script points at `voyd.wire.proxy:main`; `python -m voyd.wire` works
+# through `__main__.py`.

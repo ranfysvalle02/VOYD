@@ -908,6 +908,26 @@ than the one it fixes. Undecided, and unclosed today.
 
 ## 6. Operational notes that will surprise somebody
 
+**A readiness probe on the listen port lies, so do not use one.** Pointed
+at a deployment that is unreachable, the boundary starts, prints its
+banner, accepts connections and fails every read -- measured. `/health` on
+the metrics port goes one hop further and answers 503 with the address it
+could not reach; `voyd-wire-health` is the same question as a command, for
+a `HEALTHCHECK` in an image with no `curl`. **Consider:** it is a
+readiness signal, not a liveness one. A boundary whose database is down
+should be taken out of rotation, not restarted.
+
+**The container is a sidecar, and that is the strongest shape rather than
+a limitation.** Without `--tls-cert` the listener binds loopback
+deliberately, so sharing a network namespace with the application -- a
+Kubernetes pod, `--network container:<app>` -- is what works: the
+application reaches the boundary on `localhost`, nothing else on the
+network reaches it at all, and there is no route around it. **Consider:**
+publishing 27099 with `-p` appears to work on Docker Desktop, whose
+forwarder runs inside the namespace, and does not on Linux, whose DNAT
+targets the container's own address. That is a laptop-only path. Cross a
+network with `--tls-cert`.
+
 **A client talking to the boundary carries its own credentials.** It
 forwards SCRAM and authenticates for nobody, so against a deployment that
 requires auth an unauthenticated client gets `Unauthorized` *through* the

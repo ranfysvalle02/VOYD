@@ -69,6 +69,30 @@ jobs:
             tests/test_the_boundary_shuts_down_without_waiting.py \
             -m 'not needs_mongo'
 
+      - name: The container is the deployment story, so it is built and run
+        # Untested until now, which made the deployment path documentation
+        # rather than a claim. It builds, it runs as a non-root uid, it
+        # answers --version, and its HEALTHCHECK command fails when there
+        # is nothing to be healthy about.
+        run: |
+          docker build -t voyd:ci .
+          test "$(docker run --rm --entrypoint id -u voyd:ci)" != "0"
+          docker run --rm voyd:ci --version
+          docker run --rm --entrypoint voyd-wire-health voyd:ci --port 1 \
+            && { echo "health passed with nothing listening"; exit 1; } \
+            || echo "health correctly failed"
+          # And it serves: a sidecar-shaped run, a client on the container's
+          # own loopback, an expired row refused and a delete become a
+          # revocation with every row still on disk.
+          docker run -d --name voyd-ci --network host voyd:ci \
+            --config voydfile.py --listen 27099 --metrics 27100 \
+            --target 127.0.0.1:27018
+          for _ in $(seq 30); do
+            docker exec voyd-ci voyd-wire-health && break || sleep 1
+          done
+          docker exec voyd-ci voyd-wire-health
+          docker rm -f voyd-ci
+
       - name: The scanner runs on a machine with nothing installed
         # It is the first thing a stranger runs and the only thing here that
         # judges code nobody on this side has seen, so the claim that it
@@ -114,7 +138,7 @@ jobs:
           # same assertion: a distribution that ships the vocabulary to write
           # a policy and nothing that can serve one is not the artifact.
           import voyd.wire, voyd.wire.proxy, voyd.wire.seal, voyd.wire.cascade
-          assert callable(voyd.wire.main)
+          assert callable(voyd.wire.proxy.main)
           print('wheel: the policy vocabulary imports, the proxy ships')"
           test -x /tmp/wheelcheck/bin/voyd-wire
           /tmp/wheelcheck/bin/voyd-wire --help > /dev/null

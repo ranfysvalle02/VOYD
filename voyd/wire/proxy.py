@@ -67,7 +67,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Mapping, TypedDict
+from typing import Callable, Mapping, TypedDict
 
 
 from . import cascade
@@ -75,6 +75,7 @@ from . import ensure
 from . import preflight
 from . import seal
 from . import metrics
+from voyd import __version__
 from voyd.declare import OPTIONS, load
 from .policy import (Budgets, Guard, _wants_a_caller, _was_reduced,
                      cascade_first, cascade_first_for_one, delete_reply,
@@ -996,6 +997,43 @@ async def close(writer: asyncio.StreamWriter) -> None:
         pass
 
 
+def upstream_ready(target: str) -> "Callable[[], tuple[bool, str]]":
+    """A readiness check that goes one hop past "am I listening".
+
+    Bound-but-broken is the case worth catching. Measured: pointed at a
+    dead port, this proxy starts, prints its banner, accepts connections
+    and fails every read -- so a TCP probe on the listen port reports
+    ready and a rolling deploy sends traffic to a pod that cannot serve.
+
+    So the check resolves the upstream the way a connection would and
+    opens a socket to it. `Upstream` caches the address, so the first
+    probe pays the topology scan and the rest are one connect. A
+    deployment that has gone away fails the *next* probe rather than
+    being remembered as healthy, because `invalidate` clears that cache
+    on the data path.
+
+    Its own `Upstream`, not the one serving traffic: a probe must never
+    contend with a connection for the resolution lock, and with
+    `--workers` the process answering probes is the parent, which has no
+    upstream of its own at all.
+    """
+    probe = Upstream(target, verbose=False)
+
+    def ready() -> tuple[bool, str]:
+        try:
+            host, port, _tls = probe.address()
+        except Exception as exc:                              # noqa: BLE001
+            return False, f"cannot resolve upstream ({type(exc).__name__})"
+        try:
+            with socket.create_connection((host, port), timeout=2.0):
+                return True, ""
+        except OSError as exc:
+            probe.invalidate(type(exc).__name__)
+            return False, f"cannot reach {host}:{port}"
+
+    return ready
+
+
 def tally(guards: dict[str, Guard],
           vault: "seal.Vault | None" = None) -> dict:
     """What one process actually did, as data rather than as a print.
@@ -1081,6 +1119,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           keyfile: str | None = None, max_connections: int = 200,
           drain_seconds: float = 20.0, advertise: str | None = None,
           workers: int = 1, metrics_port: int | None = None,
+          metrics_bind: str = "127.0.0.1",
           vault_spec: dict | None = None,
           auto_embed: dict | None = None) -> None:
     """Bind, announce, then run the boundary -- in this process or N of them.
@@ -1167,20 +1206,27 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
         layout = metrics.Layout(tuple(guards))
         slab = metrics.Slab(workers, layout)
         meters = [metrics.Meter(layout, slab, i) for i in range(workers)]
-        print(f"voyd-wire: metrics on http://127.0.0.1:{metrics_port}/metrics"
-              f" (loopback only, always)", flush=True)
+        where_metrics = ("127.0.0.1" if metrics_bind in ("", "0.0.0.0")
+                         else metrics_bind)
+        print(f"voyd-wire: metrics on "
+              f"http://{where_metrics}:{metrics_port}/metrics, readiness on "
+              f"/health"
+              + ("" if metrics_bind == "127.0.0.1" else
+                 f"  -- bound {metrics_bind}, so the refusal breakdown is "
+                 f"reachable from the network"), flush=True)
 
     if workers > 1:
         supervise(sock, workers, target, guards, verbose,
                   ssl_ctx=ssl_ctx, max_connections=max_connections,
                   drain_seconds=drain_seconds, advertise=advertise,
                   slab=slab, meters=meters, metrics_port=metrics_port,
-                  vault_spec=vault_spec,
+                  metrics_bind=metrics_bind, vault_spec=vault_spec,
                   auto_embed=auto_embed)
         return
 
     if slab is not None and metrics_port is not None:
-        metrics.serve(metrics_port, slab)
+        metrics.serve(metrics_port, slab, bind=metrics_bind,
+                      ready=upstream_ready(target))
     counts = asyncio.run(_run(sock, ssl_ctx, target, guards, verbose,
                               max_connections=max_connections,
                               drain_seconds=drain_seconds,
@@ -1369,6 +1415,7 @@ def supervise(sock: socket.socket, workers: int, target: str,
               slab: "metrics.Slab | None" = None,
               meters: "list[metrics.Meter] | None" = None,
               metrics_port: int | None = None,
+              metrics_bind: str = "127.0.0.1",
                   vault_spec: dict | None = None,
               auto_embed: dict | None = None) -> None:
     """N worker processes over one listening socket, and one honest total.
@@ -1467,7 +1514,8 @@ def supervise(sock: socket.socket, workers: int, target: str,
     # loop and nothing else to do, so a slow scrape costs nothing that was
     # going to refuse a document.
     if slab is not None and metrics_port is not None:
-        metrics.serve(metrics_port, slab)
+        metrics.serve(metrics_port, slab, bind=metrics_bind,
+                      ready=upstream_ready(target))
 
     def forward(signum, _frame):
         nonlocal stopping
@@ -1706,8 +1754,13 @@ def _vault_uri(target: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    # `prog` pinned, because argparse defaults it to `sys.argv[0]` and the
+    # help then names whatever file happened to be executed -- `__main__.py`
+    # under `-m`, an absolute path under a systemd unit. An operator copying
+    # a usage line out of `--help` should get the command they typed.
+    ap = argparse.ArgumentParser(
+        prog="voyd-wire", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--listen", type=int, default=27099, help="local port")
     ap.add_argument("--target", default="localhost:27017",
                     help="the database this fronts: `host:port`, or a full "
@@ -1741,6 +1794,14 @@ def main(argv: list[str] | None = None) -> int:
                          "reads the real host list and connects past this "
                          "boundary entirely. Defaults to localhost:<listen> "
                          "when --advertise-self is given")
+    ap.add_argument("--metrics-bind", metavar="ADDR", default="127.0.0.1",
+                    help="where the metrics and /health server listens "
+                         "(default 127.0.0.1). Set it to 0.0.0.0 or a pod "
+                         "IP when the scrape comes from somewhere else -- "
+                         "and know what you are exposing: a refusal count "
+                         "broken down by reason describes what the corpus "
+                         "contains and who has been probing it. /health "
+                         "carries one bit and no numbers")
     ap.add_argument("--advertise-self", action="store_true",
                     help="shorthand for --advertise localhost:<listen>")
     ap.add_argument("--max-connections", type=int, default=200, metavar="N",
@@ -1830,6 +1891,11 @@ def main(argv: list[str] | None = None) -> int:
                          "The form a deploy gate wants: exit 0 if the "
                          "cluster matches the policy, 3 if it contradicts "
                          "it, and print the warnings either way")
+    ap.add_argument("--version", action="version",
+                    version=f"voyd-wire {__version__}",
+                    help="the version of the boundary that is running, "
+                         "which is the first thing anybody asks when it is "
+                         "behaving unlike the last one")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -1897,6 +1963,7 @@ def main(argv: list[str] | None = None) -> int:
               max_connections=args.max_connections, advertise=advertise,
               drain_seconds=args.drain,
               workers=args.workers, metrics_port=args.metrics,
+              metrics_bind=args.metrics_bind,
               vault_spec=vault_spec, auto_embed=_embeds_from(OPTIONS))
     except KeyboardInterrupt:
         summarise(guards)

@@ -94,6 +94,7 @@ build-backend = "hatchling.build"
 # serve a policy file, not only the vocabulary to write one.
 voyd-wire = "voyd.wire.proxy:main"
 voyd-bench = "voyd.wire.bench:main"
+voyd-wire-health = "voyd.wire.health:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["voyd"]
