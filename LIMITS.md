@@ -1309,20 +1309,48 @@ having it.
 Held up by `tests/test_a_refusal_travels_and_is_gated.py`, which drives
 the proxy.
 
-**Still open: `Clearance`.** It declares `claim="clearance"` and wants an
-ordered level, and nothing in a MongoDB role says which level a role
-corresponds to. The wire supplies `user`, `db`, `groups` and `roles`; a
-clearance rule finds no claim, and "no claim is the lowest, not the
-highest", so it refuses every document to everybody. Fail-closed, which is
-the right direction and the wrong outcome -- and it presents as "VOYD
-broke my reads" with nothing connecting it to a line in the policy file.
+**Closed: an ordered `Clearance`, declared.** It used to want a
+`clearance` claim naming a level, and nothing in a MongoDB role says which
+level a role corresponds to -- so on the wire it found no claim, "no claim
+is the lowest, not the highest", and it refused every document to
+everybody. Fail-closed, which is the right direction and the wrong
+outcome.
 
-So it is **announced at boot** rather than discovered: a rule whose claim
+The missing piece was never a claim source. It was that **a role says who
+somebody is and not how far up a ladder they stand**, and only the
+deployment can say which. So the policy file says it:
+
+```python
+classification = clearance(
+    order=("public", "internal", "secret"),
+    roles={"analyst": "internal", "sec-cleared": "secret"})
+```
+
+With a mapping the rule reads `roles` -- which `connectionStatus` does
+answer -- and takes the **highest** rung any of the caller's roles maps
+to. `unsuppliable_claims` then has nothing to report and the boot warning
+does not fire.
+
+Four defaults, and each is the one somebody would otherwise get wrong:
+a caller with no mapped role is cleared for the lowest rung rather than
+the highest; a role this policy never mapped contributes nothing rather
+than raising, because an unmapped role is an unanswered question; a
+document labelled with something outside `order` is refused, since an
+unrecognised classification is not a low one; and an unlabelled document
+is refused unless `default` is set, because untagged is not public and
+untagged is exactly the population written before anybody thought about
+this. A role mapped to a level the ladder does not define is a **load**
+error -- it would otherwise clear its holders for nothing, silently, and
+the collection would read as empty for the people it was written for.
+
+The unmapped form is still declarable, for a process that already knows
+the level, and is still **announced at boot**: a rule whose claim
 `claims_from` cannot produce prints a warning naming the claim, what the
 wire can supply instead, and the fact that every read of that collection
-will be refused. Closing it properly wants a declared role-to-level
-mapping in the policy file, and inventing one before somebody needs it is
-how this package grows surface it has to keep honest forever.
+will be refused.
+
+Held by `tests/test_a_clearance_ladder_is_declarable.py`, half of it pure
+and half of it two real MongoDB users reading through the boundary.
 
 ---
 

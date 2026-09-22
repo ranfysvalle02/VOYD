@@ -1,6 +1,6 @@
 # NEXT-TODO — what the next level needs, measured
 
-Written at the batch-size fix, tree clean. 492 tests, all passing: 491 in the
+Written after the clearance ladder landed, tree clean. 509 tests, all passing: 508 in the
 default run plus the Atlas one, which is run isolated.
 
 Everything below is measured at that commit. Where a previous note
@@ -8,29 +8,7 @@ guessed, it was wrong; the habit that caused it is recorded at the bottom.
 
 ---
 
-## 1. `Clearance` — declared nowhere, suppliable nowhere
-
-Smaller than it looks and worth doing in one sitting. `declare.py` exports
-no `clearance()`, so an ordered clearance cannot be written in a policy
-file at all; separately, nothing in a MongoDB role says which level a role
-is, so the wire could not answer one if it could be written. The proxy
-warns at boot for any rule whose claim `claims_from` cannot produce
-(`unsuppliable_claims`), and `examples/clearance.py` says so in its own
-header rather than demonstrating around it.
-
-The shape, when somebody needs it:
-
-```python
-@guard("notes")
-class Notes:
-    classification = clearance(order=("public", "internal", "secret"),
-                               roles={"sec-cleared": "secret"})
-```
-
-Do not invent the spelling before somebody needs it. The example already
-tells a reader exactly what they would be asking for.
-
-## 2. The bijection does not check *which door* a test drives
+## 1. The bijection does not check *which door* a test drives
 
 This is the hole that let the lineage claim go unqualified for as long as
 it did. `tests/test_every_claim_names_its_evidence.py` asserts that every
@@ -45,7 +23,7 @@ on this list with a reason".
 
 Do it before the next claim is added, not after.
 
-## 3. `voyd/wire/proxy.py` is 4,382 lines
+## 2. `voyd/wire/proxy.py` is 4,382 lines
 
 The single biggest structural risk in the repository, and it holds every
 enforcement decision. Splitting framing / codec / dispatch / policy would
@@ -65,7 +43,7 @@ Two specific hazards, both load-bearing:
   assertions catch a drift while you are editing; nothing catches one at
   rest.
 
-## 4. The cascade is not on a dashboard, and its cost is unmeasured
+## 3. The cascade is not on a dashboard, and its cost is unmeasured
 
 `Guard.cascaded` is counted per collection, summed in `tally`, merged
 across workers and printed by `summarise`. It is **not** in
@@ -84,7 +62,7 @@ insert naming a parent is a find before it. `voyd-bench` measures the
 ordinary paths and not this one, so "one extra round trip" is an
 assumption rather than a number.
 
-## 5. The no-database subset is neither, and one cause is a shutdown bug
+## 4. The no-database subset is neither, and one cause is a shutdown bug
 
 Its whole premise is that it is pure and fast. Measured: **457 tests, 130
 seconds**, with only 20 deselected — most of what runs under
@@ -110,7 +88,7 @@ production, not only in the suite — or the fixtures should `kill()` after
 a shorter grace. Check the production behaviour first; the test cost is
 the symptom.
 
-## 6. Two things deliberately kept
+## 5. Two things deliberately kept
 
 Recorded so nobody re-derives the decision and deletes them.
 

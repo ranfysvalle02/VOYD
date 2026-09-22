@@ -48,8 +48,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .engine import (Budget, Deadline, Distinct, EmbeddedWith, Marked,
-                     Restricted, revoked)
+from .engine import (Budget, Clearance, Deadline, Distinct, EmbeddedWith,
+                     Marked, Restricted, revoked)
 from .engine.admission.rules import Unrecoverable
 from .engine.admission import AdmissionSpec
 
@@ -108,6 +108,74 @@ def restricted_to(claim: str) -> _Field:
     """This field names the audience; admit only callers whose ``claim``
     overlaps it."""
     return _Field("rule", lambda f: Restricted(field=f, claim=claim))
+
+
+def clearance(*, order: tuple[str, ...] | list[str],
+              roles: dict[str, str] | None = None,
+              via: str = "roles", default: str | None = None) -> _Field:
+    """This field holds a sensitivity level; admit callers cleared for it.
+
+        classification = clearance(
+            order=("public", "internal", "secret"),
+            roles={"analyst": "internal", "sec-cleared": "secret"})
+
+    ``order`` is the ladder, lowest first. ``roles`` says which rung each
+    of your deployment's roles stands on, and it is not optional padding
+    -- it is the whole reason this is declarable at all.
+
+    **Where the caller's level comes from is the design.** The boundary
+    does not accept a level the client asserts; a rule that believed
+    ``{"clearance": "secret"}`` because it was handed one would be an
+    authorisation system whose only input is the attacker's. It asks the
+    deployment instead, and the deployment answers `connectionStatus`
+    with **roles** -- which say who somebody is and not how far up a
+    ladder they stand. Nothing in a MongoDB role carries a level, so
+    somebody has to say, and a policy file is where somebody says things.
+
+    ``via`` names the claim holding the caller's roles: ``"roles"``, or
+    ``"groups"`` if you would rather write the mapping against those. A
+    caller holding several is cleared to the **highest** level any of them
+    maps to; a role you did not map contributes nothing, because an
+    unmapped role is an unanswered question and the answer to an
+    unanswered question here is no.
+
+    **It fails closed in four directions**, and each one is a default
+    somebody would otherwise get wrong on a Friday:
+
+    - a caller with no matching role is cleared for the lowest level, not
+      the highest;
+    - a document labelled with something not in ``order`` is refused --
+      an unrecognised classification is not a low one;
+    - a document with no label at all is refused unless ``default`` is
+      set, because untagged is not public and untagged is exactly the
+      population written before anybody thought about this;
+    - and it is not bypassable. Break-glass exists to see what was
+      *forgotten*; clearance is not a forgetting reason and no handle is
+      entitled to waive it.
+
+    Omit ``roles`` and the rule reads a scalar level from a claim named by
+    ``via``. The boundary cannot supply one -- it will say so at boot,
+    naming this collection -- so that form belongs where an application
+    already knows the level.
+    """
+    if not order:
+        raise ValueError(
+            "clearance() needs an order: the levels, lowest first. Without "
+            "one there is no ladder and every document is unlabelled")
+    ladder = tuple(order)
+    if len(set(ladder)) != len(ladder):
+        raise ValueError(
+            f"clearance(order={ladder!r}) repeats a level. Two rungs with "
+            f"one name is not an ordering")
+    mapped = tuple(sorted((roles or {}).items()))
+    for role, level in mapped:
+        if level not in ladder:
+            raise ValueError(
+                f"clearance(): role {role!r} maps to {level!r}, which is not "
+                f"in order={ladder!r}. A role cleared for a level this "
+                f"policy does not define is cleared for nothing, silently")
+    return _Field("rule", lambda f: Clearance(
+        order=ladder, field=f, claim=via, roles=mapped, default=default))
 
 
 def embedded_with(model: str) -> _Field:

@@ -58,7 +58,7 @@ So this repository applies it to itself, and not as a slogan:
 - **[CLAIMS.md](CLAIMS.md)** maps every guarantee to the file that would go
   red if it stopped holding. The mapping is checked in both directions by
   `tests/test_every_claim_names_its_evidence.py` — a claim with no test, or
-  a test no claim points at, fails the suite. Currently 30 claims across 29
+  a test no claim points at, fails the suite. Currently 31 claims across 30
   files — lineage is two of them, because the cascade on read and the
   ancestry closed on write fail separately.
 - **[LIMITS.md](LIMITS.md)** counts this project's own defects, names its
@@ -248,18 +248,13 @@ can express that —
 A policy file that is wrong fails when it is *loaded*, not when a query comes
 back with the wrong rows.
 
-### `restricted_to()` on the wire, and where the claims come from
+### Rules that ask who is calling, and where the answer comes from
 
-The one rule that needs to know *who is asking*, which for a long time was
-the one thing the library handle could do and the wire could not. The
-handle is gone now and the wire does this; what it still cannot do is an
-*ordered* clearance, and `LIMITS.md` section 6b says why. The
-question is not how to pass claims to the boundary — it is why the
-boundary should believe any. `for_caller` in `admission/core.py` puts it
-bluntly: a handle that believed `{"clearance": "secret"}` because it was
-handed one **would be an authorisation system whose only input is the
-attacker's.** A proxy is worse off still, because the client is the only
-thing talking to it.
+The question is not how to pass claims to the boundary — it is why the
+boundary should believe any. A rule that accepted `{"clearance":
+"secret"}` because a client sent one **would be an authorisation system
+whose only input is the attacker's**, and a proxy is worse off than a
+library here, because the client is the only thing talking to it.
 
 So the boundary does not accept claims. It asks the deployment:
 
@@ -290,12 +285,29 @@ Asked once per connection, lazily, and only for a collection whose rules
 ask — an authenticated connection cannot become somebody else, and a
 policy with no caller-aware rule never pays the round trip.
 
-**What it cannot do, said here rather than discovered.** `Clearance` wants
-an *ordered level*, and nothing in a MongoDB role says which level a role
-corresponds to. It therefore finds no claim, and no claim is the lowest
-rather than the highest, so it would refuse everything. The boundary says
-so at boot with the collection named, instead of letting it look like
-broken reads. See `LIMITS.md` §6b.
+**And an ordered ladder, which takes one more line.** A role says who
+somebody *is*, not how far up a ladder they stand — nothing in
+`db.createRole({role: "analyst"})` carries a level. So the policy file
+says which rung each role is on, once, beside everything else it says:
+
+```python
+classification = clearance(
+    order=("public", "internal", "secret"),
+    roles={"analyst": "internal", "sec-cleared": "secret"})
+```
+
+A caller holding several roles gets the **highest** rung any of them maps
+to. A role this policy never mapped clears nothing, because an unmapped
+role is an unanswered question. An unlabelled document reaches nobody,
+because untagged is not public. And a role mapped to a level the ladder
+does not define is a **load** error — it would otherwise clear its holders
+for nothing, silently, and the collection would read as empty for exactly
+the people it was written for.
+
+`examples/clearance.py` runs all of that against three real MongoDB users.
+A `clearance()` with no mapping is still declarable for a process that
+already knows the level, and the boundary says at boot that it cannot
+supply one rather than letting it look like broken reads.
 
 ## It sizes its own fetch
 
@@ -837,7 +849,7 @@ from somebody asking why a paragraph said what it said. One
 team, two weeks, their own corpus is worth more than anything else that
 could be built next.
 
-The suite is **492 tests**, and it is the foundation rather than a census —
+The suite is **509 tests**, and it is the foundation rather than a census —
 the smallest set of claims that, if any one broke, would make everything
 above it a lie. Each one and the file that holds it up is
 **[CLAIMS.md](CLAIMS.md)**, and that mapping is itself checked: a claim with

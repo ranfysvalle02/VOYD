@@ -87,16 +87,16 @@ no mock tier, on purpose, because these properties are only true if the
 
 from __future__ import annotations
 
-from .declare import (auto_embed, budget, deadline, distinct, embedded_with,
-                      guard, holdable, restricted_to, revocable, sealed,
-                      tenant)
+from .declare import (auto_embed, budget, clearance, deadline, distinct,
+                      embedded_with, guard, holdable, restricted_to,
+                      revocable, sealed, tenant)
 
 __version__ = "0.1.0"
 
 __all__ = [
     # The declarative policy surface -- everything `voydfile.py` needs.
     "guard", "deadline", "revocable", "holdable", "tenant",
-    "restricted_to", "embedded_with", "budget", "distinct", "sealed",
-    "auto_embed",
+    "restricted_to", "clearance", "embedded_with", "budget", "distinct",
+    "sealed", "auto_embed",
     "__version__",
 ]

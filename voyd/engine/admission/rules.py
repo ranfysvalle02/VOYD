@@ -476,6 +476,23 @@ class Clearance:
     field: str = "classification"
     claim: str = "clearance"
     default: str | None = None
+    # How a caller's level is derived from something they *hold* rather
+    # than something they assert. Pairs, not a dict, so the rule stays a
+    # hashable frozen dataclass alongside the rest.
+    #
+    # It exists because of where this rule runs. In a process that already
+    # authenticated somebody, `claim="clearance"` is answerable: the
+    # application knows the level and passes it. A wire boundary does not
+    # get to know that -- it asks the deployment who is calling, and the
+    # deployment answers with roles. Nothing in a MongoDB role says which
+    # level it corresponds to, so somebody has to say, and a policy file is
+    # where somebody says things.
+    #
+    # With a mapping, ``claim`` names a claim holding a *list* (``roles``
+    # or ``groups``) and the caller's level is the highest any of their
+    # roles maps to. Without one, ``claim`` names a scalar level and this
+    # behaves exactly as it did.
+    roles: tuple[tuple[str, str], ...] = ()
     reason: str = NOT_CLEARED
     needs_caller: bool = True
     bypassable: bool = False
@@ -487,13 +504,33 @@ class Clearance:
         except (ValueError, TypeError):
             return None
 
+    def _held(self, caller: dict | None) -> int | None:
+        """How far up the order this caller is cleared, or ``None``.
+
+        ``None`` is "cleared for nothing", never "cleared for everything".
+        A role this deployment has not mapped contributes nothing rather
+        than raising: an unmapped role is an unanswered question, and the
+        answer to an unanswered question here is no.
+        """
+        got = (caller or {}).get(self.claim)
+        if not self.roles:
+            return self._rank(got)
+        if isinstance(got, str):            # one role, not a list of them
+            got = [got]
+        if not isinstance(got, (list, tuple, set, frozenset)):
+            return None
+        levels = dict(self.roles)
+        ranks = [r for r in (self._rank(levels.get(role)) for role in got)
+                 if r is not None]
+        return max(ranks) if ranks else None
+
     def refuses(self, doc: dict, *, when: datetime | None = None,
                 caller: dict | None = None) -> bool:
         level = doc.get(self.field, self.default)
         needed = self._rank(level)
         if needed is None:
             return True                      # unlabelled, or a label we do not know
-        held = self._rank((caller or {}).get(self.claim))
+        held = self._held(caller)
         if held is None:
             return True                      # no claim is the lowest, not the highest
         return held < needed
@@ -513,7 +550,7 @@ class Clearance:
         permitted levels does that implicitly, by matching nothing else --
         which is fine, because ``refuses`` above is what holds.
         """
-        held = self._rank((caller or {}).get(self.claim))
+        held = self._held(caller)
         if held is None:
             # Cleared for nothing. An impossible clause is the honest
             # translation, and cheaper than fetching everything to refuse it.

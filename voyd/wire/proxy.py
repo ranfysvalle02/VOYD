@@ -1184,11 +1184,22 @@ SUPPLIABLE_CLAIMS = frozenset({"user", "db", "groups", "roles"})
 def unsuppliable_claims(guard: Guard) -> list[str]:
     """Claims this guard's rules need and the wire cannot produce.
 
-    `Clearance` is the live example: it wants an ordered level, and nothing
-    in a MongoDB role says which level a role corresponds to. Answering it
-    would take a declared role-to-level mapping in the policy file, and
-    inventing one before somebody needs it is how this package grows
-    surface it has to keep honest forever. So it is reported, not guessed.
+    There are exactly four a boundary can honestly answer -- `user`, `db`,
+    `groups`, `roles` -- because those are what the *server* says when
+    asked `connectionStatus`, and a claim the client asserted is not
+    evidence about the client.
+
+    A rule wanting anything else is not wrong; it is enforceable where an
+    application already knows the answer. Here it can only be reported,
+    and it is reported **at boot**, because the alternative is correct and
+    useless: no claim means the lowest clearance, which means every read
+    of that collection is refused, which presents as "VOYD broke my reads"
+    with nothing connecting it to a line in a policy file.
+
+    `clearance(order=..., roles={...})` is the shape that avoids this --
+    the mapping turns "how far up the ladder is this caller" into a
+    question about roles, which the server does answer. A `clearance()`
+    with no mapping lands here.
     """
     wanted = []
     for rule in guard.spec.rules:
