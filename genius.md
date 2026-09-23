@@ -34,7 +34,24 @@ staging environment, and a change to somebody's connection string, all
 before anyone has seen a single number.
 
 VOYD's check is a function. So it runs as an offline analyser with
-nothing in the data path at all:
+nothing in the data path at all — and the step before *that* needs no
+cluster either. There is a ladder, and every rung is smaller than a
+competitor's first ask:
+
+| what it costs them | what they get |
+|---|---|
+| **nothing** — one stdlib file, no install, no credential | which reads in their own code can serve a forgotten fact |
+| **a read-only URI** | how many documents are reachable right now that should not be |
+| **one line in CI** | what a policy change would let through, before it merges |
+| **one connection string** | the boundary |
+
+The first rung is a static scan of their source, and it infers what the
+mark *is* rather than being configured with it — a TTL index names its
+own field, and past that, the field most reads filter on is the
+convention, so the reads that omit it are the finding. It gets stronger
+on bigger codebases.
+
+The second rung is the one that has no equivalent anywhere else:
 
 ```bash
 voyd-plan --audit --proposed voydfile.py --target $READONLY_URI --all

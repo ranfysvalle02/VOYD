@@ -370,6 +370,37 @@ here keeps history, and the documents are the ones on disk now.
 
 ### Before anything is installed
 
+Two questions, two costs, and neither one is a deployment.
+
+**"Where in my code is the hole?"** — costs nothing at all. The scanner
+is a single stdlib file in its own distribution with no dependencies and
+no import of this package, because the first thing a stranger runs must
+cost them nothing:
+
+```bash
+python3 scanner/voyd_scan app/ services/
+```
+
+```
+notes: `expire_at` (declared by a write or index); `forgotten` (declared by a write or index)
+
+25 of 25 read(s) against them do not:
+  refuse.py:79   notes  (filter does not name `expire_at`, `forgotten`)
+  embed.py:163   notes  (filter does not name `expire_at`, `forgotten`)
+```
+
+It works out what the mark *is* rather than being told: a TTL index
+names its own field, and beyond that, the fields most reads filter on
+are the convention — so a field most reads name and some do not is a
+deviation from your own spec. It gets **stronger on larger codebases**,
+because the majority that establishes the convention is bigger.
+
+**"How much is exposed right now?"** — costs a read-only URI. `--audit`
+compares the cluster against *no policy at all*, so every document the
+policy would refuse is a document reachable today:
+
+
+
 The same arithmetic, asked about the present. `--audit` compares the
 cluster against *no policy at all*, so every document the policy would
 refuse is a document reachable right now:
@@ -390,6 +421,13 @@ No proxy, no sidecar, no connection string changed, nothing in a query
 path — a read-only credential and a batch job. That is only possible
 because the check is a pure function: a boundary whose enforcement lives
 inside a running process has nowhere to stand to ask this.
+
+| what it costs you | what it tells you |
+|---|---|
+| nothing — one stdlib file | which reads in your code can serve a forgotten fact |
+| a read-only URI | how many documents are reachable right now that should not be |
+| one line in CI | what a policy change would let through, before it merges |
+| one connection string | nothing gets out, in any language, ever again |
 
 ### In the place a policy is actually reviewed
 

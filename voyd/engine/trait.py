@@ -1,26 +1,31 @@
-"""A primitive is a trait. That is the extension point.
-
-The five builtins are not a closed set. They are objects with a ``kind``,
-a ``collection``, and ``async ensure()`` -- schema the replica set should
-maintain. ``voyd-wire --ensure`` builds every trait a policy file
-declares: the collection, TTL behind each deadline, an index leading with
-each tenant, and a vector index the server embeds.
-
-Duck typing. Inherit nothing. This module is the contract, not a framework:
+"""The shape of a thing that can be provisioned: ``ensure()``, idempotent.
 
     class Outbox:
         kind = "outbox"
-        def __init__(self, db, collection, *, tenant=None):
-            self.db = db
-            self.collection = collection
-            self.tenant = tenant
+        collection = "outbox"
         async def ensure(self):
-            await self.db[self.collection].create_index("published")
+            await db[self.collection].create_index("published")
             return True
 
-Anything with that shape can be provisioned beside the ones this package
-ships. `voyd-wire --ensure` builds each trait a policy declares; a trait
-somebody else wrote is built the same way, with no privileged path.
+**What this is, and what it is not, stated plainly because the two got
+confused here once.** It is a *protocol*: a name for the shape the
+provisioning helpers already have, so ``Expiry`` and the index builders
+can be described in one word and type-checked against one thing.
+
+It is **not** a registry, and ``voyd-wire --ensure`` does not discover
+traits. ``ensure.provision`` builds what a policy file declares --
+collections, a TTL behind each deadline, an index leading with each
+tenant, a server-embedded vector index -- by naming those things
+concretely. A class of your own with this shape is not picked up by
+anything today.
+
+This docstring used to say the opposite: that ``--ensure`` built every
+trait a policy declared and a stranger's was built "with no privileged
+path". That was a design intention written in the present tense, and it
+was accompanied by two helper functions nothing ever called. Both are
+gone. If third-party provisioning is worth having, it is worth a
+registry, a declaration syntax and a test -- and until it has those, a
+reader is owed the shorter true sentence rather than the longer one.
 """
 
 from __future__ import annotations
@@ -40,23 +45,3 @@ class Trait(Protocol):
     collection: str
 
     async def ensure(self) -> Any: ...
-
-
-def kind_of(trait: Any) -> str:
-    kind = getattr(trait, "kind", None)
-    if isinstance(kind, str) and kind:
-        return kind
-    return type(trait).__name__.lower()
-
-
-def collection_of(trait: Any) -> str:
-    coll = getattr(trait, "collection", None)
-    if isinstance(coll, str) and coll:
-        return coll
-    spec = getattr(trait, "spec", None)
-    coll = getattr(spec, "collection", None) if spec is not None else None
-    if isinstance(coll, str) and coll:
-        return coll
-    raise ValueError(
-        f"{type(trait).__name__} needs .collection or .spec.collection"
-    )
