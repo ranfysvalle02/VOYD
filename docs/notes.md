@@ -1,3 +1,13 @@
+VOYD is a MongoDB wire proxy that answers the question retrieval never asks: may this fact reach a prompt? You write one policy file and change one connection string — no application code — and expired, revoked, or out-of-tenant documents stop being reachable from any driver, language, notebook, or agent, because the boundary binds the connection and there's nothing to reach past.
+
+Why it's cool is one property with three payoffs. Putting the check on the wire forced it to be a pure function — a document, a policy, a clock, no I/O. That constraint looked like a tax and turned out to be the whole advantage:
+
+- It audits before it installs. voyd-plan --audit runs as a batch job against a read-only URI and tells you how many documents are reachable right now that shouldn't be. Every competing sidecar needs to be deployed first to tell you anything.
+- It diffs policy changes in CI. A deleted line in a diff doesn't say "412 documents just became reachable by tier-1 support." This does, and fails the PR.
+- Your reranker cannot leak. Page-shaping code runs inside the boundary, with the authoritative check after it — so a transform can reorder, merge, cache, even inject, and a forgotten fact still can't get out. Proven by a test that tries to smuggle documents through a real proxy and fails.
+
+-----
+
 Your reranker cannot leak
 
 The line: "You can run a stranger's reranking code inside my authorization boundary, and I'll still guarantee nothing forbidden comes out. Not because I reviewed the code — because the boundary runs after it."

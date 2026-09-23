@@ -42,9 +42,10 @@ SOURCES = sorted(
     [p for p in ROOT.rglob("*.py")
      if not any(x in p.parts for x in (".venv", "__pycache__", "dist",
                                        ".mypy_cache", ".pytest_cache"))]
-    + [ROOT / n for n in ("README.md", "blog.md", "genius.md",
+    + [ROOT / n for n in ("README.md", "blog.md", "genius.md", "ethos.md",
                           "docs/ranking-is-not-permission.md",
-                          "docs/cosine.md", "pyproject.toml",
+                          "docs/cosine.md", "docs/why-not-native.md",
+                          "pyproject.toml",
                           "Dockerfile", "action.yml",
                           ".github/workflows/test.yml",
                           ".github/workflows/policy-plan.yml")])

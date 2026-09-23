@@ -52,7 +52,8 @@ from .reads import (DERIVED_COMMANDS, FOREIGN_STAGES, LEADING_STAGES,
                     projection_blinds, reducing_stage, rewrite_derived_read)
 from .reads import _was_reduced as _was_reduced
 from .refusals import (EXFILTRATING_STAGES, UNREWRITABLE,
-                       client_vector_on_server_index, refuse_client_vector,
+                       client_vector_on_server_index, refuse_change_stream,
+                       refuse_client_vector, streams_changes,
                        refuse_unrewritable, seal_refusal, writes_elsewhere)
 from .verbs import (delete_reply, derive_on_insert,
                     revoke_instead_of_delete,
@@ -76,6 +77,7 @@ __all__ = [
     # ---- refuse a command outright ----
     "refuse_unrewritable", "refuse_client_vector", "seal_refusal",
     "writes_elsewhere", "client_vector_on_server_index", "UNREWRITABLE",
+    "refuse_change_stream", "streams_changes",
     "EXFILTRATING_STAGES",
 
     # ---- the connection itself ----

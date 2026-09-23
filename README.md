@@ -625,6 +625,9 @@ the second language.
 - `voyd-plan --at` replays the clock against today's documents. Answering
   it against the documents as they *were* needs history this package does
   not keep.
+- A change stream over a guarded collection is **refused**, not
+  filtered: a change event is not a document, and the rules read
+  top-level fields. See [`docs/why-not-native.md`](docs/why-not-native.md).
 - A transform cannot widen a read, and that is the only promise made
   about one. It can still be slow, wrong, or expensive, and nothing here
   bounds how long somebody's reranker runs inside the egress path.

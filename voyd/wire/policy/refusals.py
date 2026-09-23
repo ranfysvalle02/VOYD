@@ -55,6 +55,38 @@ UNREWRITABLE = {
 # answer is the same one `drop` gets: say no, out loud, with a reason.
 EXFILTRATING_STAGES = ("$out", "$merge")
 
+# A change stream is a read path wearing a different shape, and it was the
+# quietest hole this boundary had.
+#
+# The filter keys on `cursor.ns`, so a `$changeStream` aggregation on a
+# guarded collection *is* matched to its guard and the events *are* handed
+# to the rules. They are simply not documents. An event is
+#
+#     {_id: <token>, operationType: "update", ns: {...},
+#      documentKey: {...}, fullDocument: {the entire document}}
+#
+# and every rule in this package reads *top-level* fields. There is no
+# `expire_at` at the top of that and no `forgotten`, so a deadline reads
+# as "no deadline, pinned" and a mark reads as absent -- both admit -- and
+# the whole forgotten document rides out inside `fullDocument`. Measured
+# before it was closed:
+#
+#     as an ordinary document:    []
+#     as a change stream event:   fullDocument leaked: 'SENSITIVE'
+#
+# The same shape as `subjects`: the subject moved and the rules kept
+# reading the old place. Unwrapping `fullDocument` would fix that one
+# field and not the others -- `fullDocumentBeforeChange` carries the prior
+# copy, `updateDescription.updatedFields` carries changed values verbatim,
+# and a `delete` event carries `documentKey` for a row whose deletion is
+# the very thing a revocation was supposed to hide. Each is a separate
+# leak with separate semantics.
+#
+# So this is refused rather than filtered, on the same argument as `$out`:
+# a proxy cannot make it safe, and the honest answer to a read path whose
+# payload the rules cannot see is to say no, out loud.
+CHANGE_STREAM = "$changeStream"
+
 
 def writes_elsewhere(body: Mapping) -> str | None:
     """Does this aggregation end by writing somewhere the policy is not?"""
@@ -109,6 +141,67 @@ def client_vector_on_server_index(body: Mapping, embeds: Mapping) -> str | None:
         if isinstance(search, Mapping) and "queryVector" in search:
             return collection
     return None
+
+
+def streams_changes(body: Mapping, guards: dict[str, Guard]) -> str | None:
+    """Is this a change stream over a collection somebody guarded?
+
+    Only over a *guarded* collection. A change stream anywhere else is
+    ordinary and is forwarded: this boundary declines what it cannot
+    judge, and it has nothing to say about a collection no policy names.
+
+    A whole-database or whole-deployment stream (`aggregate: 1`) is
+    refused whenever *any* collection is guarded, because it delivers
+    events for all of them and the namespace is chosen by the server per
+    event rather than by the client up front.
+    """
+    pipeline = body.get("pipeline")
+    if not isinstance(pipeline, list) or not pipeline:
+        return None
+    first = pipeline[0]
+    if not isinstance(first, Mapping) or CHANGE_STREAM not in first:
+        return None
+    target = body.get("aggregate")
+    if isinstance(target, str):
+        return target if target in guards else None
+    # `aggregate: 1` is the whole database.
+    return "the whole database" if guards else None
+
+
+def refuse_change_stream(raw: bytes, req_id: int, resp_to: int,
+                         guards: dict[str, Guard]) -> bytes | None:
+    """Answer a change stream on a guarded collection with an error.
+
+    Loud, because the alternative was silent. An application that needs
+    this is not wrong to need it -- it is asking for a notification
+    channel and getting refused a read path -- and the error says which
+    it is and what to do instead, because a refusal nobody can act on
+    becomes a reason to take the boundary out.
+    """
+    decoded = decode_op_msg(raw, LAZY)
+    if decoded is None:
+        return None
+    collection = streams_changes(dict(decoded[1]), guards)
+    if collection is None:
+        return None
+    print(f"  voyd: REFUSED a change stream on {collection}: the events "
+          f"carry whole documents the rules cannot see", flush=True)
+    return encode_op_msg(req_id, req_id, 0, {
+        "ok": 0.0, "code": 8000, "codeName": "AtlasError",
+        "errmsg": (
+            f"voyd-wire refuses a change stream on {collection!r}. A change "
+            f"event is not a document: it carries the whole row inside "
+            f"`fullDocument` (and its prior copy inside "
+            f"`fullDocumentBeforeChange`, and changed values inside "
+            f"`updateDescription`), and every rule here reads top-level "
+            f"fields -- so an expired or revoked document would ride out "
+            f"inside an event that looks empty to the policy. Filtering the "
+            f"event instead of refusing it would fix one field and leave "
+            f"three. Open the change stream on a connection that goes "
+            f"straight to the deployment, where it is a write-notification "
+            f"channel and not a way around this boundary, and read the "
+            f"documents themselves through here."),
+    })
 
 
 def refuse_client_vector(raw: bytes, req_id: int, resp_to: int,

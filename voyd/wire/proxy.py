@@ -87,7 +87,8 @@ from . import metrics
 from .policy import (Budgets, Guard, _wants_a_caller, _was_reduced,
                      cascade_first, cascade_first_for_one, delete_reply,
                      derive_on_insert, erase_first, guard_for, judge,
-                     refuse_client_vector, refuse_unrewritable,
+                     refuse_change_stream, refuse_client_vector,
+                     refuse_unrewritable,
                      revoke_instead_of_delete,
                      revoke_instead_of_find_and_delete, rewrite_derived_read,
                      rewrite_topology, seal_refusal, strip_compression,
@@ -277,6 +278,14 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # revocation is answered here rather than forwarded: the
                 # reply goes straight back and the server never sees it.
                 refusal = refuse_unrewritable(raw, req_id, req_id, guards)
+                if refusal is None:
+                    # A change stream is a read path whose payload the
+                    # rules cannot see, so it is refused before it is
+                    # forwarded -- the same answer the stages that write
+                    # somewhere else get, and for the same reason. Which
+                    # ones those are is `refusals.py`'s to know.
+                    refusal = refuse_change_stream(raw, req_id, req_id,
+                                                   guards)
                 if refusal is None and embeds:
                     refusal = refuse_client_vector(raw, req_id, req_id, embeds)
                 if refusal is None:
