@@ -223,10 +223,11 @@ That also means you do not need this repository. `voyd_scan/__init__.py` is
 the entire program — copy it into your own tree and run it there if that is
 easier than cloning.
 
-> **Not on a package index, and not waiting to be.** `pip install
-> voyd-scan` and `uvx voyd-scan` will 404. The commands above are the
-> ones that work, and for this file they are the better ones anyway:
-> it is one stdlib module, so copying it is a legitimate install.
+> **Not on a package index.** `pip install voyd-scan` and
+> `uvx voyd-scan` will 404 — `voyd` itself is published, this is a
+> separate distribution and is not. The commands above are the ones
+> that work, and for this file they are arguably the better ones
+> anyway: it is one stdlib module, so copying it *is* an install.
 
 ## What it cannot see
 

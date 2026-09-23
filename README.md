@@ -1,5 +1,9 @@
 # VOYD
 
+[![PyPI](https://img.shields.io/pypi/v/voyd)](https://pypi.org/project/voyd/)
+[![Python](https://img.shields.io/pypi/pyversions/voyd)](https://pypi.org/project/voyd/)
+[![License](https://img.shields.io/pypi/l/voyd)](LICENSE)
+
 **Ranking is not permission.**
 
 A vector index scores relevance. Nothing in an ordinary retrieval path is
@@ -72,13 +76,11 @@ They do not arrive.
 ## No code
 
 ```bash
-pip install git+https://github.com/ranfysvalle02/VOYD
+pip install voyd        # or: uv add voyd
 ```
 
-Not on a package index. That is a decision for now rather than a gap
-waiting to close: nobody outside this repository has run this, and a
-name on an index invites an install from people who have not read
-[`Known gaps`](#known-gaps).
+Read [`Known gaps`](#known-gaps) before you rely on it — being
+installable is not the same as being proven.
 
 You get three commands — `voyd-wire`, `voyd-plan`, `voyd-wire-health` —
 and the vocabulary to write the file they read. There is nothing here
@@ -318,15 +320,15 @@ than estimated:
 
 ```
                     page of 10   page of 50   page of 200
-with numpy                ~2ms         ~2ms          ~9ms
+voyd[rerank]              ~2ms         ~2ms          ~9ms
 pure Python               ~3ms        ~72ms      declines
 ```
 
-NumPy is an accelerant, not a dependency — `uv sync --extra rerank`, or
-just have it in the environment running `voyd-wire`. Without it the same
-arithmetic runs in Python, and past a measured ceiling the transform
-**declines and says so** rather than adding a second to every read: an
-optimisation is not allowed to be the slow part.
+NumPy is an accelerant, not a dependency — `pip install voyd[rerank]`.
+Without it the same arithmetic runs in Python, and past a measured
+ceiling the transform **declines and says so** rather than adding a
+second to every read: an optimisation is not allowed to be the slow
+part.
 
 ---
 

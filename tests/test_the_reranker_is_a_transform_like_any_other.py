@@ -238,11 +238,10 @@ def test_a_page_too_big_for_python_declines_instead_of_being_slow(monkeypatch,
         got = MMR(diversity=0.7).on_egress(list(docs), request={})
     assert order(got) == order(docs), "left in the index's order"
     assert "needs numpy" in caplog.text
-    # Names the dependency, not a PyPI extra: this package is installed
-    # from source, so `pip install voyd[rerank]` would 404 for everybody
-    # who followed it out of a log line.
-    assert "Install numpy" in caplog.text
-    assert "voyd[rerank]" not in caplog.text
+    # And names the extra that fixes it. A log line telling somebody
+    # what is wrong without telling them what to type is a log line
+    # they read twice and act on once.
+    assert "voyd[rerank]" in caplog.text
 
 
 # ---- it is a transform, with everything that implies -------------------

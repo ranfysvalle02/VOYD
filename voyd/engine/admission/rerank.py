@@ -36,11 +36,10 @@ diversified, and the honest response to that is to return the page
 untouched rather than to invent an ordering -- see ``_vectors``.
 
 Pure: no database, no clock, no I/O. NumPy accelerates it when present
-and is not a dependency -- it is the ``rerank`` extra, which like
-everything else here installs from a checkout rather than from an
-index. Without it the same arithmetic runs in Python, and above a
-measured ceiling the transform declines rather than making a read slow;
-see ``_PURE_PYTHON_BUDGET``.
+and is not a dependency -- ``pip install voyd[rerank]`` if you want it.
+Without it the same arithmetic runs in Python, and above a measured
+ceiling the transform declines rather than making a read slow; see
+``_PURE_PYTHON_BUDGET``.
 """
 
 from __future__ import annotations
@@ -59,7 +58,7 @@ log = logging.getLogger("engine.admission")
 # 10 takes ~3ms and a page of 50 takes ~72ms. The ceiling is set just
 # above the second of those, so 50 documents is the largest page this
 # will diversify without NumPy and the worst case stays under about a
-# tenth of a second. With NumPy installed the same page is ~1ms and the
+# tenth of a second. With `voyd[rerank]` the same page is ~1ms and the
 # ceiling never applies.
 #
 # A reranker is an optimisation, and an optimisation is not allowed to
@@ -203,8 +202,8 @@ class MMR:
             # optimisation is not allowed to be the slow part.
             log.warning(
                 "mmr: %d documents of %d dimensions needs numpy; leaving "
-                "the page in the index's order. Install numpy into the "
-                "environment running voyd-wire.", n, width)
+                "the page in the index's order. `pip install voyd[rerank]` "
+                "into the environment running voyd-wire.", n, width)
             return docs
 
         # Positional relevance: the index already ranked this page, and
