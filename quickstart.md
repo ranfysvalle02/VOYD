@@ -64,8 +64,11 @@ Still no proxy, no install in anybody's path, nothing deployed. Write
 the policy you *would* enforce, then ask what it would have refused.
 
 ```bash
-pip install git+https://github.com/ranfysvalle02/VOYD    # not on PyPI yet
+pip install git+https://github.com/ranfysvalle02/VOYD
 ```
+
+There is no package-index install and that is deliberate for now, so
+`pip install voyd` will 404 no matter how reasonable it looks.
 
 ```python
 # voydfile.py

@@ -336,3 +336,39 @@ def test_no_module_level_definition_in_voyd_is_unreferenced():
     assert not orphans, (
         "defined and referenced nowhere:\n"
         + "\n".join(f"  {n}  in {w}" for n, w in sorted(orphans.items())))
+
+
+def test_nothing_tells_a_reader_to_install_from_an_index():
+    """`pip install voyd` was the README's first line and it 404s.
+
+    This package is deliberately not published, so every instruction
+    naming it as an installable distribution is an instruction that
+    fails -- and one of them was not in a document at all. The reranker
+    logged `pip install voyd[rerank]` at runtime, which is the worst
+    place to put a broken command: nobody reviews a log line, and the
+    person reading it is already having a bad day.
+
+    The extras themselves are real and stay named. What must not appear
+    is an `install` verb in front of this distribution's name.
+    """
+    import re
+
+    offenders: list[str] = []
+    for path in [*ROOT.glob("*.md"), *(ROOT / "docs").glob("*.md"),
+                 ROOT / "scanner" / "README.md",
+                 *(ROOT / "voyd").rglob("*.py"),
+                 *(ROOT / "scanner").rglob("*.py")]:
+        if "__pycache__" in str(path):
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            # Only a command a reader could copy: the line *begins*
+            # with the verb. Prose saying `pip install voyd` will 404 is
+            # the warning, not the offence, and a check that could not
+            # tell them apart would forbid explaining the problem.
+            if re.match(r"\s*(pip install|uv add|uvx)\s+[\"']?voyd", line) \
+                    and "git+" not in line and "://" not in line:
+                offenders.append(
+                    f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
+    assert not offenders, (
+        "tells a reader to install from a package index:\n  "
+        + "\n  ".join(offenders))

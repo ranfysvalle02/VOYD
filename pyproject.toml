@@ -85,8 +85,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-# The artifact. `pip install voyd` has to give you something that can
-# serve a policy file, not only the vocabulary to write one.
+# The artifact. Installing this -- from a checkout or a git URL, since it
+# is not on an index -- has to give you something that can serve a policy
+# file, not only the vocabulary to write one.
 voyd-wire = "voyd.wire.cli:main"
 voyd-bench = "voyd.wire.bench:main"
 # Reads two policy files and, optionally, a cluster. Writes nothing:
