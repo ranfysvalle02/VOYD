@@ -173,6 +173,11 @@ Beside them, and deliberately not one of them:
 | | |
 |---|---|
 | `@transform(collection)` | shape the page — rerank, de-duplicate, annotate — inside the boundary, where it cannot widen a read |
+| `rerank(collection, ...)` | the built-in one: maximal marginal relevance, so ten chunks of one contract stop crowding out nine other contracts |
+
+Neither is an enforcement point. A rule is what the terminal pass
+re-asks and what `voyd-plan` can reason about; a transform gets no
+credit for filtering and no attestation. See [`ethos.md`](ethos.md).
 
 `budget(n)` and `distinct()` are **set-relative**: they refuse a document
 because of the *other* documents on the page, so the same document is
@@ -669,5 +674,25 @@ the second language.
 - A transform cannot widen a read, and that is the only promise made
   about one. It can still be slow, wrong, or expensive, and nothing here
   bounds how long somebody's reranker runs inside the egress path.
+- There is **no observe-only mode**. `voyd-wire` enforces or it is not
+  in the path; it cannot yet run alongside a read logging what it *would*
+  have refused. `voyd-plan --audit` answers most of that question without
+  a proxy at all, which is why this has not been urgent.
+
+---
+
+## Reading this repository
+
+This file is the reference. The other six are not the same argument
+at different lengths — each answers a question this one does not:
+
+| | |
+|---|---|
+| [`ethos.md`](ethos.md) | what a policy file is for, and the four tests that keep logic out of it. Read this before writing rules |
+| [`blog.md`](blog.md) | the story: every failure in this domain is disguised as its own opposite, including one in this project's own CI |
+| [`docs/why-not-native.md`](docs/why-not-native.md) | change streams, `$where`, views, `$$USER_ROLES`, TTL, RBAC, Queryable Encryption — what each one gives you and where the line is |
+| [`docs/cosine.md`](docs/cosine.md) | the embedding-model failure, reproducible without an API key, with its provenance and its limits |
+| [`docs/ranking-is-not-permission.md`](docs/ranking-is-not-permission.md) | the long-form design argument for putting a boundary on the wire |
+| [`genius.md`](genius.md) | the commercial case: one property, three motions, and the corrections that keep it honest |
 
 MIT.

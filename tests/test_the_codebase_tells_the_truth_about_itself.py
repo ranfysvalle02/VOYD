@@ -274,3 +274,63 @@ def test_the_modules_that_claim_to_be_pure_reach_no_database(module):
                            "requests", "urllib"}
     assert not forbidden, (
         f"{module} says it is pure and imports {sorted(forbidden)}")
+
+
+def test_every_name_the_package_exports_is_documented():
+    """A vocabulary word with no entry is a feature nobody can find.
+
+    `voyd.__all__` is the whole public surface -- a policy file can use
+    nothing else -- so a name that ships without a line in the README is
+    a thing that exists and cannot be discovered. Caught here because
+    the failure is silent in the direction of *looking finished*.
+    """
+    import voyd
+
+    doc = (ROOT / "README.md").read_text()
+    documented = set(re.findall(r"\| `@?(\w+)\(", doc))
+    # `guard` is the decorator every example opens with rather than a
+    # row in a table of fields, and `__version__` is not vocabulary.
+    exempt = {"guard", "__version__"}
+    missing = {n for n in voyd.__all__} - documented - exempt
+    assert not missing, f"exported and undocumented: {sorted(missing)}"
+
+
+def test_no_module_level_definition_in_voyd_is_unreferenced():
+    """Dead code in a boundary is worse than dead code elsewhere.
+
+    It reads as capability. `trait.py` carried two helpers for a
+    dispatch that never arrived, under a docstring promising the
+    dispatch worked -- and the docstring was believed because the
+    functions were there to support it.
+
+    Deliberately crude: a definition whose name appears exactly once in
+    the whole tree appears only in its own `def`. That misses a few
+    things and invents nothing, which is the right direction for a check
+    that fails a build.
+    """
+    import ast
+
+    defined: dict[str, str] = {}
+    for path in (ROOT / "voyd").rglob("*.py"):
+        if "__pycache__" in str(path):
+            continue
+        for node in ast.parse(path.read_text()).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                defined.setdefault(node.name, str(path.relative_to(ROOT)))
+
+    corpus = ""
+    for where in ("voyd", "tests", "examples", "scanner"):
+        for path in (ROOT / where).rglob("*.py"):
+            if "__pycache__" not in str(path):
+                corpus += path.read_text()
+    for name in ("README.md", "blog.md", "genius.md", "ethos.md"):
+        corpus += (ROOT / name).read_text()
+    for path in (ROOT / "docs").glob("*.md"):
+        corpus += path.read_text()
+
+    orphans = {name: where for name, where in defined.items()
+               if not name.startswith("__") and corpus.count(name) <= 1}
+    assert not orphans, (
+        "defined and referenced nowhere:\n"
+        + "\n".join(f"  {n}  in {w}" for n, w in sorted(orphans.items())))
