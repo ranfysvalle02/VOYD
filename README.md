@@ -72,11 +72,15 @@ They do not arrive.
 ## No code
 
 ```bash
-pip install voyd        # or: uv add voyd
+pip install git+https://github.com/ranfysvalle02/VOYD    # not on PyPI yet
 ```
 
-You get one command, `voyd-wire`, and the vocabulary to write the file it
-reads. There is nothing here for an application to import.
+You get three commands — `voyd-wire`, `voyd-plan`, `voyd-wire-health` —
+and the vocabulary to write the file they read. There is nothing here
+for an application to import.
+
+New here? [`quickstart.md`](quickstart.md) is twenty minutes, and the
+first step costs nothing at all.
 
 Declare the rules once, in a file that is not your application:
 
@@ -683,11 +687,12 @@ the second language.
 
 ## Reading this repository
 
-This file is the reference. The other six are not the same argument
+This file is the reference. The others are not the same argument
 at different lengths — each answers a question this one does not:
 
 | | |
 |---|---|
+| [`quickstart.md`](quickstart.md) | four steps, smallest first; the first costs nothing at all |
 | [`ethos.md`](ethos.md) | what a policy file is for, and the four tests that keep logic out of it. Read this before writing rules |
 | [`blog.md`](blog.md) | the story: every failure in this domain is disguised as its own opposite, including one in this project's own CI |
 | [`docs/why-not-native.md`](docs/why-not-native.md) | change streams, `$where`, views, `$$USER_ROLES`, TTL, RBAC, Queryable Encryption — what each one gives you and where the line is |
