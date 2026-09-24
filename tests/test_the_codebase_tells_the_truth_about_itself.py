@@ -43,7 +43,7 @@ SOURCES = sorted(
      if not any(x in p.parts for x in (".venv", "__pycache__", "dist",
                                        ".mypy_cache", ".pytest_cache"))]
     + [ROOT / n for n in ("README.md", "blog.md", "genius.md", "ethos.md",
-                          "quickstart.md",
+                          "quickstart.md", "use-cases.md",
                           "docs/ranking-is-not-permission.md",
                           "docs/cosine.md", "docs/why-not-native.md",
                           "pyproject.toml",
@@ -326,7 +326,7 @@ def test_no_module_level_definition_in_voyd_is_unreferenced():
             if "__pycache__" not in str(path):
                 corpus += path.read_text()
     for name in ("README.md", "blog.md", "genius.md", "ethos.md",
-                 "quickstart.md"):
+                 "quickstart.md", "use-cases.md"):
         corpus += (ROOT / name).read_text()
     for path in (ROOT / "docs").glob("*.md"):
         corpus += path.read_text()

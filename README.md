@@ -701,6 +701,7 @@ at different lengths — each answers a question this one does not:
 | | |
 |---|---|
 | [`quickstart.md`](quickstart.md) | four steps, smallest first; the first costs nothing at all |
+| [`use-cases.md`](use-cases.md) | twenty-two places a fact ranks well and must not reach the prompt, each with its voydfile and the edge where refusal stops |
 | [`ethos.md`](ethos.md) | what a policy file is for, and the four tests that keep logic out of it. Read this before writing rules |
 | [`blog.md`](blog.md) | the story: every failure in this domain is disguised as its own opposite, including one in this project's own CI |
 | [`docs/why-not-native.md`](docs/why-not-native.md) | change streams, `$where`, views, `$$USER_ROLES`, TTL, RBAC, Queryable Encryption — what each one gives you and where the line is |
