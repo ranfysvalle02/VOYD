@@ -151,6 +151,9 @@ def test_the_public_surface_is_deliberate():
         # Pipeline names mongod does not have, run by the boundary on
         # admitted documents. Neither is a rule. See `policy/stages.py`.
         "stage", "operator",
+        # A named pipeline a client calls by name; its expansion meets the
+        # rules like any pipeline. Not a rule. See `policy/recipes.py`.
+        "recipe",
         "__version__"}, (
         "the policy vocabulary changed; that is the package's whole public "
         "surface, so it is a deliberate edit and not an incidental one")

@@ -24,6 +24,8 @@ trusting that a scroll was thorough.
                 the commands that would carry a masked value out
     prefilter   the opt-in copy of the rules in `$vectorSearch.filter`,
                 which narrows ranking and is never the guarantee
+    recipes     named pipelines from the policy file, expanded before
+                anything else sees the message, and `recipes_only`
     stages      pipeline names mongod does not have, run on admitted
                 documents only: the split, the refusals, the tracing
                 and the terminal pass after every virtual step
@@ -62,6 +64,8 @@ from .reads import _was_reduced as _was_reduced
 from .prefilter import (VECTOR_FILTER_OPERATORS, clause_paths, index_declares,
                         prefilter_clauses, prefilter_fields,
                         rewrite_vector_search)
+from .recipes import (Recipe, RecipeError, ad_hoc_read, expand_recipe,
+                      has_recipes)
 from .stages import (SOURCE_STAGES, StageError, VirtualContext, Virtuals,
                      names_scratch, plan_virtual, refuse_scratch,
                      run_virtual, split_virtual)
@@ -95,6 +99,9 @@ __all__ = [
     "Virtuals", "VirtualContext", "StageError", "plan_virtual",
     "split_virtual", "run_virtual", "refuse_scratch", "names_scratch",
     "SOURCE_STAGES",
+
+    # ---- named pipelines ----
+    "Recipe", "RecipeError", "expand_recipe", "has_recipes", "ad_hoc_read",
 
     # ---- refuse a command outright ----
     "refuse_unrewritable", "refuse_client_vector", "seal_refusal",

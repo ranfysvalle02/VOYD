@@ -82,6 +82,9 @@ class Guard:
         # `None` means a `$vectorSearch` is forwarded exactly as sent; see
         # `prefilter.py`.
         self.prefilter_index: str | None = None
+        # Reads served by each `@recipe` on this collection, by name. The
+        # version is fixed at load, so the name is enough to count by.
+        self.recipe_reads: dict[str, int] = {}
 
     @classmethod
     def defaults(cls, collection: str, *, at_field: str, mark_field: str):

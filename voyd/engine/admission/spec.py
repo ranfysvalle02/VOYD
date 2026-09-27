@@ -106,6 +106,12 @@ class AdmissionSpec:
     # read. Part of identity for the reason ``transforms`` is: two
     # declarations disagreeing about which values leave must collide.
     masks: tuple = ()
+    # Named pipelines declared with ``@recipe`` for this collection, and
+    # whether they are the *only* way to read it. The engine never runs
+    # one; they ride on the spec so ``voyd-plan`` compares them with the
+    # rest of the policy. See ``voyd/wire/policy/recipes.py``.
+    recipes: tuple = ()
+    recipes_only: bool = False
     # A stable label for *this* configuration of rules, carried into a stored
     # ``record_use`` so a consequence can be tied to the policy that produced
     # it. Part of identity on purpose: ``Budget(100)`` and ``Budget(10000)``
@@ -170,8 +176,11 @@ class AdmissionSpec:
                   else f", per {self.subjects}[]" if self.subjects else "")
         hides = (f", masks [{', '.join(m.describe() for m in self.masks)}]"
                  if self.masks else "")
+        cooks = (f", recipes [{', '.join(r.describe() for r in self.recipes)}]"
+                 + (" only" if self.recipes_only else "")
+                 if self.recipes or self.recipes_only else "")
         return (f"{self.collection}: refuses on [{reasons}]{scope}{within}"
-                f"{hides}")
+                f"{hides}{cooks}")
 
 
 def _ask(rule, doc: dict, *, when: datetime | None,

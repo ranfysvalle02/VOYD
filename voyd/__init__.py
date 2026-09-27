@@ -89,8 +89,8 @@ from __future__ import annotations
 
 from .declare import (auto_embed, budget, clearance, deadline, distinct,
                       embedded_with, guard, holdable, mask, restricted_to,
-                      operator, rerank, revocable, sanitized, sealed,
-                      stage, subjects, tenant, transform)
+                      operator, recipe, rerank, revocable, sanitized,
+                      sealed, stage, subjects, tenant, transform)
 
 __version__ = "0.2.0"
 
@@ -106,5 +106,8 @@ __all__ = [
     # Pipeline vocabulary mongod does not have, run by the boundary on
     # admitted documents only. Not rules either. See `policy/stages.py`.
     "stage", "operator",
+    # A named, governed pipeline a client calls by name. Not a rule: its
+    # expansion meets the rules like any pipeline. See `policy/recipes.py`.
+    "recipe",
     "__version__",
 ]

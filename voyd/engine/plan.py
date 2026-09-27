@@ -69,6 +69,11 @@ MASK_REMOVED = "mask_removed"
 MASK_LOOSENED = "mask_loosened"
 MASK_ADDED = "mask_added"
 MASK_TIGHTENED = "mask_tightened"
+RECIPE_ADDED = "recipe_added"
+RECIPE_REMOVED = "recipe_removed"
+RECIPE_CHANGED = "recipe_changed"
+RECIPES_ONLY_ADDED = "recipes_only_added"
+RECIPES_ONLY_REMOVED = "recipes_only_removed"
 
 
 @dataclass(frozen=True)
@@ -421,7 +426,63 @@ def structural(current: Mapping[str, AdmissionSpec],
                 f"{now.subjects}[] elements become subjects in their own "
                 f"right", False))
         found.extend(_masks(name, was, now))
+        found.extend(_recipes(name, was, now))
     return found
+
+
+def _recipes(name: str, was: AdmissionSpec,
+             now: AdmissionSpec) -> list[Structural]:
+    """What a change does to the named pipelines a collection is read by.
+
+    A recipe's expansion is policy: it is what a client that names it will
+    run. Adding, removing or changing one is reported, and none of those
+    fails open by itself -- the expansion still meets every rule on the
+    way out. Removing ``recipes_only`` does: every ad-hoc read the
+    collection refused becomes one it serves.
+    """
+    before = {r.name: r for r in getattr(was, "recipes", ())}
+    after = {r.name: r for r in getattr(now, "recipes", ())}
+    found: list[Structural] = []
+    for key in sorted(set(before) | set(after)):
+        old, new = before.get(key), after.get(key)
+        if new is None:
+            assert old is not None
+            found.append(Structural(
+                name, RECIPE_REMOVED,
+                f"recipe {key!r}@{old.version} is gone: a client naming it "
+                f"is refused", False))
+        elif old is None:
+            found.append(Structural(
+                name, RECIPE_ADDED,
+                f"recipe {new.describe()} expands to "
+                f"{_stages(new.expansions)}", False))
+        elif old.version != new.version:
+            moved = ("its expansion changes: "
+                     f"{_stages(old.expansions)} -> {_stages(new.expansions)}"
+                     if old.expansions != new.expansions
+                     else "its source changes; its declared expansions "
+                          "do not")
+            found.append(Structural(
+                name, RECIPE_CHANGED,
+                f"recipe {key!r} {old.version} -> {new.version}: {moved}",
+                False))
+    if getattr(was, "recipes_only", False) and not getattr(
+            now, "recipes_only", False):
+        found.append(Structural(
+            name, RECIPES_ONLY_REMOVED,
+            "recipes_only is lifted: any find or aggregate may read this "
+            "collection, not only the reviewed recipes", True))
+    elif getattr(now, "recipes_only", False) and not getattr(
+            was, "recipes_only", False):
+        found.append(Structural(
+            name, RECIPES_ONLY_ADDED,
+            "only the declared recipes may read this collection", False))
+    return found
+
+
+def _stages(expansions: Sequence) -> str:
+    return " | ".join("[" + ", ".join(next(iter(s)) for s in pipeline) + "]"
+                      for pipeline in expansions)
 
 
 def _masks(name: str, was: AdmissionSpec,

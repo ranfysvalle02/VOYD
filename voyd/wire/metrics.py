@@ -116,8 +116,13 @@ class Layout:
     traffic.
     """
 
-    def __init__(self, collections: tuple[str, ...]):
+    def __init__(self, collections: tuple[str, ...],
+                 recipes: tuple[tuple[str, str, str], ...] = ()):
         self.collections = tuple(sorted(collections))
+        # (collection, name, version) for every `@recipe`. Fixed at load
+        # like everything else here, and the version rides in the label so
+        # a dashboard can say which revision of a recipe served a read.
+        self.recipes = {(c, n): v for c, n, v in recipes}
         self.names: list[tuple[str, str | None, str | None]] = []
         for field in GLOBAL:
             self.names.append((field, None, None))
@@ -129,6 +134,9 @@ class Layout:
             for reason in (*REASONS, OTHER):
                 self.names.append(("refused_by_reason_total", collection,
                                    reason))
+        for (collection, name), version in sorted(self.recipes.items()):
+            self.names.append(("recipe_reads_total", collection,
+                               f"{name}@{version}"))
         self.size = len(self.names)
 
     def index(self, field: str, collection: str | None = None,
@@ -329,6 +337,12 @@ class Meter:
                     spare += count
             values[self.layout.index("refused_by_reason_total", name,
                                      OTHER)] = spare
+            for recipe, count in getattr(guard, "recipe_reads", {}).items():
+                version = self.layout.recipes.get((name, recipe))
+                if version is not None:
+                    values[self.layout.index(
+                        "recipe_reads_total", name,
+                        f"{recipe}@{version}")] = count
         self.slab.write(self.slot, values, time.time())
 
 
@@ -418,6 +432,11 @@ HELP = {
         "about a minute. This climbing alongside erasures_total is that "
         "ordering being honoured; erasures_total climbing while this stays "
         "flat is the window being left open."),
+    "recipe_reads_total": (
+        "counter",
+        "Reads served by each @recipe, labelled with the recipe's version: "
+        "a hash of its source and its declared expansions, so an audit can "
+        "say which revision of the pipeline answered."),
     "refused_by_reason_total": (
         "counter",
         "Refusals by reason. `deadline` climbing is the system working; "
@@ -467,7 +486,9 @@ def render(slab: Slab) -> bytes:
         labels = {}
         if collection:
             labels["collection"] = collection
-        if reason:
+        if reason and field == "recipe_reads_total":
+            labels["recipe"], _, labels["version"] = reason.rpartition("@")
+        elif reason:
             labels["reason"] = reason
         grouped.setdefault(field, []).append((labels, value))
 

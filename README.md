@@ -189,6 +189,7 @@ Beside them, and deliberately not one of them:
 | `rerank(collection, ...)` | the built-in one: maximal marginal relevance, so ten chunks of one contract stop crowding out nine other contracts |
 | `@stage(name)` | an aggregation stage mongod does not have, run by the boundary on admitted documents when a pipeline names it |
 | `@operator(name)` | an expression operator mongod does not have, used as a whole field value of `$addFields`/`$set`, per admitted document |
+| `@recipe(name, collection=)` | a named pipeline a client calls with `{$recipe: {name, params}}`; typed parameters are values, never names, and `@guard(..., recipes_only=True)` makes recipes the only way to read |
 
 None of them is an enforcement point. A rule is what the terminal pass
 re-asks and what `voyd-plan` can reason about; a transform gets no
@@ -593,6 +594,92 @@ the limits, and runnable scripts, is
 
 ---
 
+## Recipes: a named pipeline, reviewed once, called by name
+
+A SQL view for retrieval. The pipeline lives in the policy file, beside the
+rules; the client names it and hands over values:
+
+```python
+# voydfile.py
+@guard("tickets", recipes_only=True)
+class Tickets:
+    expire_at = deadline()
+    tenant_id = tenant()
+
+@recipe("support_context", collection="tickets")
+def support_context(q: str = "refund", k: int = 8):
+    return [
+        {"$vectorSearch": {"index": "v", "path": "embedding", "query": q,
+                           "numCandidates": k * 10, "limit": k}},
+        {"$addFields": {"clean": {"$redactPII": "$text"}}},  # an @operator
+    ]
+```
+
+```js
+db.tickets.aggregate([{ $recipe: { name: "support_context",
+                                   params: { q: "refund", k: 5 } } }])
+```
+
+**Expansion is the first thing the boundary does with the message.** Before
+the masked-reference check, the virtual-stage split, the derived-read
+push-down, the prefilter and the backfill. What reaches them is
+byte-for-byte the aggregate a client would have sent had it written the
+expansion by hand, so a recipe gets every guarantee that pipeline gets and
+meets every refusal it would meet: a recipe that groups on a masked field is
+refused, a recipe ending in `$count` has the rules pushed into it.
+
+**Parameters are data, never code.** A value must match the function's
+annotation — `str`, `int`, `float`, `bool`, `list[str]`, each optionally
+`| None` — so a document such as `{"$where": ...}` cannot arrive as one. A
+string beginning with `$` is refused outright, because in an expression it
+would be a field path (`"$ssn"`) or a variable (`"$$ROOT"`); wrapping it in
+`$literal` is right in an expression and wrong in a `$match`, and which one a
+parameter lands in is a fact about the recipe's code the boundary does not
+guess. Values reach the recipe only as keyword arguments. The returned
+pipeline is then checked again: one-key stages, no `$out`, `$merge`,
+`$changeStream`, `$where`, `$function` or `$accumulator`, and every key and
+every `$`-string in it must already appear in an expansion declared at load.
+A parameter may change a value and never a name, so `{field: q}` or
+`"$" + field` built from a parameter is refused unless a declared sample
+produced that exact name. Unknown, missing and mistyped parameters are
+driver errors naming the parameter.
+
+**Only `$limit` and `$skip` may follow `$recipe`**, and it must be the first
+stage. The `aggregate` must name the recipe's collection, and may not carry
+`let` or `explain`.
+
+**`recipes_only=True`** makes the recipes the only way to read the
+collection. `find` (by `_id` too), `aggregate`, `count`, `distinct`,
+`mapReduce`, their `explain`, and any `$lookup`/`$unionWith`/`$graphLookup`
+reaching it from another collection are refused unless they arrived as a
+`$recipe`. An application that fetches by id declares that as a recipe too
+— `{"$match": {"$expr": {"$eq": ["$_id", {"$toObjectId": id}]}}}` — and then
+that read has one reviewed home as well. Writes, `getMore` and
+`killCursors` are unaffected.
+
+**Checked at load:** a duplicate name, a non-callable, a parameter that is
+unannotated, `*args`, or of another type, a default or sample of the wrong
+type, a required parameter with no value in `samples=`, an expansion that is
+not a pipeline or names a stage neither MongoDB nor an `@stage` has, a
+recipe on a collection with no `@guard` (refused: nothing would govern it),
+and `recipes_only=True` with no recipe.
+
+**A recipe is part of the policy.** `voyd-plan` compares recipes by name
+and reports `recipe_added`, `recipe_removed` and `recipe_changed` with the
+stage lists of the declared expansions; none of those fails open, since the
+expansion still meets every rule. `recipes_only_removed` fails open.
+
+**Each recipe has a version**: twelve hex characters of a SHA-256 over its
+name, collection, source and declared expansions. It is printed at startup
+(`recipes [support_context@3f9c0a1b2d4e(q: str = 'refund', k: int = 8)]`),
+in each verbose expansion line, and as the `version` label of
+`voyd_recipe_reads_total{collection,recipe,version}`, so an audit can say
+which revision of a pipeline served a read.
+[`examples/recipes.py`](examples/recipes.py) runs one through pymongo and
+shows an injection and an ad-hoc read refused.
+
+---
+
 ## What a policy change would let through
 
 Because the per-document check is pure — a function of a document, a spec
@@ -980,6 +1067,18 @@ the second language.
 - The terminal pass after a step restores the fields the verdict reads
   from the admitted source, so a step cannot change them — even to a value
   the policy would accept.
+- A recipe's version hashes its own source and its declared expansions. A
+  helper function it calls is covered only as far as the declared
+  expansions exercise it, and a recipe whose output depends on the clock or
+  on anything outside its parameters has a version that does not describe
+  that.
+- A recipe's parameter cannot begin with `$`, so a query text such as
+  `"$100 refund"` is refused rather than served; there is no escape for it.
+  A name a parameter should be able to choose has to be produced by a
+  declared sample first.
+- `recipes_only=True` closes reads. `findAndModify` returns the document it
+  wrote and is left alone as a write, and a direct connection is outside
+  every guarantee here.
 - There is **no observe-only mode**. `voyd-wire` enforces or it is not
   in the path; it cannot yet run alongside a read logging what it *would*
   have refused. `voyd-plan --audit` answers most of that question without

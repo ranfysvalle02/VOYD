@@ -88,7 +88,8 @@ from . import seal
 from . import metrics
 from .policy import (Backfill, Budgets, Guard, _wants_a_caller, _was_reduced,
                      cascade_first, cascade_first_for_one, delete_reply,
-                     derive_on_insert, erase_first, guard_for, judge,
+                     derive_on_insert, erase_first, expand_recipe,
+                     guard_for, has_recipes, judge,
                      mask_reduced, refuse_masked_reference,
                      refuse_change_stream, refuse_client_vector,
                      refuse_scratch, refuse_unrewritable,
@@ -237,6 +238,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         sock_writer.write(payload)
         await sock_writer.drain()
 
+    cookbook = to_server and has_recipes(guards)
     try:
         while True:
             raw, _len, req_id, resp_to, opcode = await _next_message(
@@ -270,6 +272,22 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # like it was not implemented.
                 head = decode_sections(raw)
                 body = head[1] if head else {}
+
+                # A `$recipe` becomes the pipeline its policy names before
+                # anything below reads the message, so everything below
+                # sees exactly what a hand-written pipeline would -- and
+                # every refusal below applies to it. `recipes_only` is
+                # answered here too. See `policy/recipes.py`.
+                if cookbook:
+                    expanded, refused = expand_recipe(raw, req_id, resp_to,
+                                                      guards, verbose)
+                    if refused is not None:
+                        await send(back, refused)
+                        continue
+                    if expanded is not None:
+                        raw = expanded
+                        head = decode_sections(raw)
+                        body = head[1] if head else {}
 
                 # Who is asking, established *before* the command goes
                 # upstream, because the reply arrives on the other
@@ -858,7 +876,9 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
     # happens here and not lazily on the first scrape.
     slab = meters = None
     if metrics_port is not None:
-        layout = metrics.Layout(tuple(guards))
+        layout = metrics.Layout(tuple(guards), recipes=tuple(
+            (g.collection, r.name, r.version)
+            for g in guards.values() for r in g.spec.recipes))
         slab = metrics.Slab(workers, layout)
         meters = [metrics.Meter(layout, slab, i) for i in range(workers)]
         where_metrics = ("127.0.0.1" if metrics_bind in ("", "0.0.0.0")

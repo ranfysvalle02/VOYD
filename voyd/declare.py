@@ -714,9 +714,91 @@ def operator(name: str):
     return _virtual("operator", name, NATIVE_OPERATORS, OPERATORS)
 
 
+# Named pipelines, by name across the whole policy: a client sends only the
+# name, so two collections cannot each have their own `support_context`.
+RECIPES: dict[str, Any] = {}
+
+
+def recipe(name: str, *, collection: str,
+           samples: dict | list[dict] | None = None):
+    """Declare a named, governed pipeline. Returns the function unchanged.
+
+        @recipe("support_context", collection="tickets")
+        def support_context(q: str = "refund", k: int = 8):
+            return [{"$vectorSearch": {"index": "v", "path": "embedding",
+                                       "query": q, "numCandidates": k * 10,
+                                       "limit": k}},
+                    {"$addFields": {"clean": {"$redactPII": "$text"}}}]
+
+    Then, from any driver::
+
+        db.tickets.aggregate([{"$recipe": {"name": "support_context",
+                                           "params": {"q": "refund"}}}])
+
+    The boundary expands it before doing anything else with the message,
+    so the expansion meets every rule and every refusal a hand-written
+    pipeline would. Parameters are annotated ``str``, ``int``, ``float``,
+    ``bool`` or ``list[str]`` (optionally ``| None``) and checked against
+    the annotation; a string beginning with ``$`` is refused; and a call
+    whose expansion uses a key or ``$``-name that no declared expansion
+    used is refused, so a parameter can change a value and never a name.
+    ``samples=`` supplies the values a parameter with no default is
+    expanded at -- at load, and in ``voyd-plan``. Only ``$limit`` and
+    ``$skip`` may follow ``$recipe``. See ``voyd/wire/policy/recipes.py``.
+
+    Refused at load: a duplicate name, a non-callable, an unannotated or
+    ``*args`` parameter, a default or sample of the wrong type, an
+    expansion that is not a pipeline or uses ``$out``, ``$merge``,
+    ``$where`` or ``$function``, a stage name nothing declares, and -- in
+    ``load`` -- a recipe on a collection with no ``@guard``.
+    """
+    from .wire.policy.recipes import Recipe
+
+    if name in RECIPES:
+        raise ValueError(f"@recipe({name!r}) is declared twice. A client "
+                         f"sends only the name, so one name is one pipeline")
+
+    def decorate(fn):
+        made = Recipe(fn, name=name, collection=collection, samples=samples)
+        RECIPES[name] = made
+        if collection in REGISTRY:
+            REGISTRY[collection] = replace(
+                REGISTRY[collection], recipes=_recipes_for(collection))
+        return fn
+    return decorate
+
+
+def _recipes_for(collection: str) -> tuple:
+    return tuple(r for r in RECIPES.values() if r.collection == collection)
+
+
+def _check_recipes() -> None:
+    """What only the whole file can answer: every recipe has a guard, every
+    stage it names exists, and `recipes_only` has something to read by."""
+    for made in RECIPES.values():
+        if made.collection not in REGISTRY:
+            raise ValueError(
+                f"@recipe({made.name!r}) reads {made.collection!r}, which "
+                f"has no @guard. A recipe is a governed read, and on an "
+                f"unguarded collection nothing would govern it")
+        for pipeline in made.expansions:
+            for stage_ in pipeline:
+                key = next(iter(stage_))
+                if key not in NATIVE_STAGES and key not in STAGES:
+                    raise ValueError(
+                        f"@recipe({made.name!r}) uses {key}, which is "
+                        f"neither a MongoDB stage nor a declared @stage")
+    for collection, spec in REGISTRY.items():
+        if spec.recipes_only and not spec.recipes:
+            raise ValueError(
+                f"{collection}: recipes_only=True and no @recipe reads it. "
+                f"That is a collection nothing can read, which is a drop "
+                f"with extra steps")
+
+
 def guard(collection: str, *, lineage_field: str | None = None,
           on_delete: str = "forward", backfill: int = 4,
-          prefilter: bool = False):
+          prefilter: bool = False, recipes_only: bool = False):
     """Declare the rules for one collection. Returns the class unchanged.
 
     ``on_delete="revoke"`` gives a client's ``delete`` the better meaning:
@@ -741,6 +823,11 @@ def guard(collection: str, *, lineage_field: str | None = None,
     on the way out still runs and is still the guarantee. Needs an
     ``auto_embed()`` field (the one vector index this file builds) and rules
     that can all be asked as a query without knowing the caller.
+
+    ``recipes_only=True`` makes the collection's ``@recipe`` pipelines the
+    only way to read it: an ad-hoc ``find``, ``aggregate``, ``count`` or
+    ``distinct`` -- a ``find`` by ``_id`` included -- is refused, so the
+    retrieval logic has exactly one reviewed home. Writes are untouched.
 
     Raises at *load* time for a body it cannot compile -- an unknown value, a
     second deadline, no rule at all. A policy file is the one place an error
@@ -901,7 +988,9 @@ def guard(collection: str, *, lineage_field: str | None = None,
             # because a policy file that behaved differently depending on
             # decorator order would be the exact class of surprise this
             # loader exists to refuse.
-            transforms=tuple(TRANSFORMS.get(collection, ())))
+            transforms=tuple(TRANSFORMS.get(collection, ())),
+            recipes=_recipes_for(collection),
+            recipes_only=bool(recipes_only))
         OPTIONS[collection] = {"on_delete": on_delete,
                                "backfill": backfill,
                                "sealed": tuple(sealed_fields),
@@ -925,9 +1014,11 @@ def load(path: str) -> dict[str, AdmissionSpec]:
     TRANSFORMS.clear()
     STAGES.clear()
     OPERATORS.clear()
+    RECIPES.clear()
     runpy.run_path(path, run_name="voydfile")
     if not REGISTRY:
         raise ValueError(
             f"{path} declared no collections. A policy file with no @guard in "
             f"it would start a proxy that refuses nothing, silently")
+    _check_recipes()
     return dict(REGISTRY)
