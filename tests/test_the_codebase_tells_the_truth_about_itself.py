@@ -41,8 +41,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCES = sorted(
     [p for p in ROOT.rglob("*.py")
      if not any(x in p.parts for x in (".venv", "__pycache__", "dist",
-                                       ".mypy_cache", ".pytest_cache"))]
-    + [ROOT / n for n in ("README.md", "blog.md", "genius.md", "ethos.md",
+                                       ".mypy_cache", ".pytest_cache", ".claude"))]
+    + [ROOT / n for n in ("README.md", "blog.md", "blog2.md", "genius.md", "ethos.md",
                           "quickstart.md", "use-cases.md",
                           "docs/ranking-is-not-permission.md",
                           "docs/cosine.md", "docs/why-not-native.md",
@@ -164,7 +164,7 @@ def test_break_glass_does_not_leave_the_package_that_counts_it():
     """
     package = ROOT / "voyd" / "engine" / "admission"
     offenders = []
-    for source in ROOT.rglob("voyd/**/*.py"):
+    for source in (ROOT / "voyd").rglob("*.py"):
         if "__pycache__" in source.parts or package in source.parents:
             continue
         if "_unfiltered(" in source.read_text():
@@ -189,7 +189,7 @@ def test_a_subject_sentinel_never_escapes_to_a_caller():
     # inside the module that owns it.
     core = (ROOT / "voyd" / "engine" / "admission" / "core.py").read_text()
     assert core.count("_REDACTED") <= 5
-    for source in ROOT.rglob("voyd/**/*.py"):
+    for source in (ROOT / "voyd").rglob("*.py"):
         if "__pycache__" in source.parts or source.name == "core.py":
             continue
         assert "__redacted__" not in source.read_text(), (
@@ -328,7 +328,7 @@ def test_no_module_level_definition_in_voyd_is_unreferenced():
         for path in (ROOT / where).rglob("*.py"):
             if "__pycache__" not in str(path):
                 corpus += path.read_text()
-    for name in ("README.md", "blog.md", "genius.md", "ethos.md",
+    for name in ("README.md", "blog.md", "blog2.md", "genius.md", "ethos.md",
                  "quickstart.md", "use-cases.md"):
         corpus += (ROOT / name).read_text()
     for path in (ROOT / "docs").glob("*.md"):
