@@ -169,6 +169,12 @@ def pin_tenant(cmd: Mapping, field: str, value: Any
         return out, None
     stages = list(pipeline)
     lead = stages[0] if stages and isinstance(stages[0], Mapping) else {}
+    if list(lead) == ["$recipe"]:
+        # A recipe is a name, not yet a pipeline, and only `$limit` and
+        # `$skip` may follow it. It is pinned once it has been expanded,
+        # by `pin_expanded`, so the tenant lands in the pipeline the policy
+        # wrote rather than in front of a name.
+        return out, None
     name = next(iter(lead), None) if len(lead) == 1 else None
     at = 1 if name in LEADING_STAGES else 0
     here = stages[at] if len(stages) > at and isinstance(stages[at], Mapping) else {}
@@ -183,6 +189,32 @@ def pin_tenant(cmd: Mapping, field: str, value: Any
         stages.insert(at, {"$match": {field: value}})
     out["pipeline"] = stages
     return out, None
+
+
+def pin_expanded(raw: bytes, req_id: int, resp_to: int, head: Any,
+                 guards: Mapping[str, Guard], claims: Mapping | None,
+                 verbose: bool) -> tuple[bytes, Any, bytes | None]:
+    """A delegated recipe, once expanded, pinned to the token's tenant.
+
+    ``(raw, head, refusal)``. The same pin ``Delegations.admit`` gives any
+    other delegated aggregate, applied after ``expand_recipe`` because
+    before it there was no pipeline to pin into.
+    """
+    body = head[1] if head else None
+    if claims is None or not isinstance(body, Mapping):
+        return raw, head, None
+    name = body.get("aggregate")
+    guard = guards.get(name) if isinstance(name, str) else None
+    if guard is None or not guard.spec.tenant:
+        return raw, head, None
+    value, why = tenant_of(claims, guard.spec.tenant_via)
+    fixed = None
+    if not why:
+        fixed, why = pin_tenant(body, guard.spec.tenant, value)
+    if why or fixed is None:
+        return raw, head, _refused(req_id, name, why or "unpinnable", verbose)
+    raw = encode_sections(req_id, resp_to, head[0], fixed, head[2], head[3])
+    return raw, (head[0], fixed, head[2], head[3] or []), None
 
 
 class Delegations:

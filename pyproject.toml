@@ -52,6 +52,13 @@ rerank = [
 attest = [
     "cryptography>=42",
 ]
+# Recipes as MCP tools. `voyd-mcp` is an adapter in front of `voyd-wire`,
+# so its one dependency is the protocol; verifying the caller's token needs
+# `cryptography`, which is the attest extra's.
+mcp = [
+    "mcp>=1.10",
+    "cryptography>=42",
+]
 # Everything optional, which is one thing. Nothing here computes an
 # embedding: `auto_embed` means the index owns the vector and the server
 # produces it, so a client-side embedding library is not a dependency this
@@ -60,6 +67,7 @@ all = [
     "voyd[crypto]",
     "voyd[rerank]",
     "voyd[attest]",
+    "voyd[mcp]",
 ]
 # Every tool the suite and CI actually invoke, declared rather than inherited.
 # A linter or type checker that arrives transitively is advisory -- it holds
@@ -107,6 +115,8 @@ voyd-wire-health = "voyd.wire.health:main"
 # Needs no proxy, no cluster and no private key: JSON lines of documents in,
 # a verdict per document out. The tool an auditor runs.
 voyd-verify = "voyd.verify:main"
+# Recipes as MCP tools, called through `voyd-wire`. Enforces nothing.
+voyd-mcp = "voyd.mcp:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["voyd"]

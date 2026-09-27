@@ -87,7 +87,7 @@ from . import cascade
 from . import seal
 from . import metrics
 from .policy import (Backfill, Delegations, Guard, _wants_a_caller,
-                     _was_reduced, carries_token, cascade_first, cascade_first_for_one, delete_reply,
+                     _was_reduced, carries_token, pin_expanded, cascade_first, cascade_first_for_one, delete_reply,
                      derive_on_insert, erase_first, expand_recipe,
                      guard_for, has_recipes, judge,
                      mask_reduced, refuse_masked_reference,
@@ -320,6 +320,12 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     if expanded is not None:
                         raw = expanded
                         head = decode_sections(raw)
+                        raw, head, refused = pin_expanded(
+                            raw, req_id, resp_to, head, guards, delegated,
+                            verbose)
+                        if refused is not None:
+                            await send(back, refused)
+                            continue
                         body = head[1] if head else {}
 
                 # Who is asking, established *before* the command goes

@@ -770,6 +770,53 @@ mask staying on when the agent is narrower than its user, and refuses an
 agent without the scope. `voyd.testing.TestIssuer` mints the tokens with no
 network and no identity provider.
 
+### Recipes as MCP tools
+
+`voyd-mcp` serves a voydfile's recipes to any agent framework that speaks
+the Model Context Protocol, and calls them through `voyd-wire`:
+
+```bash
+pip install 'voyd[mcp]'
+voyd-mcp --policy voydfile.py \
+         --wire 'mongodb://svc:pw@voyd-wire:27017/?directConnection=true' \
+         --db support --transport http --port 8765
+```
+
+- **A tool is a recipe.** One per `@recipe`, named for it. Its description
+  is the first paragraph of the recipe function's docstring and the
+  collection it reads; its input schema is the recipe's typed parameters
+  (`str`, `int`, `float`, `bool`, `list[str]`, `| None`, defaults), read
+  from the same declarations the boundary checks a value against.
+- **The caller is the bearer token.** Over streamable HTTP the MCP
+  request's `Authorization: Bearer` token is the delegated identity,
+  verified with the same `verify` against the voydfile's `issuer()`s. No
+  believable token is a 401; `tools/list` shows only the recipes that
+  identity may call — the collection's `delegation=` and `scope=`, and the
+  recipe's own grants.
+- **A call is one aggregate through the wire.**
+  `aggregate([{"$recipe": {"name": ..., "params": ...}}],
+  comment={"voyd": token})`, on a connection to `voyd-wire` as a service
+  user the issuer names in `connection_users`. The result is the documents
+  as relaxed extended JSON, `_voyd` stamps included, and their
+  `voyd.attest.cite` citations, as structured content and as text. A
+  refusal is a tool error carrying the wire's own message. A read over
+  `--max-documents` or `--max-bytes` is an error, never a truncation.
+- **The wire is the boundary; the listing is a convenience.** `voyd-mcp`
+  enforces nothing. A tool it lists may still be refused, and a tool it
+  hides would be refused by the wire if called anyway: the refusal is the
+  guarantee, and there is one boundary to keep correct rather than two to
+  keep in agreement.
+- **stdio is local use.** `--transport stdio --token-env VAR` reads one
+  token at startup and makes every call as it. The wire still verifies it,
+  so the reach is exactly the token's — but it is the token of whoever set
+  the variable, not of whichever agent attached.
+
+No model is called and no prompt is written, and nothing is kept between
+requests. [`examples/mcp_agent.py`](examples/mcp_agent.py) starts
+`voyd-wire` with an attesting collection, lists and calls a tool with an
+MCP client holding a `TestIssuer` token, verifies the stamps on what came
+back, and prints the context an agent would hand its model.
+
 ---
 
 ## What a policy change would let through
@@ -1295,6 +1342,16 @@ the second language.
 - A lone `$vectorSearch` under delegation is not rewritten: its tenant is
   enforced per document on the way out, so a page can come back short by
   another tenant's hits.
+- `voyd-mcp` reads the policy file itself to decide what to list, so a
+  policy served by `voyd-wire` and a different one handed to `voyd-mcp`
+  list tools the wire refuses, or hide tools it would serve. Refusal stays
+  correct either way; the listing does not.
+- `voyd-mcp` over HTTP is a resource server only: it verifies bearer tokens
+  and advertises no authorization server of its own, so an MCP client has
+  to obtain the token from the identity provider some other way. It has no
+  TLS of its own either; put it behind a terminator.
+- A tool result is the whole read, bounded and never streamed; a read over
+  the bound fails rather than paging.
 - There is **no observe-only mode**. `voyd-wire` enforces or it is not
   in the path; it cannot yet run alongside a read logging what it *would*
   have refused. `voyd-plan --audit` answers most of that question without
@@ -1315,7 +1372,7 @@ at different lengths — each answers a question this one does not:
 | [`blog.md`](blog.md) | the story: every failure in this domain is disguised as its own opposite, including one in this project's own CI |
 | [`blog2.md`](blog2.md) | the sequel: the verbs after *refuse* — backfill, prefilter, mask, sanitize, stages, recipes, attest — and the one property they share |
 | [`examples/operators/README.md`](examples/operators/README.md) | every `voyd.contrib` stage and operator, with a snippet you can paste into a pipeline today |
-| [`whats-next.md`](whats-next.md) | the spec for delegated agent identity at the wire: what the request-level half does, and what remains — `MONGODB-OIDC`, receipts naming both parties, recipe grants, `voyd-mcp` |
+| [`whats-next.md`](whats-next.md) | the spec for delegated agent identity at the wire: what the request-level half does, and what remains — `MONGODB-OIDC`, receipts naming both parties, recipe grants; and `voyd-mcp`'s decisions |
 | [`docs/why-not-native.md`](docs/why-not-native.md) | change streams, `$where`, views, `$$USER_ROLES`, TTL, RBAC, Queryable Encryption — what each one gives you and where the line is |
 | [`docs/cosine.md`](docs/cosine.md) | the embedding-model failure, reproducible without an API key, with its provenance and its limits |
 | [`docs/ranking-is-not-permission.md`](docs/ranking-is-not-permission.md) | the long-form design argument for putting a boundary on the wire |

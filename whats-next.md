@@ -252,6 +252,25 @@ over streamable HTTP (and stdio for local use):
 `voyd-mcp` is a thin adapter on purpose: if it enforced anything itself,
 there would be two boundaries to keep in agreement.
 
+**Shipped.** `voyd/mcp.py`, the `voyd-mcp` entry point and the `mcp`
+extra; README "Recipes as MCP tools" is the reference. Its decisions:
+
+- the low-level MCP `Server` of the official SDK (2.x), not a decorator
+  framework, because the tool list is computed per identity on every
+  request;
+- HTTP is stateless streamable HTTP with JSON responses; the SDK's bearer
+  middleware answers a missing or unbelievable token with 401, and each
+  handler verifies the token again rather than trusting the middleware's
+  context;
+- the listing reads the collection's `delegation=` and `scope=` and the
+  recipe's `actors`/`scopes`, deferring to `recipes_for` in
+  `voyd/wire/policy/recipes.py` where the policy code provides it;
+- the result bound (`--max-documents`, `--max-bytes`) fails the call
+  rather than truncating it;
+- a delegated `$recipe` on a `tenant()` collection is pinned to the
+  token's tenant after expansion (`pin_expanded`), since before it there
+  is no pipeline to pin into.
+
 ---
 
 ## Threat model
@@ -327,6 +346,7 @@ there would be two boundaries to keep in agreement.
      actor's roles live as much as a user's.
 2. **0.4.0-b** — connection-level `MONGODB-OIDC` in both modes,
    receipts with principal and actor, recipe grants.
-3. **0.4.0** — `voyd-mcp`, an end-to-end example (an agent with a
-   delegated token calling a granted recipe over MCP and verifying the
-   stamps on what it got back), and the blog post that goes with it.
+3. **0.4.0** — `voyd-mcp` and its end-to-end example,
+   `examples/mcp_agent.py` (an agent with a delegated token calling a
+   granted recipe over MCP and verifying the stamps on what it got back):
+   shipped, decisions under §7. Remaining: the blog post that goes with it.
