@@ -31,11 +31,13 @@ to guard -- not from Node, not from Compass, not from a notebook, not from
 a shell that has never heard of VOYD -- because there is nothing to reach
 past.
 
-**Three connections of its own, named here rather than discovered.**
+**Four connections of its own, named here rather than discovered.**
 `--key-vault` holds the vault; `--ensure` connects with your credentials
 to *create* what the policy declares, then closes before the listener
-binds; and a policy declaring `lineage_field` opens one so a revocation
-can reach what was derived from the fact. Everything else forwards your
+binds; a policy declaring `lineage_field` opens one so a revocation
+can reach what was derived from the fact; and a policy declaring a
+`@stage` or `@operator` opens one for the temporary collections the
+native steps after it run on (`scratch.py`). Everything else forwards your
 credentials and adds no round trip, because the per-document check is
 pure. A property with an exception nobody wrote down is not a property,
 which is this package's whole complaint, so they are written down.
@@ -89,19 +91,26 @@ from .policy import (Backfill, Budgets, Guard, _wants_a_caller, _was_reduced,
                      derive_on_insert, erase_first, guard_for, judge,
                      mask_reduced, refuse_masked_reference,
                      refuse_change_stream, refuse_client_vector,
-                     refuse_unrewritable,
+                     refuse_scratch, refuse_unrewritable,
                      revoke_instead_of_delete,
                      revoke_instead_of_find_and_delete, rewrite_derived_read,
-                     rewrite_topology, rewrite_vector_search, seal_refusal, strip_compression,
-                     unsuppliable_claims)
+                     rewrite_topology, rewrite_vector_search, run_virtual,
+                     seal_refusal, split_virtual, strip_compression,
+                     unsuppliable_claims, Virtuals)
 
 from .codec import (OP_COMPRESSED, OP_MSG, Hangup, ProtocolError,
                     decode_op_msg, decode_sections, encode_sections,
                     read_message_async, uncompress_message)
 from .identity import Backchannel, CallerIdentity
 from .report import merge, summarise, tally
+from .scratch import Scratch
 from .upstream import (Upstream, keepalive, stepped_down,
                        upstream_ready, vault_uri)
+
+
+async def _unanswered(_command: dict) -> None:
+    """The answer from a pump that has no connection to ask on."""
+    return None
 
 
 async def _next_message(reader: asyncio.StreamReader,
@@ -179,6 +188,10 @@ class _Pump(TypedDict):
     budgets: Budgets
     backfill: Backfill
     draining: "asyncio.Event | None"
+    # The policy file's `@stage`/`@operator` functions and their bounds, and
+    # this worker's temporary collections. `None` when none are declared.
+    virtuals: "Virtuals | None"
+    scratch: "Scratch | None"
 
 
 async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -196,7 +209,9 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                reduced_cursors: set[int] | None = None,
                budgets: "Budgets | None" = None,
                backfill: "Backfill | None" = None,
-               draining: "asyncio.Event | None" = None) -> str:
+               draining: "asyncio.Event | None" = None,
+               virtuals: "Virtuals | None" = None,
+               scratch: "Scratch | None" = None) -> str:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -280,7 +295,15 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # A destructive verb this boundary cannot express as a
                 # revocation is answered here rather than forwarded: the
                 # reply goes straight back and the server never sees it.
-                refusal = refuse_unrewritable(raw, req_id, req_id, guards)
+                refusal = None
+                if virtuals:
+                    # Where virtual reads keep their temporary collections,
+                    # each one somebody's admitted output. First, because no
+                    # command naming it has a reading this boundary judges.
+                    refusal = refuse_scratch(body, req_id, virtuals.database,
+                                             verbose)
+                if refusal is None:
+                    refusal = refuse_unrewritable(raw, req_id, req_id, guards)
                 if refusal is None:
                     # A change stream is a read path whose payload the
                     # rules cannot see, so it is refused before it is
@@ -298,6 +321,35 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         who.claims if who else None)
                 if refusal is None and embeds:
                     refusal = refuse_client_vector(raw, req_id, req_id, embeds)
+                if refusal is None and virtuals:
+                    # A pipeline naming a `@stage` or `@operator` is split
+                    # here and answered here: the native prefix goes
+                    # upstream on this connection and is judged like any
+                    # reply, the virtual steps run on what was admitted, and
+                    # a native suffix runs on a temporary collection. Before
+                    # the push-down below, which would read an unknown stage
+                    # as a reduction. See `policy/stages.py`.
+                    virtual, refusal = split_virtual(body, req_id, guards,
+                                                     virtuals, verbose)
+                    if virtual is not None:
+                        if who is not None:
+                            await who.resolve(verbose)
+                        claims = who.claims if who else None
+                        tabs = Budgets()
+
+                        async def judged(reply: bytes) -> bytes:
+                            return await judge(reply, req_id, 0, guards,
+                                               verbose, vault, meter, claims,
+                                               tabs)
+                        answer = await run_virtual(
+                            virtual, req_id,
+                            ask=(back_channel.exchange if back_channel
+                                 else _unanswered),
+                            judge_reply=judged, scratch=scratch,
+                            virtuals=virtuals, caller=claims,
+                            verbose=verbose)
+                        await send(back, answer)
+                        continue
                 if refusal is None:
                     # A reduction gets the refusal pushed into its query, or
                     # it gets an error. Never neither: see the note above
@@ -584,7 +636,9 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                   embeds: Mapping | None = None,
                   meter: "metrics.Meter | None" = None,
                   half_close_seconds: float = 10.0,
-                  draining: "asyncio.Event | None" = None) -> None:
+                  draining: "asyncio.Event | None" = None,
+                  virtuals: "Virtuals | None" = None,
+                  scratch: "Scratch | None" = None) -> None:
     """One client connection, start to finish, as one coroutine pair.
 
     A MongoDB connection is stateful -- authentication, sessions, cursors
@@ -630,7 +684,8 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                          "who": CallerIdentity(channel),
                          "reduced": set(), "reduced_cursors": set(),
                          "budgets": Budgets(), "backfill": Backfill(),
-                         "draining": draining}
+                         "draining": draining, "virtuals": virtuals,
+                         "scratch": scratch}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
         back = asyncio.ensure_future(pump(up_r, client_w, up_w,
@@ -702,7 +757,8 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           workers: int = 1, metrics_port: int | None = None,
           metrics_bind: str = "127.0.0.1",
           vault_spec: dict | None = None,
-          auto_embed: dict | None = None) -> None:
+          auto_embed: dict | None = None,
+          virtuals: "Virtuals | None" = None) -> None:
     """Bind, announce, then run the boundary -- in this process or N of them.
 
     The listening socket is bound *here*, once, before any fork. That is
@@ -786,6 +842,13 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
               f"(auto_embed={model!r}); a client-supplied queryVector on it "
               f"is refused, because a vector from anywhere else is a hit in "
               f"a different space", flush=True)
+    if virtuals:
+        names = sorted({*virtuals.stages, *virtuals.operators})
+        print(f"voyd-wire: runs {', '.join(names)} itself, on admitted "
+              f"documents only; native steps after one run on temporary "
+              f"collections in {virtuals.database!r} (dropped after each "
+              f"read, swept past {virtuals.max_age_s:g}s), at most "
+              f"{virtuals.max_docs} documents per read", flush=True)
     print("voyd-wire: connect any driver to "
           f"mongodb{'+tls' if certfile else ''}://localhost:{listen_port}/"
           "?directConnection=true\n", flush=True)
@@ -813,7 +876,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                   drain_seconds=drain_seconds, advertise=advertise,
                   slab=slab, meters=meters, metrics_port=metrics_port,
                   metrics_bind=metrics_bind, vault_spec=vault_spec,
-                  auto_embed=auto_embed)
+                  auto_embed=auto_embed, virtuals=virtuals)
         return
 
     if slab is not None and metrics_port is not None:
@@ -823,7 +886,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                               max_connections=max_connections,
                               drain_seconds=drain_seconds,
                               advertise=advertise, vault_spec=vault_spec,
-                              auto_embed=auto_embed,
+                              auto_embed=auto_embed, virtuals=virtuals,
                               meter=meters[0] if meters else None))
     summarise(counts)
 
@@ -833,6 +896,7 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
                max_connections: int, drain_seconds: float,
                advertise: str | None, vault_spec: dict | None = None,
                auto_embed: dict | None = None,
+               virtuals: "Virtuals | None" = None,
                meter: "metrics.Meter | None" = None) -> dict:
     """One worker: accept, serve, drain, and report what it counted."""
     upstream = Upstream(target, verbose=verbose, meter=meter)
@@ -860,6 +924,13 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
                 g.cascade = lineage
     live = Live()
     stopping = asyncio.Event()
+    # Per worker, after the fork, like the two above. Opening it sweeps the
+    # temporary database once; `sweeping` keeps doing so until shutdown.
+    scratch = sweeper = None
+    if virtuals:
+        scratch = Scratch(vault_uri(target), virtuals, verbose=verbose)
+        await scratch.open()
+        sweeper = asyncio.ensure_future(scratch.sweeping(stopping))
 
     async def flushing(meter: "metrics.Meter") -> None:
         """Copy this worker's counters into shared memory, once a second.
@@ -908,7 +979,8 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
             await close(writer)
             return
         await session(reader, writer, upstream, guards, verbose, live,
-                      advertise, vault, embeds, meter, draining=stopping)
+                      advertise, vault, embeds, meter, draining=stopping,
+                      virtuals=virtuals, scratch=scratch)
 
     # A failed TLS handshake, a port scan, a plain-TCP probe against a TLS
     # listener: one client's problem, never the listener's. An earlier
@@ -998,6 +1070,10 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         await vault.aclose()
     if lineage is not None:
         await lineage.aclose()
+    if sweeper is not None:
+        await asyncio.gather(sweeper, return_exceptions=True)
+    if scratch is not None:
+        await scratch.aclose()
     return counted
 
 
@@ -1010,7 +1086,8 @@ def supervise(sock: socket.socket, workers: int, target: str,
               metrics_port: int | None = None,
               metrics_bind: str = "127.0.0.1",
                   vault_spec: dict | None = None,
-              auto_embed: dict | None = None) -> None:
+              auto_embed: dict | None = None,
+              virtuals: "Virtuals | None" = None) -> None:
     """N worker processes over one listening socket, and one honest total.
 
     Why processes at all, when the loop already removed the thread stacks:
@@ -1061,6 +1138,7 @@ def supervise(sock: socket.socket, workers: int, target: str,
                     max_connections=max_connections,
                     drain_seconds=drain_seconds, advertise=advertise,
                     vault_spec=vault_spec, auto_embed=auto_embed,
+                    virtuals=virtuals,
                     meter=meters[index] if meters else None))
             except BaseException:
                 traceback.print_exc()

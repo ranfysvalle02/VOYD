@@ -76,6 +76,18 @@ class Backchannel:
         permission path that distinction is the whole guarantee: not
         knowing who is asking has to refuse, never admit.
         """
+        raw = await self.exchange(command, timeout)
+        decoded = decode_op_msg(raw) if raw is not None else None
+        return dict(decoded[1]) if decoded else None
+
+    async def exchange(self, command: dict,
+                       timeout: float = 20.0) -> bytes | None:
+        """`ask`, but the reply as the bytes the server sent.
+
+        For a caller that must hand the reply to the same egress check a
+        client's own reply goes through -- a virtual stage's native prefix
+        -- and so must not have it decoded into something else first.
+        """
         if self.primary_w is None:
             return None
         self._next += 1
@@ -101,8 +113,7 @@ class Backchannel:
             return None
         finally:
             self.asked.pop(req_id, None)
-        decoded = decode_op_msg(raw)
-        return dict(decoded[1]) if decoded else None
+        return raw
 
 
 class CallerIdentity:

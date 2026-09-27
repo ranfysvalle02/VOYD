@@ -147,6 +147,9 @@ def test_the_public_surface_is_deliberate():
         # imports is one people get wrong. What it is *not* is an
         # enforcement point -- see `transforms.py` for why that is safe.
         "transform", "rerank",
+        # Pipeline names mongod does not have, run by the boundary on
+        # admitted documents. Neither is a rule. See `policy/stages.py`.
+        "stage", "operator",
         "__version__"}, (
         "the policy vocabulary changed; that is the package's whole public "
         "surface, so it is a deliberate edit and not an incidental one")

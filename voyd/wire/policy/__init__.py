@@ -24,6 +24,9 @@ trusting that a scroll was thorough.
                 the commands that would carry a masked value out
     prefilter   the opt-in copy of the rules in `$vectorSearch.filter`,
                 which narrows ranking and is never the guarantee
+    stages      pipeline names mongod does not have, run on admitted
+                documents only: the split, the refusals, the tracing
+                and the terminal pass after every virtual step
     refusals    refuse a command outright -- the verbs no rewrite is
                 narrow enough to cover, and the error a client raises
     handshake   the two rewrites that are about the connection itself
@@ -59,6 +62,9 @@ from .reads import _was_reduced as _was_reduced
 from .prefilter import (VECTOR_FILTER_OPERATORS, clause_paths, index_declares,
                         prefilter_clauses, prefilter_fields,
                         rewrite_vector_search)
+from .stages import (SOURCE_STAGES, StageError, VirtualContext, Virtuals,
+                     names_scratch, plan_virtual, refuse_scratch,
+                     run_virtual, split_virtual)
 from .refusals import (EXFILTRATING_STAGES, UNREWRITABLE,
                        client_vector_on_server_index, refuse_change_stream,
                        refuse_client_vector, streams_changes,
@@ -84,6 +90,11 @@ __all__ = [
     "rewrite_vector_search", "prefilter_clauses", "prefilter_fields",
     "clause_paths", "index_declares", "VECTOR_FILTER_OPERATORS",
     "refuse_masked_reference", "masked_fields",
+
+    # ---- pipeline vocabulary the server does not have ----
+    "Virtuals", "VirtualContext", "StageError", "plan_virtual",
+    "split_virtual", "run_virtual", "refuse_scratch", "names_scratch",
+    "SOURCE_STAGES",
 
     # ---- refuse a command outright ----
     "refuse_unrewritable", "refuse_client_vector", "seal_refusal",

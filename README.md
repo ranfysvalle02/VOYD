@@ -187,8 +187,10 @@ Beside them, and deliberately not one of them:
 |---|---|
 | `@transform(collection)` | shape the page — rerank, de-duplicate, annotate — inside the boundary, where it cannot widen a read |
 | `rerank(collection, ...)` | the built-in one: maximal marginal relevance, so ten chunks of one contract stop crowding out nine other contracts |
+| `@stage(name)` | an aggregation stage mongod does not have, run by the boundary on admitted documents when a pipeline names it |
+| `@operator(name)` | an expression operator mongod does not have, used as a whole field value of `$addFields`/`$set`, per admitted document |
 
-Neither is an enforcement point. A rule is what the terminal pass
+None of them is an enforcement point. A rule is what the terminal pass
 re-asks and what `voyd-plan` can reason about; a transform gets no
 credit for filtering and no attestation. See [`ethos.md`](ethos.md).
 
@@ -440,6 +442,131 @@ Without it the same arithmetic runs in Python, and past a measured
 ceiling the transform **declines and says so** rather than adding a
 second to every read: an optimisation is not allowed to be the slow
 part.
+
+---
+
+## Stages mongod does not have, run on what was admitted
+
+A policy file can add pipeline vocabulary. `@stage` declares a stage and
+`@operator` an expression operator; any driver, `mongosh` or Compass then
+uses them in an ordinary `aggregate`, mixed with native stages:
+
+```python
+# voydfile.py
+@operator("$wordCount")
+def word_count(doc, args, ctx):          # once per admitted document
+    return len(str(args).split())
+
+@stage("$stats")
+def stats(args, docs, ctx):              # once, over the admitted set
+    ctx.publish(args["as"], {"n": len(docs)})
+    return docs
+```
+
+```js
+db.manuals.aggregate([
+  { $match: { tenant_id: "acme" } },                     // mongod
+  { $addFields: { words: { $wordCount: "$text" } } },    // the boundary
+  { $stats: { as: "corpus" } },                          // the boundary
+  { $match: { $expr: { $gt: ["$words", 50] } } },        // mongod, on a temp
+  { $sort: { words: -1 } },                              // mongod, on a temp
+])
+```
+
+The pipeline is split at its virtual steps, and the order is the guarantee:
+
+```
+native prefix   →  the server, on the client's connection
+                →  every rule, sanitized(), mask()       (the ordinary egress)
+virtual step    →  the boundary, on admitted documents only
+                →  every rule again, on what it returned
+native suffix   →  mongod, on a temporary collection of that output
+                →  every rule again, on what carries a source _id
+                →  the client, as one batch
+```
+
+**A refused document never reaches a stage or an operator.** The prefix is
+drained through the same check a `find` goes through, so a step is handed
+what this caller would have been served, field for field — masked values
+already null, `sanitized()` text already neutralised, and the expired,
+revoked and cross-tenant rows simply absent.
+
+**A step cannot widen a read.** It may add fields, drop documents and
+reorder them. Every document it returns is traced by `_id` to one it was
+handed, at most as many times as it was handed; the rest are dropped. What
+survives is judged again with the fields the verdict reads put back from
+the admitted source, so a step cannot erase a mark, move a deadline or
+change a tenant on the way out.
+
+**Earlier outputs are ordinary inputs to later steps.** A field an operator
+sets is a field: a later operator reads it by path (`{"$redactEmails":
+"$summary"}`), a native `$match`, `$sort` or `$group` on the temporary
+collection filters on it. A stage can `ctx.publish(name, value)` — corpus
+statistics, an idf table — and every later step reads it as
+`$$name.field`: resolved in a virtual step's arguments, and passed as `let`
+to the native suffix. It is computed over admitted documents, so a pipeline
+variable carries nothing a refused row contributed. In virtual steps
+`$$NOW` (and `ctx.now`) is one instant for the whole read; in the native
+suffix it is the server's.
+
+**Operator arguments** arrive resolved: `"$field"` is that document's
+value, `"$$name"` a published value, `{"$literal": x}` is `x` untouched. An
+operator runs only as the whole value of one field in `$addFields`/`$set`,
+beside field paths, variables and literals. Anything richer that contains
+a registered operator is refused; so is setting `_id` or a dotted field.
+
+**The native steps after a virtual one run in mongod**, on a temporary
+collection, because mongod is the only engine that runs `$group` or
+`$setWindowFields` exactly. The prefix is never `$out` into one — that would
+copy refused documents somewhere no policy guards. What is written is what
+a virtual step produced from admitted documents and nothing else, stored
+in arrival order so a ranking survives, and dropped in a `finally`. A
+pipeline that ends in a virtual step creates nothing.
+
+**Reductions after a virtual step are safe, and before one they are not.**
+A `$group` *before* the first virtual step is refused, because its output
+has nothing left on it to judge. After one, it runs over a collection
+holding only admitted, masked, neutralised documents, so whatever it
+counts is a function of what this caller was allowed to see — the
+reduction a refused `aggregate` tells a client to do "on your side", done
+on the client's side of the boundary.
+
+**The temporary namespace is a database of its own**, `__voyd_tmp` by
+default (`--virtual-db`). Collection names are
+`t_<instance>_<unix seconds>_<uuid>`. Every proxy sweeps it at startup and
+every so often, dropping any collection older than `--virtual-max-age`
+(600 seconds) — its own and a crashed instance's alike — and drops nothing
+whose name it did not make, and nothing in any other database. No command
+naming that database is served through the boundary: not a `find`, an
+`aggregate`, a write, a change stream, `listCollections`, or a
+`renameCollection` out of it. `listDatabases` still shows its name, which
+carries an instance id, a time and a uuid and nothing else.
+
+**The connection it runs on is the boundary's own**, opened per worker
+from the same `--target` URI and credentials. Not the client's session:
+the client may address nothing in that database, and the boundary's
+housekeeping has no business inside a transaction the client is running.
+
+Refused outright, with an error the driver raises: `explain` of a pipeline
+with a virtual step; `$lookup`, `$unionWith` and `$graphLookup` anywhere;
+`$out` and `$merge`; after a virtual step, any stage that reads something
+other than its input (`$collStats`, `$currentOp`, `$documents`,
+`$vectorSearch`, …), because the suffix runs with the boundary's
+credentials; a virtual step on an unguarded collection or on
+`aggregate: 1`; on a `tenant()` collection, a pipeline whose prefix does not
+`$match` one tenant. More than `--virtual-max-docs` (1000) documents at any
+step is an error, never a truncation, and a step that raises fails the
+read with no partial result. A pipeline naming no registered name is
+forwarded untouched, and so is an unregistered `$foo`, which mongod
+answers as it always would.
+
+**VOYD never holds model credentials and never calls a model.** A stage is
+local, deterministic code in your policy file — chunking, counting,
+redacting, ranking. The boundary guarantees what context the client
+*receives*; the client owns inference, with its own key, on what it was
+served. [`examples/virtual_stages.py`](examples/virtual_stages.py) chains
+all of the above against a live, an expired, a revoked and another
+tenant's document, and then builds the prompt on the client side.
 
 ---
 
@@ -814,6 +941,22 @@ the second language.
   outside every guarantee here. A refused filter is strict on purpose: a
   bare key named `field`, `path` or `key` whose value is a masked field's
   name is refused as if it were a stage argument.
+- A read with a virtual step does **not stream**. The whole set is drained,
+  held in memory, bounded by `--virtual-max-docs`, and answered as one
+  batch; a `$vectorSearch` prefix gets neither backfill nor `prefilter`.
+- **Copies exist at rest.** A temporary collection holds a caller's
+  admitted, masked output for the length of the read, and for up to
+  `--virtual-max-age` if the proxy dies mid-read. It is refused through the
+  boundary, but a direct connection with rights on that database, the
+  server's profiler and logs, and `currentOp` all see it.
+- Virtual steps run with no time bound but the client's own. A slow one
+  holds its connection's request loop; nothing here cancels it.
+- A `budget()` or `distinct()` rule is re-asked of what a step returns, so
+  fields a step adds count against the budget, and duplicate rows from an
+  `$unwind` are judged as duplicates.
+- The terminal pass after a step restores the fields the verdict reads
+  from the admitted source, so a step cannot change them — even to a value
+  the policy would accept.
 - There is **no observe-only mode**. `voyd-wire` enforces or it is not
   in the path; it cannot yet run alongside a read logging what it *would*
   have refused. `voyd-plan --audit` answers most of that question without

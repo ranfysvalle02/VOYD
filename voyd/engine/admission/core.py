@@ -719,7 +719,8 @@ class AdmissionCore:
     def _egress(self, candidates: list[dict], *,
                 when: datetime | None = None,
                 tab: Any = None,
-                vector_search: bool = False) -> list[dict]:
+                vector_search: bool = False,
+                shape: bool = True) -> list[dict]:
         """Everything between a candidate set and the wire, in one place.
 
         The shape is a sandwich and the ordering is the guarantee:
@@ -750,8 +751,13 @@ class AdmissionCore:
 
         With no transforms declared this is the loop it replaced: one
         ``_admit`` per document, no pre-pass, no allocation, no cost.
+
+        ``shape=False`` is the terminal pass alone, for documents that were
+        already shaped once: the wire's virtual stages re-ask every rule of
+        what a stage returned, and running the transforms a second time
+        would reorder a page the client's own pipeline had just sorted.
         """
-        transforms = getattr(self.spec, "transforms", ())
+        transforms = getattr(self.spec, "transforms", ()) if shape else ()
         if not transforms:
             return [d for d in (self._admit(doc, when=when, tab=tab)
                                 for doc in candidates) if d is not None]
@@ -773,7 +779,7 @@ class AdmissionCore:
 
     def reachable(self, docs: Iterable[dict], *,
                   when: datetime | None = None,
-                  tab: Any = _UNSET) -> list[dict]:
+                  tab: Any = _UNSET, shape: bool = True) -> list[dict]:
         """Filter documents that arrived from somewhere else.
 
         This is the search path's entry point: ``$vectorSearch`` and
@@ -822,7 +828,7 @@ class AdmissionCore:
         # it anyway, on the only read path the proxy uses. The redaction
         # *count* genuinely has nowhere to go on a path returning a bare
         # list; the redaction itself is not optional.
-        kept = self._egress(candidates, when=when, tab=tab)
+        kept = self._egress(candidates, when=when, tab=tab, shape=shape)
         # The count still has nowhere to go -- this returns a list, not a
         # `Page` -- so `_harvest` below takes the private mark off without
         # reporting the number. The removal is not optional; the tally is.

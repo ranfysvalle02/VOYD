@@ -27,12 +27,12 @@ import sys
 from typing import Mapping
 
 from voyd import __version__
-from voyd.declare import OPTIONS, load
+from voyd.declare import OPERATORS, OPTIONS, STAGES, load
 
 from . import ensure
 from . import preflight
 from . import seal
-from .policy import Guard
+from .policy import Guard, Virtuals
 from .proxy import serve
 from .upstream import vault_uri
 from .report import summarise
@@ -343,6 +343,22 @@ def main(argv: list[str] | None = None) -> int:
                     help="the version of the boundary that is running, "
                          "which is the first thing anybody asks when it is "
                          "behaving unlike the last one")
+    ap.add_argument("--virtual-db", metavar="DB", default="__voyd_tmp",
+                    help="the database a @stage or @operator's native "
+                         "follow-on steps run in, on temporary collections. "
+                         "Refused to every client through this boundary, "
+                         "and swept of anything older than "
+                         "--virtual-max-age (default __voyd_tmp)")
+    ap.add_argument("--virtual-max-age", metavar="SECONDS", type=float,
+                    default=600.0,
+                    help="how old a temporary collection may be before any "
+                         "boundary's sweep drops it -- this one's or a "
+                         "crashed one's (default 600)")
+    ap.add_argument("--virtual-max-docs", metavar="N", type=int,
+                    default=1000,
+                    help="the most documents a read with a virtual step may "
+                         "hold at any step. Past it the read is an error, "
+                         "never a truncation (default 1000)")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -366,6 +382,22 @@ def main(argv: list[str] | None = None) -> int:
             # at the first query. Starting a boundary from a broken
             # declaration is how you get a door that is ajar.
             print(f"voyd-wire: {args.config}: {exc}", file=sys.stderr)
+            return 2
+    virtuals = None
+    if STAGES or OPERATORS:
+        try:
+            virtuals = Virtuals(dict(STAGES), dict(OPERATORS),
+                                database=args.virtual_db,
+                                max_docs=args.virtual_max_docs,
+                                max_age_s=args.virtual_max_age)
+        except ValueError as exc:
+            print(f"voyd-wire: {exc}", file=sys.stderr)
+            return 2
+        if args.virtual_db in (args.ensure, args.verify):
+            print(f"voyd-wire: --virtual-db {args.virtual_db!r} is the "
+                  f"database this policy guards; temporary collections need "
+                  f"one of their own, because the sweep drops what it finds "
+                  f"there", file=sys.stderr)
             return 2
     for c in args.guard:
         guards.setdefault(c, Guard.defaults(
@@ -415,7 +447,8 @@ def main(argv: list[str] | None = None) -> int:
               drain_seconds=args.drain,
               workers=args.workers, metrics_port=args.metrics,
               metrics_bind=args.metrics_bind,
-              vault_spec=vault_spec, auto_embed=_embeds_from(OPTIONS))
+              vault_spec=vault_spec, auto_embed=_embeds_from(OPTIONS),
+              virtuals=virtuals)
     except KeyboardInterrupt:
         summarise(guards)
     return 0

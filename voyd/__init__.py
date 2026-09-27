@@ -34,10 +34,11 @@ There is nothing here for an application to import and no handle for it to
 hold: a boundary you can forget to route a read through is not one.
 
 The check itself is pure -- no database, no connection, no I/O -- which is
-what lets it run inside a proxy at all. The proxy opens one connection of
-its own, and only when a policy declares ``lineage_field``: making a
-refusal reach what was derived from a fact is a write the caller did not
-issue, so it does not go on the caller's session.
+what lets it run inside a proxy at all. The proxy opens a connection of
+its own only when a policy asks for one: ``lineage_field``, because making
+a refusal reach what was derived from a fact is a write the caller did not
+issue, and ``@stage``/``@operator``, whose native follow-on steps run on
+temporary collections the caller is never allowed to address.
 
 The pieces, and everything else is mechanics:
 
@@ -88,8 +89,8 @@ from __future__ import annotations
 
 from .declare import (auto_embed, budget, clearance, deadline, distinct,
                       embedded_with, guard, holdable, mask, restricted_to,
-                      rerank, revocable, sanitized, sealed, subjects,
-                      tenant, transform)
+                      operator, rerank, revocable, sanitized, sealed,
+                      stage, subjects, tenant, transform)
 
 __version__ = "0.1.0"
 
@@ -102,5 +103,8 @@ __all__ = [
     # anyway: it is declared in the same file, and a vocabulary split
     # across two imports is a vocabulary people get wrong.
     "transform", "rerank",
+    # Pipeline vocabulary mongod does not have, run by the boundary on
+    # admitted documents only. Not rules either. See `policy/stages.py`.
+    "stage", "operator",
     "__version__",
 ]

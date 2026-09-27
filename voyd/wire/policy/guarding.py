@@ -150,6 +150,27 @@ class Guard:
 
     def filter(self, docs: list[dict], caller: dict | None = None,
                tab: Any = _FRESH_TAB) -> list[dict]:
+        kept = self._bound(docs, caller, tab, shape=True)
+        self.refused += len(docs) - len(kept)
+        self.admitted += len(kept)
+        return kept
+
+    def recheck(self, docs: list[dict], caller: dict | None = None
+                ) -> list[dict]:
+        """Every rule again, on documents this guard already admitted once.
+
+        The terminal pass for what a virtual stage returned. No transforms
+        -- they ran on the way in, and running them again would reorder a
+        page the client's pipeline had sorted -- and nothing added to
+        `admitted`, which counted these documents the first time. What this
+        pass refuses *is* counted, because it is a refusal like any other.
+        """
+        kept = self._bound(docs, caller, _FRESH_TAB, shape=False)
+        self.refused += len(docs) - len(kept)
+        return kept
+
+    def _bound(self, docs: list[dict], caller: dict | None, tab: Any, *,
+               shape: bool) -> list[dict]:
         handle = self.handle
         if self.needs_caller:
             # `for_caller` clones rather than assigns, and here that is
@@ -174,11 +195,8 @@ class Guard:
         # of everything except a cursor batch. `Budgets` hands in a tab
         # that spans the cursor; see its docstring for why a fresh one per
         # batch is a hole rather than an inefficiency.
-        kept = (handle.reachable(docs) if tab is _FRESH_TAB
-                else handle.reachable(docs, tab=tab))
-        self.refused += len(docs) - len(kept)
-        self.admitted += len(kept)
-        return kept
+        return (handle.reachable(docs, shape=shape) if tab is _FRESH_TAB
+                else handle.reachable(docs, tab=tab, shape=shape))
 
     @property
     def neutralised(self) -> int:

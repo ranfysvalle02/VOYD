@@ -588,6 +588,132 @@ def rerank(collection: str, *, diversity: float = 0.3,
     return transform(collection)(made)
 
 
+# Aggregation stages and expression operators mongod does not know, run by
+# the boundary, by the name a pipeline calls them. Kept apart from
+# TRANSFORMS for the reason TRANSFORMS is kept apart from REGISTRY: a
+# transform shapes every read of a collection, and one of these runs only
+# when a client's pipeline asks for it by name.
+STAGES: dict[str, Callable] = {}
+OPERATORS: dict[str, Callable] = {}
+
+# Names the server already means something by. Registering one would
+# silently change what an ordinary pipeline does, so both decorators refuse
+# them at load. The stage list is MongoDB 8's; the operator list is the
+# common expression vocabulary, not every operator there is.
+NATIVE_STAGES = frozenset({
+    "$addFields", "$bucket", "$bucketAuto", "$changeStream",
+    "$changeStreamSplitLargeEvent", "$collStats", "$count", "$currentOp",
+    "$densify", "$documents", "$facet", "$fill", "$geoNear", "$graphLookup",
+    "$group", "$indexStats", "$limit", "$listLocalSessions",
+    "$listSampledQueries", "$listSearchIndexes", "$listSessions", "$lookup",
+    "$match", "$merge", "$out", "$planCacheStats", "$project",
+    "$querySettings", "$rankFusion", "$redact", "$replaceRoot",
+    "$replaceWith", "$sample", "$scoreFusion", "$search", "$searchMeta",
+    "$set", "$setWindowFields", "$shardedDataDistribution", "$skip",
+    "$sort", "$sortByCount", "$unionWith", "$unset", "$unwind",
+    "$vectorSearch",
+})
+NATIVE_OPERATORS = frozenset({
+    "$abs", "$accumulator", "$add", "$allElementsTrue", "$and",
+    "$anyElementTrue", "$arrayElemAt", "$arrayToObject", "$avg", "$ceil",
+    "$cmp", "$concat", "$concatArrays", "$cond", "$convert", "$dateAdd",
+    "$dateDiff", "$dateFromString", "$dateToString", "$dateTrunc",
+    "$divide", "$eq", "$exp", "$filter", "$first", "$floor", "$function",
+    "$getField", "$gt", "$gte", "$ifNull", "$in", "$indexOfArray",
+    "$indexOfCP", "$isArray", "$isNumber", "$last", "$let", "$literal",
+    "$ln", "$log", "$lt", "$lte", "$ltrim", "$map", "$max", "$median",
+    "$mergeObjects", "$meta", "$min", "$mod", "$multiply", "$ne", "$not",
+    "$objectToArray", "$or", "$pow", "$range", "$reduce", "$regexFind",
+    "$regexFindAll", "$regexMatch", "$replaceAll", "$replaceOne",
+    "$reverseArray", "$round", "$rtrim", "$setField", "$size", "$slice",
+    "$sortArray", "$split", "$sqrt", "$strLenCP", "$strcasecmp",
+    "$substr", "$substrCP", "$subtract", "$sum", "$switch", "$toBool",
+    "$toDate", "$toDouble", "$toInt", "$toLong", "$toLower",
+    "$toObjectId", "$toString", "$toUpper", "$trim", "$trunc", "$type",
+    "$unsetField", "$zip",
+})
+
+
+def _virtual(kind: str, name: str, native: frozenset, table: dict):
+    """The one registration path both decorators share."""
+    if (not isinstance(name, str) or not name.startswith("$")
+            or len(name) < 2 or name.startswith("$$") or "." in name):
+        raise ValueError(
+            f"@{kind}({name!r}): named the way a pipeline calls it -- one "
+            f"'$', then a name")
+    if name in native:
+        raise ValueError(
+            f"@{kind}({name!r}): the server already has {name}. Declaring "
+            f"it here would change what every pipeline using it means, "
+            f"silently")
+    if name in table:
+        raise ValueError(f"@{kind}({name!r}) is declared twice. One name, "
+                         f"one function")
+
+    def decorate(fn):
+        if not callable(fn):
+            raise TypeError(f"@{kind}({name!r}) decorates {fn!r}, which "
+                            f"cannot be called")
+        table[name] = fn
+        return fn
+    return decorate
+
+
+def stage(name: str):
+    """Declare an aggregation stage the server does not know. Runs here.
+
+        @stage("$keywordRank")
+        def keyword_rank(args, docs, ctx):
+            words = args["words"]
+            return sorted(docs, key=lambda d: -score(d["text"], words))
+
+    Then, from any driver::
+
+        db.notes.aggregate([{"$match": {...}},
+                            {"$keywordRank": {"words": ["refund"]}},
+                            {"$limit": 3}])
+
+    ``fn(args, docs, ctx)`` gets the stage's argument (``$$name``
+    references resolved), copies of the documents the policy **admitted**
+    -- already masked and neutralised, never the refused ones -- and a
+    context: the collection, the database, the server-reported caller
+    claims, ``ctx.now``, and ``ctx.publish(name, value)`` for a value later
+    stages read as ``$$name``. It returns an iterable of documents and may
+    be ``async``. It may add fields, drop documents and reorder them; it
+    may not introduce one, so every output is traced by ``_id`` to an input
+    it was handed and every rule is asked again on the way out. Native
+    stages after it run in MongoDB on a temporary collection holding only
+    its output. See ``voyd/wire/policy/stages.py``.
+
+    Refused at load: a name that does not start with ``$``, one the server
+    already uses, one declared twice, a function that is not callable.
+    """
+    return _virtual("stage", name, NATIVE_STAGES, STAGES)
+
+
+def operator(name: str):
+    """Declare an expression operator the server does not know. Runs here.
+
+        @operator("$wordCount")
+        def word_count(doc, args, ctx):
+            return len(str(args).split())
+
+    Used as the whole value of one field in an ``$addFields`` or ``$set``::
+
+        {"$addFields": {"words": {"$wordCount": "$text"}}}
+
+    ``fn(doc, args, ctx)`` is called once per admitted document and returns
+    the field's value. ``args`` arrive resolved: ``"$field"`` is that
+    document's value, ``"$$name"`` a value an earlier stage published, and
+    ``{"$literal": x}`` is ``x`` untouched. The rest of that stage may only
+    be field paths, variables and literals; anything richer that contains a
+    registered operator is refused rather than half-evaluated. Everything
+    else about a stage applies: admitted documents only, and every rule
+    again after.
+    """
+    return _virtual("operator", name, NATIVE_OPERATORS, OPERATORS)
+
+
 def guard(collection: str, *, lineage_field: str | None = None,
           on_delete: str = "forward", backfill: int = 4,
           prefilter: bool = False):
@@ -797,6 +923,8 @@ def load(path: str) -> dict[str, AdmissionSpec]:
     REGISTRY.clear()
     OPTIONS.clear()
     TRANSFORMS.clear()
+    STAGES.clear()
+    OPERATORS.clear()
     runpy.run_path(path, run_name="voydfile")
     if not REGISTRY:
         raise ValueError(
