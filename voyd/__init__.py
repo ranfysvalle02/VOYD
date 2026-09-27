@@ -93,7 +93,7 @@ from .declare import (auto_embed, clearance, deadline, distinct,
                       operator, recipe, rerank, revocable, sanitized,
                       sealed, stage, subjects, tenant, transform)
 
-__version__ = "0.4.0a1"
+__version__ = "0.4.0"
 
 __all__ = [
     # The declarative policy surface -- everything `voydfile.py` needs.
