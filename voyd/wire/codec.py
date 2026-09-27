@@ -57,6 +57,7 @@ except ImportError:  # pragma: no cover - the one dependency, and it is pymongo'
     sys.exit("pip install pymongo   (for the bson library)")
 
 OP_MSG = 2013
+OP_QUERY = 2004
 OP_COMPRESSED = 2012
 
 # OP_MSG flagBits. Bit 0 says a CRC32C trailer follows the sections; we clear

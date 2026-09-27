@@ -62,12 +62,15 @@ class Signer:
         self.policy = policy
 
     def stamp(self, doc: Mapping, *, ns: str, caller: str | None,
-              read: str, pos: int, prev: str | None) -> dict:
+              read: str, pos: int, prev: str | None,
+              principal: str | None = None, actor: str | None = None,
+              token: str | None = None) -> dict:
         served = attest.strip(doc)
         payload = {"v": attest.VERSION, "alg": attest.ALG, "kid": self.kid,
                    "policy": self.policy, "ns": ns, "id": served["_id"],
                    "digest": attest.digest(served), "caller": caller,
-                   "iat": _now(), "read": read, "pos": pos, "prev": prev}
+                   "iat": _now(), "read": read, "pos": pos, "prev": prev,
+                   "principal": principal, "actor": actor, "token": token}
         served[attest.FIELD] = attest.sign(payload, self.key)
         return served
 
@@ -138,8 +141,15 @@ class Stamps:
             self._asked[req_id] = collection
 
     def stamp(self, raw: bytes, resp_to: int, guards: Mapping,
-              claims: Mapping | None) -> bytes:
-        """Stamp a reply to a request `note` recorded. Else forward as is."""
+              claims: Mapping | None,
+              connection: Mapping | None = None) -> bytes:
+        """Stamp a reply to a request `note` recorded. Else forward as is.
+
+        ``claims`` is whom the read was judged as; ``connection`` is whom
+        the deployment says the socket is. They differ for a delegated
+        read, and the stamp names both: ``caller`` is the connection, and
+        ``principal``/``actor``/``token`` the delegated identity.
+        """
         if not self._asked and not self._more:
             return raw
         collection = self._asked.pop(resp_to, None)
@@ -170,15 +180,20 @@ class Stamps:
         if read is None:
             read = _Read()
         cursor_id = cursor.get("id")
-        caller = (attest.caller_hash(claims.get("user"), claims.get("db"))
-                  if claims else None)
+        parties = _parties(claims)
+        delegated = bool(claims and claims.get("delegated"))
+        server = connection if delegated else claims
+        caller = (attest.caller_hash(server.get("user"), server.get("db"))
+                  if server else None)
         out, n = [], 0
         for doc in cursor[key]:
             if not isinstance(doc, Mapping) or "_id" not in doc:
                 out.append(doc)
                 continue
             stamped = signer.stamp(doc, ns=ns, caller=caller, read=read.id,
-                                   pos=read.pos, prev=read.prev)
+                                   pos=read.pos, prev=read.prev,
+                                   principal=parties[0], actor=parties[1],
+                                   token=parties[2])
             read.prev = attest.link(stamped[attest.FIELD])
             read.pos += 1
             n += 1
@@ -195,6 +210,22 @@ class Stamps:
         reply["cursor"][key] = out
         return encode_op_msg(int.from_bytes(raw[4:8], "little", signed=True),
                              resp_to, flags, reply)
+
+
+def _parties(claims: Mapping | None
+             ) -> tuple[str | None, str | None, str | None]:
+    """(principal hash, actor hash, token hash) of a delegated identity's
+    claims, or three ``None`` for a plain one."""
+    if not claims or not claims.get("delegated"):
+        return None, None, None
+    principal = claims.get("principal")
+    actor = claims.get("actor")
+    token = claims.get("token")
+    return (attest.principal_hash(principal.get("user"))
+            if isinstance(principal, Mapping) else None,
+            attest.actor_hash(actor.get("user"))
+            if isinstance(actor, Mapping) else None,
+            token if isinstance(token, str) else None)
 
 
 def _signer(guards: Mapping, collection: str) -> Signer | None:

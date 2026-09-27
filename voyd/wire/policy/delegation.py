@@ -43,9 +43,11 @@ import time
 from typing import Any, Callable, Mapping
 
 from voyd.engine.admission.sides import tenant_of
-from voyd.engine.delegation import Identity, Refusal, peek_issuer, verify
+from voyd.engine.delegation import (Identity, Refusal, narrow, peek_issuer,
+                                    verify)
 
-from ..codec import LAZY, decode_op_msg, encode_op_msg, encode_sections
+from ..codec import (LAZY, decode_op_msg, encode_op_msg,
+                     encode_sections)
 from .guarding import Guard, guard_for
 from .reads import LEADING_STAGES, reducing_stage
 
@@ -215,6 +217,33 @@ def pin_expanded(raw: bytes, req_id: int, resp_to: int, head: Any,
         return raw, head, _refused(req_id, name, why or "unpinnable", verbose)
     raw = encode_sections(req_id, resp_to, head[0], fixed, head[2], head[3])
     return raw, (head[0], fixed, head[2], head[3] or []), None
+def collection_refuses(guard: Guard, claims: Mapping | None) -> str | None:
+    """Why this collection will not be read as ``claims``, or ``None``.
+
+    The collection's own terms, asked of an identity already believed:
+    ``delegation="forbidden"`` refuses an agent, ``"required"`` refuses a
+    plain read and a token with no actor, and ``scope=`` refuses a token
+    that was not granted it. Pure; ``Delegations`` and ``recipes_for`` ask
+    the same function so the two cannot disagree.
+    """
+    spec = guard.spec
+    delegated = bool(claims and claims.get("delegated"))
+    if delegated and spec.delegation == "forbidden":
+        return "agents may not read this collection (delegation='forbidden')"
+    if spec.delegation == "required":
+        if not delegated:
+            return ("this collection is read only by a delegated identity "
+                    "-- an agent acting for a user -- and this command "
+                    "carries none. Pass comment={'voyd': token}")
+        if claims is not None and claims.get("actor") is None:
+            return ("the token is not believed (no_actor): this is a user's "
+                    "token, not an agent acting for one")
+    if delegated and spec.scope and claims is not None:
+        held = list(claims.get("scopes") or ())
+        if spec.scope not in held:
+            return (f"this read needs the scope {spec.scope!r}, and the "
+                    f"token grants {held or 'none'}")
+    return None
 
 
 class Delegations:
@@ -222,6 +251,11 @@ class Delegations:
 
     Per connection, like every other piece of state the pump shares
     between its two directions, because request ids and cursors are.
+
+    A connection authenticated with ``MONGODB-OIDC`` is **bound**: every
+    read on it is delegated as the identity its token named, with no
+    token in the ``comment``, and a token that is in one may only narrow
+    it (``narrow`` in ``voyd/engine/delegation.py``). See ``policy/oidc.py``.
     """
 
     def __init__(self, issuers: Mapping, keys: Callable[[str, float], Any],
@@ -233,12 +267,31 @@ class Delegations:
         self.by_request: dict[int, tuple[dict, tuple, int | None]] = {}
         # cursor id -> (identity key, claims)
         self.by_cursor: dict[int, tuple[tuple, dict]] = {}
+        # The connection's own identity, when it authenticated with a token.
+        self.bound: Identity | None = None
+        self.bound_claims: dict | None = None
 
     @staticmethod
     def wanted(guards: dict[str, Guard], issuers: Mapping) -> bool:
         return bool(issuers) or any(
             g.spec.delegation != "allowed" or g.spec.scope
             for g in guards.values())
+
+    def bind(self, identity: Identity | None) -> None:
+        """Make ``identity`` this connection's, or unbind with ``None``."""
+        self.bound = identity
+        self.bound_claims = identity.claims() if identity is not None else None
+
+    def verify(self, token: str) -> Identity | Refusal:
+        """A connection-level token, believed or not. No collection terms:
+        those are asked per read, of whatever the connection is bound to."""
+        claimed = peek_issuer(token)
+        expected = self.issuers.get(claimed) if claimed else None
+        if expected is None:
+            return Refusal("issuer", f"the token names issuer {claimed!r}, "
+                                     f"which this policy does not trust")
+        now = self.clock()
+        return verify(token, self.keys(expected.url, now), now, expected)
 
     def admit(self, raw: bytes, req_id: int, resp_to: int,
               head: tuple | None, guards: dict[str, Guard],
@@ -270,27 +323,37 @@ class Delegations:
                 # A cursor keeps the identity that opened it.
                 self.by_request[req_id] = (bound[1], bound[0], more)
                 return raw, head, bound[1], None
-            if (guard is not None and verb is not None
-                    and guard.spec.delegation == "required"):
+            if self.bound is None or verb is None:
+                if (guard is not None and verb is not None
+                        and guard.spec.delegation == "required"):
+                    return raw, head, None, _refused(
+                        req_id, named, "this collection is read only by a "
+                        "delegated identity -- an agent acting for a user -- "
+                        "and this command carries none. Pass "
+                        "comment={'voyd': token}", verbose)
+                return raw, head, None, None
+            # A bound connection: every read is delegated as its identity.
+            assert self.bound_claims is not None
+            claims, key = self.bound_claims, self.bound.key
+            why = (collection_refuses(guard, claims)
+                   if guard is not None else None)
+            if why:
+                return raw, head, None, _refused(req_id, named, why, verbose)
+            stripped = dict(body)
+        else:
+            # From here the command carries a token, and it is never
+            # forwarded with it, whatever is decided below.
+            if verb is None:
                 return raw, head, None, _refused(
-                    req_id, named, "this collection is read only by a "
-                    "delegated identity -- an agent acting for a user -- and "
-                    "this command carries none. Pass comment={'voyd': token}",
-                    verbose)
-            return raw, head, None, None
-
-        # From here the command carries a token, and it is never forwarded
-        # with it, whatever is decided below.
-        if verb is None:
-            return raw, head, None, _refused(
-                req_id, named, "a delegated identity authorises reads "
-                "(find, aggregate, count, distinct, getMore, explain) and "
-                "nothing else", verbose)
-        claims, key, refusal = self._identity(token, guard, named, req_id,
-                                              connection, verbose)
-        if refusal is not None:
-            return raw, head, None, refusal
-        assert claims is not None and stripped is not None
+                    req_id, named, "a delegated identity authorises reads "
+                    "(find, aggregate, count, distinct, getMore, explain) and "
+                    "nothing else", verbose)
+            got, key, refusal = self._identity(token, guard, named, req_id,
+                                               connection, verbose)
+            if refusal is not None:
+                return raw, head, None, refusal
+            assert got is not None and stripped is not None
+            claims = got
 
         if more is not None:
             bound = self.by_cursor.get(more)
@@ -323,8 +386,9 @@ class Delegations:
         flags = head[0] if head else 0
         ident = head[2] if head else None
         docs = head[3] if head else None
-        raw = encode_sections(req_id, resp_to, flags, stripped, ident, docs)
-        head = (flags, stripped, ident, docs or [])
+        if token is not None or stripped != body:
+            raw = encode_sections(req_id, resp_to, flags, stripped, ident, docs)
+            head = (flags, stripped, ident, docs or [])
         self.by_request[req_id] = (claims, key, more)
         return raw, head, claims, None
 
@@ -342,30 +406,41 @@ class Delegations:
         if expected is None:
             return no(f"the token names issuer {claimed!r}, which this policy "
                       f"does not trust")
-        if connection is None:
-            return no("the deployment did not say who this connection is, so "
-                      "whether it may act for anybody is unknown")
-        user = connection.get("user")
-        if not expected.permits_connection(user):
-            return no(f"connection user {user!r} may not present tokens from "
-                      f"{expected.url}: a request identity narrows the "
-                      f"connection's and must be one it may act for")
+        if self.bound is None:
+            if connection is None:
+                return no("the deployment did not say who this connection "
+                          "is, so whether it may act for anybody is unknown")
+            user = connection.get("user")
+            if not expected.permits_connection(user):
+                return no(f"connection user {user!r} may not present tokens "
+                          f"from {expected.url}: a request identity narrows "
+                          f"the connection's and must be one it may act for")
         if guard is not None and guard.spec.delegation == "forbidden":
             return no("agents may not read this collection "
                       "(delegation='forbidden')")
         now = self.clock()
         verdict = verify(token, self.keys(expected.url, now), now, expected,
                          require_actor=(guard is not None
-                                        and guard.spec.delegation == "required"))
+                                        and guard.spec.delegation == "required"
+                                        and (self.bound is None
+                                             or self.bound.actor is None)))
         if isinstance(verdict, Refusal):
             return no(f"the token is not believed ({verdict.reason}): "
                       f"{verdict.detail}")
         assert isinstance(verdict, Identity)
-        scope = guard.spec.scope if guard is not None else None
-        if scope and scope not in verdict.scopes:
-            return no(f"this read needs the scope {scope!r}, and the token "
-                      f"grants {list(verdict.scopes) or 'none'}")
-        return verdict.claims(), verdict.key, None
+        if self.bound is not None:
+            # A request identity on an authenticated connection narrows it.
+            narrowed = narrow(self.bound, verdict)
+            if isinstance(narrowed, Refusal):
+                return no(f"a request token may only narrow this "
+                          f"connection's identity ({narrowed.reason}): "
+                          f"{narrowed.detail}")
+            verdict = narrowed
+        claims = verdict.claims()
+        why = collection_refuses(guard, claims) if guard is not None else None
+        if why:
+            return no(why)
+        return claims, verdict.key, None
 
     def reply(self, resp_to: int, raw: bytes) -> dict | None:
         """The identity a reply is judged as, or ``None`` for the connection's.

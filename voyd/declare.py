@@ -468,7 +468,8 @@ def issuer(url: str, *, audience: str | tuple[str, ...] | list[str],
            actor_tenant: str | None = None,
            algorithms: tuple[str, ...] | list[str] = ("RS256", "ES256", "EdDSA"),
            skew: float = 60, refresh: float = 300,
-           max_age: float = 3600) -> None:
+           max_age: float = 3600,
+           server_user: str = "{principal}") -> None:
     """Trust delegated tokens from one identity provider.
 
         issuer("https://login.example.com",
@@ -501,6 +502,13 @@ def issuer(url: str, *, audience: str | tuple[str, ...] | list[str],
     the boundary does not hold is a refusal, never a fetch, and keys older
     than ``max_age`` seconds refuse every delegated read until a refresh
     succeeds.
+
+    ``server_user`` is for ``voyd-wire --oidc=passthrough``: the name the
+    deployment reports (``connectionStatus``, in ``$external``) for a
+    connection that authenticated with this issuer's token, written with
+    ``{principal}`` standing for the token's mapped principal -- Atlas
+    names workload users ``"<idp-name>/{principal}"``. A connection whose
+    server-reported user is anything else is closed.
 
     Refused at load: ``none`` or any ``HS*`` algorithm, an algorithm this
     verifier does not implement, a plain ``http://`` key URL, an empty
@@ -561,6 +569,13 @@ def issuer(url: str, *, audience: str | tuple[str, ...] | list[str],
         raise ValueError(f"issuer({url!r}): max_age={max_age} is shorter than "
                          f"refresh={refresh}, so the keys would go stale "
                          f"between every two refreshes")
+    if (not isinstance(server_user, str)
+            or server_user.count("{principal}") != 1
+            or server_user.replace("{principal}", "").count("{")
+            or server_user.replace("{principal}", "").count("}")):
+        raise ValueError(f"issuer({url!r}): server_user={server_user!r} must "
+                         f"name {{principal}} exactly once and nothing else "
+                         f"in braces")
     try:
         import cryptography  # noqa: F401
     except ImportError as exc:
@@ -572,7 +587,7 @@ def issuer(url: str, *, audience: str | tuple[str, ...] | list[str],
         tenant=tenant, actor_roles=actor_roles, actor_groups=actor_groups,
         actor_tenant=actor_tenant, algorithms=algs, skew=float(skew),
         connection_users=users, refresh=float(refresh),
-        max_age=float(max_age))
+        max_age=float(max_age), server_user=server_user)
 
 
 # Every collection declared in a loaded policy file, by name, with the
@@ -881,7 +896,9 @@ RECIPES: dict[str, Any] = {}
 
 
 def recipe(name: str, *, collection: str,
-           samples: dict | list[dict] | None = None):
+           samples: dict | list[dict] | None = None,
+           actors: tuple[str, ...] | list[str] = (),
+           scopes: tuple[str, ...] | list[str] = ()):
     """Declare a named, governed pipeline. Returns the function unchanged.
 
         @recipe("support_context", collection="tickets")
@@ -907,11 +924,22 @@ def recipe(name: str, *, collection: str,
     expanded at -- at load, and in ``voyd-plan``. Only ``$limit`` and
     ``$skip`` may follow ``$recipe``. See ``voyd/wire/policy/recipes.py``.
 
+    ``actors=`` and ``scopes=`` grant the recipe: it then runs only for a
+    delegated identity (an agent acting for a user, verified against an
+    ``issuer()``) whose actor's mapped id is listed *and* whose token
+    holds at least one listed scope -- each condition that is given must
+    hold. A plain read of a granted recipe is refused. The grant is part
+    of the recipe's version, and ``voyd-plan`` reports a widened grant as
+    fail-open.
+
     Refused at load: a duplicate name, a non-callable, an unannotated or
     ``*args`` parameter, a default or sample of the wrong type, an
     expansion that is not a pipeline or uses ``$out``, ``$merge``,
     ``$where`` or ``$function``, a stage name nothing declares, and -- in
-    ``load`` -- a recipe on a collection with no ``@guard``.
+    ``load`` -- a recipe on a collection with no ``@guard``, a grant
+    written as one string rather than a list, a grant with no ``issuer()``
+    to verify the identity it names, and a grant on a collection with
+    ``delegation="forbidden"``, which no delegated identity may read.
     """
     from .wire.policy.recipes import Recipe
 
@@ -920,7 +948,8 @@ def recipe(name: str, *, collection: str,
                          f"sends only the name, so one name is one pipeline")
 
     def decorate(fn):
-        made = Recipe(fn, name=name, collection=collection, samples=samples)
+        made = Recipe(fn, name=name, collection=collection, samples=samples,
+                      actors=actors, scopes=scopes)
         RECIPES[name] = made
         if collection in REGISTRY:
             REGISTRY[collection] = replace(
@@ -942,6 +971,17 @@ def _check_recipes() -> None:
                 f"@recipe({made.name!r}) reads {made.collection!r}, which "
                 f"has no @guard. A recipe is a governed read, and on an "
                 f"unguarded collection nothing would govern it")
+        if made.granted and not ISSUERS:
+            raise ValueError(
+                f"@recipe({made.name!r}) is granted to {made.grant()}, and "
+                f"the policy declares no issuer(). A grant names a delegated "
+                f"identity, and without an issuer nothing could present one")
+        if made.granted and REGISTRY[made.collection].delegation == "forbidden":
+            raise ValueError(
+                f"@recipe({made.name!r}) is granted to {made.grant()} on "
+                f"{made.collection!r}, which declares delegation='forbidden'. "
+                f"Only a delegated identity may run it and none may read "
+                f"there, so nobody could")
         for pipeline in made.expansions:
             for stage_ in pipeline:
                 key = next(iter(stage_))

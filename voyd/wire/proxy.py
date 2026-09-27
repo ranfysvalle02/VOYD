@@ -86,7 +86,7 @@ from typing import Mapping, TypedDict
 from . import cascade
 from . import seal
 from . import metrics
-from .policy import (Backfill, Delegations, Guard, _wants_a_caller,
+from .policy import (Backfill, Delegations, Guard, Oidc, _wants_a_caller,
                      _was_reduced, carries_token, pin_expanded, cascade_first, cascade_first_for_one, delete_reply,
                      derive_on_insert, erase_first, expand_recipe,
                      guard_for, has_recipes, judge,
@@ -99,7 +99,7 @@ from .policy import (Backfill, Delegations, Guard, _wants_a_caller,
                      seal_refusal, split_virtual, strip_compression,
                      unsuppliable_claims, Virtuals)
 
-from .codec import (OP_COMPRESSED, OP_MSG, Hangup, ProtocolError,
+from .codec import (OP_COMPRESSED, OP_MSG, OP_QUERY, Hangup, ProtocolError,
                     decode_op_msg, decode_sections, encode_sections,
                     read_message_async, uncompress_message)
 from .identity import Backchannel, CallerIdentity
@@ -107,8 +107,8 @@ from .jwks import Trust
 from .report import merge, summarise, tally
 from .scratch import Scratch
 from .stamp import Stamps
-from .upstream import (Upstream, keepalive, stepped_down,
-                       upstream_ready, vault_uri)
+from .upstream import (Upstream, UpstreamAuthError, authenticate, keepalive,
+                       stepped_down, upstream_ready, vault_uri)
 
 
 async def _unanswered(_command: dict) -> None:
@@ -201,6 +201,9 @@ class _Pump(TypedDict):
     # `issuer()` or a collection with `delegation=`/`scope=`. `None`
     # otherwise. See `policy/delegation.py`.
     delegations: "Delegations | None"
+    # This connection's `MONGODB-OIDC` conversation, under `--oidc`.
+    # `None` otherwise. See `policy/oidc.py`.
+    oidc: "Oidc | None"
 
 
 async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -221,7 +224,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                virtuals: "Virtuals | None" = None,
                scratch: "Scratch | None" = None,
                stamps: "Stamps | None" = None,
-               delegations: "Delegations | None" = None) -> str:
+               delegations: "Delegations | None" = None,
+               oidc: "Oidc | None" = None) -> str:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -251,9 +255,12 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
 
     def asking(delegated: dict | None) -> dict | None:
         # Whom this command is judged as: its own verified delegated
-        # identity when it carries one, the connection's otherwise.
+        # identity when it carries one, the connection's otherwise -- and
+        # a connection that authenticated with a token is that token's.
         if delegated is not None:
             return delegated
+        if delegations is not None and delegations.bound_claims is not None:
+            return delegations.bound_claims
         return who.claims if who else None
     try:
         while True:
@@ -278,6 +285,9 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     await send(writer, raw)
                     continue
                 raw, opcode = expanded, OP_MSG
+            if oidc is not None and to_server and opcode == OP_QUERY:
+                # A legacy handshake may carry a token too; see `legacy`.
+                raw = oidc.legacy(raw)
             if opcode == OP_MSG and to_server:
                 raw = strip_compression(raw, req_id, resp_to)
                 # `decode_sections`, not `decode_op_msg`: a write command
@@ -288,6 +298,28 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # like it was not implemented.
                 head = decode_sections(raw)
                 body = head[1] if head else {}
+
+                # A connection authenticating with a token: the SASL
+                # conversation is read (and, terminating, answered) here,
+                # and a passthrough success is checked against what the
+                # deployment says this connection now is *before* the next
+                # command goes anywhere. See `policy/oidc.py`.
+                if oidc is not None:
+                    if oidc.check is not None and who is not None:
+                        who.asked, who.claims = False, None
+                        status = await who.back.ask(
+                            {"connectionStatus": 1, "$db": "admin"})
+                        why = oidc.settle(status)
+                        if why is not None:
+                            print(f"  voyd: closing a MONGODB-OIDC "
+                                  f"connection: {why}", flush=True)
+                            return "closed"
+                    raw, answer = oidc.request(raw, req_id, body)
+                    if answer is not None:
+                        await send(back, answer)
+                        continue
+                    head = decode_sections(raw)
+                    body = head[1] if head else {}
 
                 # A delegated identity in the `comment` is verified and
                 # taken out first of all, so nothing below -- and nothing
@@ -305,6 +337,11 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         await send(back, refused)
                         continue
                     body = head[1] if head else {}
+                    if (delegated is not None and stamps is not None
+                            and who is not None):
+                        # A stamp names the connection as well as the
+                        # parties, so the connection must be known.
+                        await who.resolve(verbose)
 
                 # A `$recipe` becomes the pipeline its policy names before
                 # anything below reads the message, so everything below
@@ -313,7 +350,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # answered here too. See `policy/recipes.py`.
                 if cookbook:
                     expanded, refused = expand_recipe(raw, req_id, resp_to,
-                                                      guards, verbose)
+                                                      guards, verbose,
+                                                      asking(delegated))
                     if refused is not None:
                         await send(back, refused)
                         continue
@@ -410,7 +448,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                             # terminal recheck, so the stamp signs the
                             # answer the client is about to receive.
                             answer = stamps.stamp(answer, req_id, guards,
-                                                  claims)
+                                                  claims,
+                                                  who.claims if who else None)
                         await send(back, answer)
                         continue
                 if refusal is None:
@@ -564,12 +603,14 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 if back_channel is not None and back_channel.answer(resp_to,
                                                                     raw):
                     continue
+                if oidc is not None:
+                    oidc.reply(resp_to, raw)
                 # Judged as whoever the request was judged as: a delegated
                 # command's reply, and every batch of a cursor it opened,
                 # as its principal and actor.
                 claims = delegations.reply(resp_to, raw) if delegations else None
                 if claims is None:
-                    claims = who.claims if who else None
+                    claims = asking(None)
                 if advertise:
                     rebuilt = rewrite_topology(raw, req_id, resp_to, advertise)
                     if rebuilt is not None:
@@ -613,7 +654,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     # Last of all, after the cut: a stamp signs exactly the
                     # document the client receives, at the position it
                     # receives it in.
-                    raw = stamps.stamp(raw, resp_to, guards, claims)
+                    raw = stamps.stamp(raw, resp_to, guards, claims,
+                                       who.claims if who else None)
             await send(writer, raw)
     except Hangup:
         # Not an error, and the one disconnect the caller may still be
@@ -737,6 +779,19 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
             upstream.invalidate(type(exc).__name__)
             await close(client_w)
             return
+        if trust is not None and trust.oidc == "terminate" \
+                and trust.upstream_auth is not None:
+            # Terminating: the token is the client's only identity, and
+            # the deployment sees the boundary's own credentials.
+            try:
+                await authenticate(up_r, up_w, *trust.upstream_auth)
+            except (UpstreamAuthError, OSError, ConnectionError,
+                    ProtocolError, Hangup) as exc:
+                print(f"voyd-wire: the deployment refused the boundary's "
+                      f"own credentials: {exc}", flush=True)
+                await close(up_w)
+                await close(client_w)
+                return
 
         rewritten: set[int] = set()
         # Annotated, because an unannotated dict splatted into `**kwargs`
@@ -749,6 +804,11 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
         # be handed *identical* state or the boundary means different things
         # depending on which way a message is travelling.
         channel = Backchannel(up_w)
+        delegations = (Delegations(trust.issuers if trust else {},
+                                   trust.keys if trust else _no_keys)
+                       if Delegations.wanted(
+                           guards, trust.issuers if trust else {})
+                       else None)
         common: _Pump = {"guards": guards, "verbose": verbose,
                          "rewritten": rewritten, "upstream": upstream,
                          "advertise": advertise, "vault": vault,
@@ -762,12 +822,11 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                          "stamps": (Stamps() if any(
                              g.signer is not None for g in guards.values())
                              else None),
-                         "delegations": (
-                             Delegations(trust.issuers if trust else {},
-                                         trust.keys if trust else _no_keys)
-                             if Delegations.wanted(
-                                 guards, trust.issuers if trust else {})
-                             else None)}
+                         "delegations": delegations,
+                         "oidc": (Oidc(trust.oidc, delegations,
+                                       verbose=verbose)
+                                  if trust is not None and trust.oidc
+                                  and delegations is not None else None)}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
         back = asyncio.ensure_future(pump(up_r, client_w, up_w,
@@ -905,6 +964,19 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                   f"roles, which is the same question asked of an answer "
                   f"the deployment will vouch for",
                   flush=True)
+    if trust is not None and trust.oidc:
+        # Its own line because it changes what authenticating here means.
+        print(f"voyd-wire: connections authenticate with MONGODB-OIDC "
+              f"({trust.oidc}): the token is verified here and binds the "
+              f"connection, so every read on it is delegated as the "
+              f"identity it names"
+              + (". Upstream, the boundary is itself: "
+                 + (f"SCRAM-SHA-256 as {trust.upstream_auth[0]!r}"
+                    if trust.upstream_auth else "unauthenticated")
+                 + "; a bound connection may only read"
+                 if trust.oidc == "terminate" else
+                 ". The deployment validates it too, and must agree whom "
+                 "it names"), flush=True)
     for _url, issuer in sorted((trust.issuers if trust else {}).items()):
         # Its own line because it changes who a read is judged as. An
         # operator asking why one pooled connection returned two users'

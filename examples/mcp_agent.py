@@ -63,7 +63,7 @@ POLICY = textwrap.dedent('''
                 {{"$limit": k}}]
 
     @recipe("billing_export", collection="notes",
-            samples={{"month": "2026-01"}})
+            samples={{"month": "2026-01"}}, actors=("finance-bot",))
     def billing_export(month: str):
         """Every note of a month, for finance."""
         return [{{"$match": {{"month": month}}}}]
@@ -108,12 +108,11 @@ def main() -> None:
         policy_path.write_text(policy)
         direct[db].notes.insert_many([dict(d) for d in CORPUS])
 
-        # billing_export is granted to the finance agent alone. The
-        # listing reads a recipe's `actors`; it is set on the loaded recipe
-        # here, which is what `@recipe(..., actors=...)` declares.
+        # billing_export is granted to the finance agent alone, by
+        # `@recipe(..., actors=...)`: the listing leaves it out for the
+        # support agent, and the wire refuses it if called anyway.
         with boundary(policy, "--quiet", "--attest-key", str(key)) as uri:
             recipes, specs, issuers = voyd_mcp.load(str(policy_path))
-            recipes["billing_export"].actors = ("finance-bot",)
             trust = Trust(issuers)
             assert trust.preload() == []
             wire = MongoClient(uri, serverSelectionTimeoutMS=8000)

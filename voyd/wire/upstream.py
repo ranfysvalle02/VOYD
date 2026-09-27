@@ -275,3 +275,136 @@ def vault_uri(target: str) -> str:
     if "://" in target:
         return target
     return f"mongodb://{target}/?directConnection=true"
+
+
+# ---- the boundary's own credentials, for `--oidc=terminate` ---------------
+
+class UpstreamAuthError(Exception):
+    """The deployment refused the boundary's own credentials."""
+
+
+def credentials(target: str) -> tuple[str, str, str] | None:
+    """``(user, password, source)`` from ``--target``, or ``None``.
+
+    Only SCRAM-SHA-256: the one mechanism a terminating boundary speaks for
+    itself. Anything else named in the URI raises, at startup, rather than
+    connecting unauthenticated and finding out on the first read.
+    """
+    if "://" not in target:
+        return None
+    from pymongo.uri_parser import parse_uri
+
+    parsed = parse_uri(target)
+    user, password = parsed.get("username"), parsed.get("password")
+    if not user:
+        return None
+    options = parsed["options"]
+    mechanism = options.get("authMechanism") or options.get("authmechanism")
+    if mechanism not in (None, "SCRAM-SHA-256"):
+        raise ValueError(f"--oidc=terminate authenticates upstream with "
+                         f"SCRAM-SHA-256 only, and --target names "
+                         f"{mechanism}")
+    source = (options.get("authSource") or options.get("authsource")
+              or parsed.get("database")
+              or "admin")
+    return str(user), str(password or ""), str(source)
+
+
+def scram_client_first(user: str, nonce: str) -> str:
+    """The client-first-message-bare of RFC 5802."""
+    name = user.replace("=", "=3D").replace(",", "=2C")
+    return f"n={name},r={nonce}"
+
+
+def scram_proof(password: str, client_first_bare: str, server_first: str,
+                nonce: str) -> tuple[str, bytes]:
+    """``(client-final message, expected server signature)``. RFC 7677.
+
+    Pure, so the RFC's own test vector checks it with no server at all.
+    """
+    import base64
+    import hashlib
+    import hmac
+
+    from pymongo.saslprep import saslprep
+
+    fields = dict(part.split("=", 1) for part in server_first.split(",")
+                  if "=" in part)
+    if (not fields.get("r", "").startswith(nonce) or "s" not in fields
+            or "i" not in fields):
+        raise UpstreamAuthError("the server's SCRAM reply does not continue "
+                                "this conversation")
+    iterations = int(fields["i"])
+    if iterations < 4096:
+        raise UpstreamAuthError(f"the server asks for {iterations} SCRAM "
+                                f"iterations, fewer than 4096")
+    salted = hashlib.pbkdf2_hmac("sha256", saslprep(password).encode(),
+                                 base64.b64decode(fields["s"]), iterations)
+    client_key = hmac.digest(salted, b"Client Key", "sha256")
+    stored = hashlib.sha256(client_key).digest()
+    without_proof = f"c=biws,r={fields['r']}"
+    auth_message = f"{client_first_bare},{server_first},{without_proof}"
+    signature = hmac.digest(stored, auth_message.encode(), "sha256")
+    proof = bytes(a ^ b for a, b in zip(client_key, signature))
+    server_key = hmac.digest(salted, b"Server Key", "sha256")
+    expected = hmac.digest(server_key, auth_message.encode(), "sha256")
+    return (f"{without_proof},p={base64.b64encode(proof).decode()}",
+            expected)
+
+
+async def authenticate(reader: asyncio.StreamReader,
+                       writer: asyncio.StreamWriter, user: str,
+                       password: str, source: str) -> None:
+    """SCRAM-SHA-256 on a fresh upstream socket, before any client byte.
+
+    Used only when the boundary terminates ``MONGODB-OIDC``: the client's
+    token is the only identity, and the deployment sees the boundary. The
+    server's signature is checked, so a socket that answers as some other
+    server does not get a connection's worth of reads.
+    """
+    import base64
+    import hmac
+    import secrets
+
+    from bson import Binary
+
+    from .codec import decode_op_msg, encode_op_msg, read_message_async
+
+    async def ask(req_id: int, command: dict) -> Mapping:
+        writer.write(encode_op_msg(req_id, 0, 0, command))
+        await writer.drain()
+        raw, *_ = await read_message_async(reader)
+        decoded = decode_op_msg(raw)
+        reply = decoded[1] if decoded else {}
+        if not reply.get("ok"):
+            raise UpstreamAuthError(
+                f"the deployment refused the boundary's credentials: "
+                f"{reply.get('errmsg') or 'no reply'}")
+        return reply
+
+    nonce = base64.b64encode(secrets.token_bytes(24)).decode()
+    first = scram_client_first(user, nonce)
+    got = await ask(1, {"saslStart": 1, "mechanism": "SCRAM-SHA-256",
+                        "payload": Binary(f"n,,{first}".encode()),
+                        "autoAuthorize": 1,
+                        "options": {"skipEmptyExchange": True},
+                        "$db": source})
+    final, expected = scram_proof(password, first,
+                                  bytes(got["payload"]).decode(), nonce)
+    done = await ask(2, {"saslContinue": 1,
+                         "conversationId": got["conversationId"],
+                         "payload": Binary(final.encode()), "$db": source})
+    fields = dict(part.split("=", 1)
+                  for part in bytes(done["payload"]).decode().split(",")
+                  if "=" in part)
+    if not hmac.compare_digest(base64.b64decode(fields.get("v", "")),
+                               expected):
+        raise UpstreamAuthError("the server's SCRAM signature does not "
+                                "verify: this is not the deployment the "
+                                "credentials belong to")
+    req = 3
+    while not done.get("done"):
+        done = await ask(req, {"saslContinue": 1,
+                               "conversationId": got["conversationId"],
+                               "payload": Binary(b""), "$db": source})
+        req += 1

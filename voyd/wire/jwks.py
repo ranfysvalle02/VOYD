@@ -54,6 +54,11 @@ class Trust:
         self.issuers = dict(issuers)
         self.clock = clock
         self.reader = reader
+        # `voyd-wire --oidc`: whether connections authenticate with these
+        # issuers' tokens (`passthrough` or `terminate`), and for
+        # `terminate` the boundary's own upstream SCRAM credentials.
+        self.oidc: str | None = None
+        self.upstream_auth: tuple[str, str, str] | None = None
         self.held: dict[str, dict[str, dict]] = {}
         self.at: dict[str, float] = {}
         self.why: dict[str, str] = {}

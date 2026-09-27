@@ -112,11 +112,19 @@ class Issuer:
     # last good set may grow before delegated reads refuse.
     refresh: float = 300.0
     max_age: float = 3600.0
+    # What the deployment calls a connection that authenticated with one
+    # of these tokens itself (`--oidc=passthrough`). `{principal}` is the
+    # token's mapped principal.
+    server_user: str = "{principal}"
 
     def permits_connection(self, user: Any) -> bool:
         if "*" in self.connection_users:
             return True
         return isinstance(user, str) and user in self.connection_users
+
+    def server_name(self, principal: str) -> str:
+        """The server-reported user a passthrough connection must be."""
+        return self.server_user.replace("{principal}", principal)
 
     def describe(self) -> str:
         return (f"{self.url} (audience {list(self.audience)}, "
@@ -346,6 +354,60 @@ def token_hash(payload: Mapping, token: str) -> str:
     jti = payload.get("jti")
     basis = f"jti\0{jti}" if isinstance(jti, str) and jti else f"token\0{token}"
     return hashlib.sha256(b"voyd/delegation\0" + basis.encode()).hexdigest()
+
+
+def _same_side(bound: Mapping, asked: Mapping, side: str
+               ) -> dict | str:
+    """One side of a request identity, narrowed by the connection's."""
+    if asked.get("user") != bound.get("user"):
+        return (f"the request token's {side} is {asked.get('user')!r}, and "
+                f"this connection authenticated as {bound.get('user')!r}")
+    if asked.get("tenant") != bound.get("tenant"):
+        return (f"the request token puts the {side} in tenant "
+                f"{asked.get('tenant')!r}, and the connection's in "
+                f"{bound.get('tenant')!r}")
+    out = dict(asked)
+    for claim in ("roles", "groups"):
+        out[claim] = sorted(set(asked.get(claim) or ())
+                            & set(bound.get(claim) or ()))
+    return out
+
+
+def narrow(bound: Identity, asked: Identity) -> Identity | Refusal:
+    """A request identity on a connection that already has one. Pure.
+
+    A connection authenticated with ``MONGODB-OIDC`` is bound to the
+    identity its token named. A command on it may carry a token of its
+    own, and that token may only **narrow**: the same issuer, the same
+    principal, the same actor if the connection had one, the same
+    tenants -- and the roles, groups and scopes are the intersection of
+    the two. A connection with no actor may take one per command, which
+    is the intersection too: the actor's view only ever narrows its
+    principal's. Anything else is refused, never merged.
+    """
+    if asked.issuer != bound.issuer:
+        return Refusal(ISSUER, f"the request token is from {asked.issuer!r}, "
+                               f"and this connection authenticated with "
+                               f"{bound.issuer!r}")
+    principal = _same_side(bound.principal, asked.principal, "principal")
+    if isinstance(principal, str):
+        return Refusal(NO_PRINCIPAL, principal)
+    actor: Mapping[str, Any] | None = asked.actor
+    if bound.actor is not None:
+        if asked.actor is None:
+            return Refusal(NO_ACTOR, "this connection authenticated as an "
+                                     "agent, and a request token without "
+                                     "that actor would drop it")
+        got = _same_side(bound.actor, asked.actor, "actor")
+        if isinstance(got, str):
+            return Refusal(NO_ACTOR, got)
+        actor = got
+    return Identity(issuer=asked.issuer, principal=principal, actor=actor,
+                    scopes=tuple(sorted(set(asked.scopes)
+                                        & set(bound.scopes))),
+                    token=asked.token,
+                    expires=min(asked.expires, bound.expires),
+                    key=asked.key)
 
 
 def verify(token: Any, keys: Mapping[str, Mapping] | None, now: float,

@@ -11,15 +11,32 @@ virtual stage has had its turn. The stamp lives in the document, under one
 reserved field::
 
     {"_id": ..., "text": "...", "_voyd": {
-        "v": 1, "alg": "Ed25519", "kid": "3f9c0a1b2c3d4e5f",
+        "v": 2, "alg": "Ed25519", "kid": "3f9c0a1b2c3d4e5f",
         "policy": "<sha256 of the policy file>",
         "ns": "app.notes", "id": <the _id>,
         "digest": "<sha256 of the served document, minus _voyd>",
         "caller": "<sha256 of the server-reported user, or null>",
+        "principal": "<sha256 of the user a delegated read was for, or null>",
+        "actor": "<sha256 of the agent that read it, or null>",
+        "token": "<hash of the delegated token's jti, or null>",
         "iat": "2026-09-27T12:00:00.123Z",
         "read": "<random id shared by one read>", "pos": 0,
         "prev": "<link of the stamp at pos-1, or null>",
         "sig": "<base64url Ed25519 signature>"}}
+
+``caller`` is always the connection: whoever the deployment says
+authenticated on the socket the read arrived on. A delegated read -- an
+agent acting for a user, verified by the boundary (see
+``voyd/engine/delegation.py``) -- also names the two parties it was served
+to, ``principal`` and ``actor``, and the token that said so, each as a
+domain-separated hash for the reason ``caller`` is one. ``principal_hash``
+and ``actor_hash`` recompute them from a name, so an auditor who knows whom
+to ask about can check a stamp without the stamp naming anybody. A plain
+read carries ``null`` in all three.
+
+Version 1 stamps, which predate those three fields, still verify: the
+version names the set of fields that were signed. A check that asks about
+a principal or an actor fails on a v1 stamp, because it cannot answer.
 
 Everything a verifier needs is here and in this file: a public key and the
 document as it was received. No proxy, no database, no network.
@@ -96,7 +113,8 @@ from bson.datetime_ms import DatetimeMS
 
 __all__ = [
     "FIELD", "ALG", "VERSION", "Verdict", "Report",
-    "canonical", "digest", "link", "caller_hash",
+    "canonical", "digest", "link", "caller_hash", "principal_hash",
+    "actor_hash",
     "verify", "verify_all", "strip", "cite",
     "generate", "kid_of", "load_private_key", "load_public_keys",
     "public_pem", "sign",
@@ -104,7 +122,8 @@ __all__ = [
 
 FIELD = "_voyd"
 ALG = "Ed25519"
-VERSION = 1
+VERSION = 2
+VERSIONS = (1, 2)
 
 # Domain separation. A signature over a stamp can never be replayed as a
 # signature over a document digest, a caller hash, or anything else this
@@ -113,13 +132,24 @@ _DOC = b"voyd-doc-v1\n"
 _STAMP = b"voyd-stamp-v1\n"
 _LINK = b"voyd-link-v1\n"
 _CALLER = b"voyd-caller-v1\n"
+_PRINCIPAL = b"voyd-principal-v1\n"
+_ACTOR = b"voyd-actor-v1\n"
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-# The stamp's own fields, in the order they are documented. `sig` is the one
-# that is not signed.
-_SIGNED = ("v", "alg", "kid", "policy", "ns", "id", "digest", "caller",
-           "iat", "read", "pos", "prev")
+# The stamp's own fields, in the order they are documented, per version.
+# `sig` is the one that is not signed.
+_SIGNED_V1 = ("v", "alg", "kid", "policy", "ns", "id", "digest", "caller",
+              "iat", "read", "pos", "prev")
+_SIGNED = (*_SIGNED_V1, "principal", "actor", "token")
+_FIELDS = {1: _SIGNED_V1, 2: _SIGNED}
+
+
+def _signed(stamp: Mapping) -> tuple[str, ...]:
+    """The fields this stamp's version signs. Unknown versions sign the
+    current set, and fail verification on their version first."""
+    v = stamp.get("v")
+    return _FIELDS.get(v, _SIGNED) if isinstance(v, int) else _SIGNED
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +249,7 @@ def digest(doc: Mapping) -> str:
 
 def link(stamp: Mapping) -> str:
     """What the next stamp in the same read carries as ``prev``."""
-    payload = {k: stamp.get(k) for k in _SIGNED}
+    payload = {k: stamp.get(k) for k in _signed(stamp)}
     return hashlib.sha256(_LINK + canonical(payload)
                           + str(stamp.get("sig")).encode("ascii")).hexdigest()
 
@@ -238,6 +268,28 @@ def caller_hash(user: str | None, db: str | None) -> str | None:
         return None
     raw = _CALLER + f"{db or ''}\n{user}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def principal_hash(user: str | None) -> str | None:
+    """The pseudonym a delegated stamp records for the user it was read for.
+
+    The principal's name as the issuer's claim mapping produced it (``sub``
+    by default), under its own label, so it never equals a ``caller`` or an
+    ``actor`` hash of the same string. Pseudonymous in the same way
+    ``caller_hash`` is. The issuer is not part of it: two identity
+    providers naming the same ``sub`` produce the same hash.
+    """
+    if not user:
+        return None
+    return hashlib.sha256(_PRINCIPAL + user.encode("utf-8")).hexdigest()
+
+
+def actor_hash(client: str | None) -> str | None:
+    """The pseudonym a delegated stamp records for the agent that read it:
+    the actor's mapped id (``act.sub`` by default), under its own label."""
+    if not client:
+        return None
+    return hashlib.sha256(_ACTOR + client.encode("utf-8")).hexdigest()
 
 
 def cite(doc: Mapping) -> str | None:
@@ -343,7 +395,7 @@ def _unb64(text: str) -> bytes:
 
 def sign(payload: Mapping, private_key: Any) -> dict:
     """The stamp: ``payload`` plus ``sig``. Used by the proxy, and by tests."""
-    body = {k: payload.get(k) for k in _SIGNED}
+    body = {k: payload.get(k) for k in _signed(payload)}
     sig = private_key.sign(_STAMP + canonical(body))
     return {**body, "sig": _b64(sig)}
 
@@ -371,7 +423,9 @@ class Verdict:
 
 
 def verify(doc: Mapping, public_keys: Mapping[str, Any], *,
-           policy: str | Iterable[str] | None = None) -> Verdict:
+           policy: str | Iterable[str] | None = None,
+           principal: str | None = None,
+           actor: str | None = None) -> Verdict:
     """Did this document come through the boundary, unmodified?
 
     Checks, in order, and stops at the first failure: the stamp is present
@@ -379,13 +433,16 @@ def verify(doc: Mapping, public_keys: Mapping[str, Any], *,
     over the stamp is valid under that key; the document's digest is the one
     the stamp signed; its ``_id`` is the one the stamp names; and, if
     ``policy`` is given (one hash or several), the policy it was served
-    under is one of them. A stamp that passes the signature and fails the
-    digest is the interesting case: authentic receipt, edited document.
+    under is one of them; if ``principal`` or ``actor`` is given (a name,
+    not a hash), the delegated read was served for that user or to that
+    agent. A stamp that passes the signature and fails the digest is the
+    interesting case: authentic receipt, edited document.
     """
     stamp = doc.get(FIELD) if isinstance(doc, Mapping) else None
     if not isinstance(stamp, Mapping):
         return Verdict(False, "unstamped: no _voyd field")
-    missing = [k for k in (*_SIGNED, "sig") if k not in stamp]
+    fields = _signed(stamp)
+    missing = [k for k in (*fields, "sig") if k not in stamp]
     if missing:
         return Verdict(False, f"malformed stamp: missing {', '.join(missing)}")
     kid = stamp.get("kid")
@@ -393,7 +450,7 @@ def verify(doc: Mapping, public_keys: Mapping[str, Any], *,
                 policy=stamp.get("policy"), digest=stamp.get("digest"),
                 read=stamp.get("read"), pos=stamp.get("pos"),
                 citation=cite(doc))
-    if stamp.get("v") != VERSION or stamp.get("alg") != ALG:
+    if stamp.get("v") not in VERSIONS or stamp.get("alg") != ALG:
         return Verdict(False, f"unsupported stamp v={stamp.get('v')!r} "
                               f"alg={stamp.get('alg')!r}", **base)
     key = public_keys.get(kid) if isinstance(kid, str) else None
@@ -402,7 +459,7 @@ def verify(doc: Mapping, public_keys: Mapping[str, Any], *,
                               f"this verifier holds", **base)
     try:
         sig = _unb64(str(stamp["sig"]))
-        body = {k: stamp.get(k) for k in _SIGNED}
+        body = {k: stamp.get(k) for k in fields}
         key.verify(sig, _STAMP + canonical(body))
     except Exception:                                          # noqa: BLE001
         return Verdict(False, "bad signature: the stamp was altered, or "
@@ -423,6 +480,22 @@ def verify(doc: Mapping, public_keys: Mapping[str, Any], *,
             return Verdict(False, f"stale policy: served under "
                                   f"{str(stamp.get('policy'))[:12]}, not the "
                                   f"expected one", **base)
+    for side, name, hashed in (("principal", principal, principal_hash),
+                               ("actor", actor, actor_hash)):
+        if name is None:
+            continue
+        if side not in stamp:
+            return Verdict(False, f"{side} unknown: a v{stamp.get('v')} "
+                                  f"stamp does not record one", **base)
+        if stamp.get(side) is None:
+            return Verdict(False, f"not delegated: this read names no "
+                                  f"{side}, so it was not served "
+                                  f"{'for' if side == 'principal' else 'to'} "
+                                  f"{name!r}", **base)
+        if stamp.get(side) != hashed(name):
+            return Verdict(False, f"{side} mismatch: served "
+                                  f"{'for' if side == 'principal' else 'to'} "
+                                  f"somebody other than {name!r}", **base)
     return Verdict(True, "verified", **base)
 
 
@@ -442,7 +515,9 @@ class Report:
 
 
 def verify_all(docs: Iterable[Mapping], public_keys: Mapping[str, Any], *,
-               policy: str | Iterable[str] | None = None) -> Report:
+               policy: str | Iterable[str] | None = None,
+               principal: str | None = None,
+               actor: str | None = None) -> Report:
     """``verify`` for each, plus the chain between stamps of one read.
 
     Two stamps at consecutive positions of the same read must be linked:
@@ -453,7 +528,8 @@ def verify_all(docs: Iterable[Mapping], public_keys: Mapping[str, Any], *,
     allowed to be a subset of a read, and ``reads`` reports which were whole.
     """
     docs = list(docs)
-    verdicts = [verify(d, public_keys, policy=policy) for d in docs]
+    verdicts = [verify(d, public_keys, policy=policy, principal=principal,
+                       actor=actor) for d in docs]
     by_read: dict[str, dict[int, Mapping]] = {}
     for doc, verdict in zip(docs, verdicts):
         if verdict.ok and isinstance(verdict.read, str) \

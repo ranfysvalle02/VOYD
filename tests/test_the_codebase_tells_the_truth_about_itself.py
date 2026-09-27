@@ -170,6 +170,8 @@ def test_the_public_surface_is_deliberate():
     assert set(attest.__all__) == {
         "FIELD", "ALG", "VERSION", "Verdict", "Report",
         "canonical", "digest", "link", "caller_hash",
+        # Who a delegated read was for and by; see `principal`/`actor`.
+        "principal_hash", "actor_hash",
         "verify", "verify_all", "strip", "cite",
         "generate", "kid_of", "load_private_key", "load_public_keys",
         "public_pem", "sign"}

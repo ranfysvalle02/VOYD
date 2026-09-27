@@ -319,8 +319,9 @@ extra; README "Recipes as MCP tools" is the reference. Its decisions:
    `act` claims; the intersection extends naturally (every hop narrows),
    but the claim mapping and receipt format need to say how deep.
 4. **Passthrough on self-managed MongoDB.** OIDC on self-managed
-   deployments depends on server edition; `terminate` may be the only
-   mode there.
+   deployments depends on server edition; `terminate` is the only mode
+   on Community, and passthrough is tested here against a simulated
+   deployment, not a real one.
 
 ## Milestones
 
@@ -344,8 +345,36 @@ extra; README "Recipes as MCP tools" is the reference. Its decisions:
    - the claim mapping adds `actor_roles`, `actor_groups` and
      `actor_tenant`, because identity providers disagree about where an
      actor's roles live as much as a user's.
-2. **0.4.0-b** — connection-level `MONGODB-OIDC` in both modes,
-   receipts with principal and actor, recipe grants.
+2. **0.4.0-b — shipped.** Connection-level `MONGODB-OIDC` in both modes,
+   receipts with principal and actor, recipe grants. The README's "The
+   connection can be the token", "Receipts name both sides" and the
+   recipes section are the reference. The decisions:
+   - a verified `MONGODB-OIDC` token **binds** the connection: every read
+     on it is delegated as that identity and meets the collection's terms
+     per read; a `comment` token on it narrows by
+     `voyd.engine.delegation.narrow` — same issuer, principal, tenant and
+     (if bound) actor, roles/groups/scopes intersected — or is refused;
+   - `terminate` answers the conversation, refuses every command but the
+     handshake before authentication and every command but a read after,
+     answers an expired binding with `ReauthenticationRequired` (391), and
+     authenticates upstream with SCRAM-SHA-256 from `--target`'s
+     credentials or not at all;
+   - `passthrough` verifies before forwarding, and after the server's
+     success checks `connectionStatus` against
+     `issuer(..., server_user="{principal}")` in `$external`, closing the
+     connection on any difference;
+   - speculative authentication is stripped from the handshake in both
+     modes, so no token authenticates a connection the boundary did not
+     read;
+   - stamps are `v: 2`, adding signed `principal`, `actor` and `token`
+     (`null` on a plain read); `caller` stays the connection; `v: 1`
+     stamps still verify, and a principal/actor check on one fails;
+   - a recipe grant is a conjunction of the conditions given — the actor's
+     mapped id is in `actors=`, and the token holds one of `scopes=` — and
+     a plain read of a granted recipe is refused; the version covers the
+     grant only when there is one, so ungranted versions are unchanged;
+   - `recipes_for(identity, guards)` is the one answer to "what may this
+     caller run", shared by the wire's collection terms and `voyd-mcp`.
 3. **0.4.0** — `voyd-mcp` and its end-to-end example,
    `examples/mcp_agent.py` (an agent with a delegated token calling a
    granted recipe over MCP and verifying the stamps on what it got back):

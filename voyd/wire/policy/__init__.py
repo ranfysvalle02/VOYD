@@ -32,6 +32,8 @@ trusting that a scroll was thorough.
     refusals    refuse a command outright -- the verbs no rewrite is
                 narrow enough to cover, and the error a client raises
     handshake   the two rewrites that are about the connection itself
+    oidc        a connection that authenticates with a delegated token,
+                in `passthrough` or `terminate`
     erasure     the three that open a connection of their own, and the
                 two orderings that make them safe
 
@@ -54,9 +56,12 @@ from .guarding import SUPPLIABLE_CLAIMS, Guard, enforce
 from .guarding import _wants_a_caller as _wants_a_caller
 from .guarding import guard_for, judge, mask_reduced, unsuppliable_claims
 from .backfill import Backfill
-from .delegation import (Delegations, carries_token, pin_expanded, pin_tenant,
-                         take_token)
+from .delegation import (Delegations, carries_token, collection_refuses,
+                         pin_expanded, pin_tenant, take_token)
 from .handshake import TOPOLOGY_FIELDS, rewrite_topology, strip_compression
+from .oidc import MECHANISM as OIDC_MECHANISM
+from .oidc import MODES as OIDC_MODES
+from .oidc import Oidc
 from .reads import (DERIVED_COMMANDS, FOREIGN_STAGES, LEADING_STAGES,
                     PRESERVING_STAGES, blinded_find, blinds_a_subject,
                     deciding_fields, expressible_clauses, masked_fields,
@@ -67,7 +72,7 @@ from .prefilter import (VECTOR_FILTER_OPERATORS, clause_paths, index_declares,
                         prefilter_clauses, prefilter_fields,
                         rewrite_vector_search)
 from .recipes import (Recipe, RecipeError, ad_hoc_read, expand_recipe,
-                      has_recipes)
+                      has_recipes, recipes_for)
 from .stages import (SOURCE_STAGES, StageError, VirtualContext, Virtuals,
                      names_scratch, plan_virtual, refuse_scratch,
                      run_virtual, split_virtual)
@@ -104,9 +109,11 @@ __all__ = [
 
     # ---- a read on somebody's behalf ----
     "Delegations", "take_token", "carries_token", "pin_tenant", "pin_expanded",
+    "collection_refuses",
 
     # ---- named pipelines ----
     "Recipe", "RecipeError", "expand_recipe", "has_recipes", "ad_hoc_read",
+    "recipes_for",
 
     # ---- refuse a command outright ----
     "refuse_unrewritable", "refuse_client_vector", "seal_refusal",
@@ -116,6 +123,7 @@ __all__ = [
 
     # ---- the connection itself ----
     "rewrite_topology", "strip_compression", "TOPOLOGY_FIELDS",
+    "Oidc", "OIDC_MECHANISM", "OIDC_MODES",
 
     # ---- the three that open a connection of their own ----
     "erase_first", "cascade_first", "cascade_first_for_one",

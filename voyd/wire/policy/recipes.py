@@ -60,6 +60,14 @@ read the collection: ``find``, ``aggregate``, ``count``, ``distinct``,
 they arrived as a ``$recipe``. ``find`` by ``_id`` included: an
 application that needs one declares it as a recipe, and then that too has
 one reviewed home. Writes, ``getMore`` and ``killCursors`` are untouched.
+
+**Grants.** ``@recipe(..., actors=("support-bot",), scopes=("tickets:read",))``
+runs only for a delegated identity -- an agent acting for a user, verified
+by ``policy/delegation.py`` -- and each condition given must hold: the
+actor's mapped id (``act.sub`` by default) is listed, and the token holds
+at least one listed scope. Both given means both. A plain read of a
+granted recipe is refused. ``recipes_for(identity, guards)`` answers the
+question an agent's tool list asks: which recipes may this caller run.
 """
 
 from __future__ import annotations
@@ -232,6 +240,27 @@ def check_pipeline(got: Any, where: str) -> list[dict]:
     return stages
 
 
+def _names(value: Any, what: str, where: str) -> tuple[str, ...]:
+    """A grant's names, checked at load: a tuple of distinct plain strings."""
+    if isinstance(value, str):
+        raise ValueError(f"{where}: {what}= is a list of names, not one "
+                         f"string -- write {what}=({value!r},). A string "
+                         f"would be read as its characters")
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{where}: {what}= is a list of names")
+    out = tuple(value)
+    for item in out:
+        if (not isinstance(item, str) or not item.strip()
+                or item != item.strip()):
+            raise ValueError(f"{where}: {what}= holds {item!r}, which is not "
+                             f"a plain, non-empty name")
+    if len(set(out)) != len(out):
+        raise ValueError(f"{where}: {what}= names something twice")
+    return tuple(sorted(out))
+
+
 def _source(fn: Callable) -> bytes:
     """What the version is a hash *of*: the function as written."""
     try:
@@ -246,8 +275,10 @@ class Recipe:
     """One declared recipe, compiled and checked at load."""
 
     def __init__(self, fn: Callable, *, name: str, collection: str,
-                 samples: Any = None):
+                 samples: Any = None, actors: Any = (), scopes: Any = ()):
         where = f"@recipe({name!r})"
+        self.actors = _names(actors, "actors", where)
+        self.scopes = _names(scopes, "scopes", where)
         if not isinstance(name, str) or not name.strip() or "$" in name:
             raise ValueError(f"{where}: a recipe name is a plain, non-empty "
                              f"string -- the client sends it as data")
@@ -286,8 +317,15 @@ class Recipe:
             self.expansions.append(pipeline)
             self.vocab |= vocabulary(pipeline)
         digest = hashlib.sha256(b"voyd-recipe/1\x00")
-        for part in (name.encode(), collection.encode(), _source(fn),
-                     bson.encode({"x": self.expansions})):
+        parts = [name.encode(), collection.encode(), _source(fn),
+                 bson.encode({"x": self.expansions})]
+        if self.actors or self.scopes:
+            # Only when granted, so an ungranted recipe keeps the version
+            # it has always had and a plan recorded before grants existed
+            # still reads it as unchanged.
+            parts.append(bson.encode({"actors": list(self.actors),
+                                      "scopes": list(self.scopes)}))
+        for part in parts:
             digest.update(len(part).to_bytes(8, "big") + part)
         # Stable across processes and machines: the source as written and
         # the expansions at declared values. What an audit quotes.
@@ -324,9 +362,54 @@ class Recipe:
             out.append(param)
         return out
 
+    @property
+    def granted(self) -> bool:
+        """Does this recipe run only for a delegated identity?"""
+        return bool(self.actors or self.scopes)
+
+    def grant(self) -> str:
+        """The grant, as a plan and a banner print it. Empty when none."""
+        parts = []
+        if self.actors:
+            parts.append(f"actors={list(self.actors)}")
+        if self.scopes:
+            parts.append(f"scopes={list(self.scopes)}")
+        return " and ".join(parts)
+
+    def refuses(self, claims: Mapping | None) -> str | None:
+        """Why this caller may not run this recipe, or ``None``.
+
+        No grant: anybody the collection admits. With a grant, only a
+        delegated identity, and each condition given must hold -- the
+        actor's mapped id is one of ``actors``, and the token holds at
+        least one of ``scopes``. Both given means both.
+        """
+        if not self.granted:
+            return None
+        if not claims or not claims.get("delegated"):
+            return (f"recipe {self.name!r} is granted to {self.grant()}, and "
+                    f"this read carries no delegated identity. Pass "
+                    f"comment={{'voyd': token}} or authenticate with "
+                    f"MONGODB-OIDC")
+        if self.actors:
+            actor = claims.get("actor")
+            who = actor.get("user") if isinstance(actor, Mapping) else None
+            if who not in self.actors:
+                return (f"recipe {self.name!r} is granted to actors "
+                        f"{list(self.actors)}, and this read's actor is "
+                        f"{who!r}")
+        if self.scopes:
+            held = claims.get("scopes") or ()
+            if not set(held) & set(self.scopes):
+                return (f"recipe {self.name!r} needs one of the scopes "
+                        f"{list(self.scopes)}, and the token grants "
+                        f"{list(held) or 'none'}")
+        return None
+
     def describe(self) -> str:
         return (f"{self.name}@{self.version}("
-                + ", ".join(p.describe() for p in self.params) + ")")
+                + ", ".join(p.describe() for p in self.params) + ")"
+                + (f" granted to {self.grant()}" if self.granted else ""))
 
     def _call(self, given: Mapping, where: str) -> list[dict]:
         known = {p.name for p in self.params}
@@ -457,14 +540,40 @@ def ad_hoc_read(body: Mapping, guards: Mapping[str, Guard]
     return None
 
 
+def recipes_for(identity: Any, guards: Mapping[str, Guard]) -> list[Recipe]:
+    """Every recipe this caller may run, sorted by name. Pure.
+
+    ``identity`` is a verified ``Identity``, the claims a rule reads (a
+    delegated identity's ``claims()`` or a connection's), or ``None`` for
+    a caller nobody vouched for. A recipe is listed when the collection it
+    reads admits this kind of caller -- ``delegation=`` and ``scope=``,
+    asked exactly as ``Delegations`` asks them -- and its own grant
+    admits it. What a listed recipe returns is still judged per document
+    on the way out; this answers only *may it be called*.
+    """
+    from .delegation import collection_refuses
+
+    claims = identity.claims() if hasattr(identity, "claims") else identity
+    out = []
+    for recipe in sorted(_book(guards).values(), key=lambda r: r.name):
+        guard = guards.get(recipe.collection)
+        if guard is None or collection_refuses(guard, claims) is not None:
+            continue
+        if recipe.refuses(claims) is None:
+            out.append(recipe)
+    return out
+
+
 def expand_recipe(raw: bytes, req_id: int, resp_to: int,
-                  guards: Mapping[str, Guard], verbose: bool
+                  guards: Mapping[str, Guard], verbose: bool,
+                  claims: Mapping | None = None
                   ) -> tuple[bytes | None, bytes | None]:
     """`(rewritten, refusal)`. `(None, None)` leaves the message alone.
 
     Called first on every client message when the policy declares a recipe
     or `recipes_only`, so what follows it in the pump cannot tell an
-    expanded recipe from the same pipeline written by hand.
+    expanded recipe from the same pipeline written by hand. ``claims`` is
+    whom the command is judged as, for a recipe with a grant.
     """
     head = decode_sections(raw)
     if head is None:
@@ -517,6 +626,9 @@ def expand_recipe(raw: bytes, req_id: int, resp_to: int,
         return None, _refuse(req_id, target, f"recipe {recipe.name!r} reads "
                              f"{recipe.collection!r}, not {target!r}",
                              verbose)
+    why = recipe.refuses(claims)
+    if why is not None:
+        return None, _refuse(req_id, recipe.collection, why, verbose)
     try:
         expanded = recipe.bind(call.get("params"))
     except RecipeError as exc:

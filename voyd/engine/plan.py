@@ -74,6 +74,11 @@ RECIPE_ADDED = "recipe_added"
 RECIPE_REMOVED = "recipe_removed"
 RECIPE_CHANGED = "recipe_changed"
 RECIPES_ONLY_ADDED = "recipes_only_added"
+# A recipe's grant: which actors and scopes may run it. Widened fails open
+# (an actor or scope added, or a condition or the whole grant dropped);
+# narrowed does not.
+RECIPE_GRANT_WIDENED = "recipe_grant_widened"
+RECIPE_GRANT_NARROWED = "recipe_grant_narrowed"
 RECIPES_ONLY_REMOVED = "recipes_only_removed"
 # Not fail-open: no document becomes reachable and no value leaves that did
 # not before. It is still a finding, because every prompt built afterwards
@@ -495,7 +500,9 @@ def _recipes(name: str, was: AdmissionSpec,
                 name, RECIPE_ADDED,
                 f"recipe {new.describe()} expands to "
                 f"{_stages(new.expansions)}", False))
-        elif old.version != new.version:
+        else:
+            found.extend(_grant(name, key, old, new))
+        if old is not None and new is not None and old.version != new.version:
             moved = ("its expansion changes: "
                      f"{_stages(old.expansions)} -> {_stages(new.expansions)}"
                      if old.expansions != new.expansions
@@ -516,6 +523,54 @@ def _recipes(name: str, was: AdmissionSpec,
         found.append(Structural(
             name, RECIPES_ONLY_ADDED,
             "only the declared recipes may read this collection", False))
+    return found
+
+
+def _grant(name: str, key: str, old: Any, new: Any) -> list[Structural]:
+    """What a change to one recipe's ``actors=``/``scopes=`` admits.
+
+    A grant is a conjunction of the conditions it gives -- the actor is
+    listed, and the token holds one listed scope -- so a condition that
+    disappears admits more, an actor or scope added to a list admits more,
+    and one removed from a list (or a condition that appears) admits less.
+    A change can do both at once, and then both are reported.
+    """
+    wider: list[str] = []
+    narrower: list[str] = []
+    for what in ("actors", "scopes"):
+        was = set(getattr(old, what, ()) or ())
+        now = set(getattr(new, what, ()) or ())
+        if was == now:
+            continue
+        if was and not now:
+            wider.append(f"any {what[:-1]} (the {what} condition is gone)")
+            continue
+        if now and not was:
+            narrower.append(f"only {what} {sorted(now)}")
+            continue
+        if now - was:
+            wider.append(f"{what} {sorted(now - was)} added")
+        if was - now:
+            narrower.append(f"{what} {sorted(was - now)} removed")
+    found: list[Structural] = []
+    granted_before = bool(getattr(old, "actors", ()) or getattr(old, "scopes", ()))
+    granted_after = bool(getattr(new, "actors", ()) or getattr(new, "scopes", ()))
+    if granted_before and not granted_after:
+        found.append(Structural(
+            name, RECIPE_GRANT_WIDENED,
+            f"recipe {key!r} loses its grant: any caller the collection "
+            f"admits may run it, plain reads included", True))
+        return found
+    if wider:
+        found.append(Structural(
+            name, RECIPE_GRANT_WIDENED,
+            f"recipe {key!r} grant widens: {'; '.join(wider)}", True))
+    if narrower:
+        found.append(Structural(
+            name, RECIPE_GRANT_NARROWED,
+            f"recipe {key!r} grant narrows: {'; '.join(narrower)}"
+            + ("; plain reads may no longer run it"
+               if granted_after and not granted_before else ""), False))
     return found
 
 
@@ -618,7 +673,8 @@ def issuers(current: Mapping[str, Any],
                                  "scopes", "roles", "groups", "tenant",
                                  "actor_roles", "actor_groups",
                                  "actor_tenant", "algorithms", "skew",
-                                 "connection_users", "refresh", "max_age")
+                                 "connection_users", "refresh", "max_age",
+                                 "server_user")
                      if getattr(old, f) != getattr(new, f)]
             narrows = (set(moved) <= {"algorithms", "skew",
                                       "connection_users", "refresh",

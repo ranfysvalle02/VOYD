@@ -670,8 +670,33 @@ and reports `recipe_added`, `recipe_removed` and `recipe_changed` with the
 stage lists of the declared expansions; none of those fails open, since the
 expansion still meets every rule. `recipes_only_removed` fails open.
 
+**A recipe can be granted to agents.** `actors=` and `scopes=` make it
+runnable only by a delegated identity (see the next section) whose actor's
+mapped id is listed and whose token holds at least one listed scope; when
+both are given, both must hold:
+
+```python
+@recipe("support_context", collection="tickets",
+        actors=("support-bot",), scopes=("tickets:read",))
+def support_context(q: str = "refund", k: int = 8): ...
+```
+
+A plain read of a granted recipe is refused, and so is an agent it does
+not name, each with the condition that failed. With `recipes_only=True` a
+collection's whole agent surface is a reviewed list of pipelines, each
+granted to named agents. A grant written as one string, a grant with no
+`issuer()` to verify the identity it names, and a grant on a
+`delegation="forbidden"` collection are refused at load.
+`voyd.wire.policy.recipes_for(identity, guards)` returns the recipes a
+caller may run — the collection's `delegation=` and `scope=` and the
+recipe's grant, asked by the same functions the wire asks — which is what
+`voyd-mcp` lists as tools. `voyd-plan` reports `recipe_grant_widened` (an
+actor or scope added, a condition or the whole grant dropped) as fail-open
+and `recipe_grant_narrowed` as not; a change that does both reports both.
+
 **Each recipe has a version**: twelve hex characters of a SHA-256 over its
-name, collection, source and declared expansions. It is printed at startup
+name, collection, source and declared expansions, and its grant when it has
+one. It is printed at startup
 (`recipes [support_context@3f9c0a1b2d4e(q: str = 'refund', k: int = 8)]`),
 in each verbose expansion line, and as the `version` label of
 `voyd_recipe_reads_total{collection,recipe,version}`, so an audit can say
@@ -763,6 +788,72 @@ delegated read whose token was not granted the scope, naming it.
 delegated identity at all. `voyd-plan` reports `delegation_loosened`,
 `scope_removed`, `scope_changed`, `via_narrowed_to_one_side` and
 `issuer_added` as fail-open, and their narrowing counterparts as not.
+
+### The connection can be the token: `MONGODB-OIDC`
+
+A driver that authenticates with `MONGODB-OIDC` hands the boundary a token
+in `saslStart`, and the application changes nothing but its connection
+options:
+
+```python
+MongoClient("mongodb://voyd-wire:27099/?directConnection=true",
+            authMechanism="MONGODB-OIDC",
+            authMechanismProperties={"OIDC_CALLBACK": callback})
+```
+
+```
+voyd-wire --config voydfile.py --oidc=terminate      # or --oidc=passthrough
+```
+
+The token is read out of the SASL payload (`{jwt: ...}`; a human flow's
+`{n: ...}` principal step is answered with the issuer, when the policy
+declares exactly one), verified with the same `verify`, and **binds the
+connection**: every read on it is delegated as that identity, with no token
+in the `comment`, and meets the collection's `delegation=`, `scope=` and
+tenant pin exactly as a `comment` token would. A `comment` token on a bound
+connection may only narrow it — the same issuer, principal, tenant, and
+actor if the connection has one; roles, groups and scopes intersected —
+and anything else is refused (`voyd.engine.delegation.narrow`). A token
+that is not believed is `AuthenticationFailed` (18).
+
+    terminate     the boundary answers the conversation itself; the
+                  deployment never sees the token or the user. Upstream
+                  it is itself: unauthenticated, or SCRAM-SHA-256 with the
+                  credentials in --target, the server's signature checked.
+                  Before authenticating, only the handshake, ping and
+                  buildInfo are answered; after, a connection may read
+                  (find, aggregate, count, distinct, getMore, killCursors,
+                  explain, listCollections, listIndexes) and nothing else,
+                  because anything else would run with the boundary's own
+                  credentials. An expired token answers the next command
+                  with ReauthenticationRequired (391), and the driver calls
+                  its callback again.
+    passthrough   the conversation continues to the deployment, which
+                  validates the token too (Atlas workload identity). A token
+                  the boundary does not believe is refused without being
+                  forwarded. After the server accepts one, and before the
+                  next command goes anywhere, connectionStatus must report
+                  the user issuer(..., server_user="idp/{principal}") names
+                  for the token's principal, in $external -- or the
+                  connection is closed.
+
+Speculative authentication is removed from the handshake in both modes, so
+every token authenticates in a conversation the boundary reads. That costs
+one round trip per new connection.
+
+### Receipts name both sides
+
+A stamp on a delegated read carries `principal`, `actor` and `token` beside
+`caller`: domain-separated SHA-256 hashes of the principal's and the actor's
+mapped ids, and the token's `jti` hash. `caller` stays the connection — the
+server-reported user of the socket the read arrived on. All three are
+signed, so an agent cannot relabel whom a chunk was served for, and none
+names anybody. `voyd-verify --principal alice@example.com --actor
+support-bot` recomputes the hashes and checks every document against them;
+`attest.principal_hash` and `attest.actor_hash` do the same in code. This is
+the audit sentence agent deployments cannot otherwise produce: *every chunk
+agent A put in front of a model for user P was served under policy H, and
+here are the signatures.*
 
 [`examples/delegation.py`](examples/delegation.py) serves two users through
 one service connection with the same query and different rows, shows the
@@ -1106,6 +1197,9 @@ stage — over the document exactly as the client receives it:
     ns, id   the namespace and _id
     digest   SHA-256 over a canonical encoding of the served document
     caller   SHA-256 of the server-reported user and auth db, or null
+    principal, actor, token
+             for a delegated read, hashes of the user it was for, the
+             agent that read it, and the token's jti; null otherwise
     iat      when it was signed, by the proxy's clock
     read     one random id per read, stable across getMore
     pos      the document's place in the whole read
@@ -1125,7 +1219,12 @@ prompt = "\n".join(f"[{attest.cite(d)}] {attest.strip(d)['text']}" for d in wind
 
 ```
 voyd-verify --keys attest.pem.pub --policy <sha256> < context.jsonl
+voyd-verify --keys attest.pem.pub --principal alice --actor support-bot < context.jsonl
 ```
+
+A stamp is version 2. Version 1 stamps, which predate `principal`, `actor`
+and `token`, still verify; asking one about a principal or an actor fails,
+because it cannot answer.
 
 `verify` names which check failed: `unknown kid` (a key this verifier does
 not hold), `bad signature` (the stamp was altered or relabelled), `digest
@@ -1326,13 +1425,32 @@ the second language.
   canonical form exactly, including Python's shortest float repr.
 - A stamp costs an Ed25519 signature per document and a re-encoded reply;
   an attested collection never gets the byte-for-byte fast path.
-- **Delegated identity is request-level only.** A token rides in
-  `comment`; connection-level `MONGODB-OIDC`, receipts that name the
-  principal and the actor, and recipes granted to actors are specified in
-  [`whats-next.md`](whats-next.md) and not built. A stamp on a delegated
-  read names the principal's user, hashed, as `caller`.
+- **`--oidc=passthrough` is tested against a simulated deployment only.**
+  The conversation and the consistency check are exercised byte for byte,
+  and `terminate` runs live against a real driver and a real replica set,
+  but no suite here reaches a deployment that validates `MONGODB-OIDC`
+  itself (Atlas workload identity, or Enterprise with an identity provider).
+  Self-managed Community servers have no OIDC, so `terminate` is the only
+  mode there.
+- `--oidc=terminate` authenticates upstream with SCRAM-SHA-256 or not at
+  all; X.509, AWS and LDAP credentials for the boundary itself are refused
+  at startup. The boundary's upstream user is the ceiling of every token's
+  reach, so give it read roles only. A client's own `connectionStatus` on a
+  terminated connection reports that upstream user, not the token.
+- A terminated connection with an expired token is asked to reauthenticate
+  (391); a passthrough one is the deployment's to expire. Neither mode keeps
+  a replay cache.
+- The OIDC principal step is answered only when the policy declares one
+  issuer; with several, a driver must use a callback that returns a token.
+- Principal and actor hashes do not include the issuer: two identity
+  providers naming the same `sub` produce the same `principal`. They are
+  pseudonymous the way `caller` is.
+- A recipe grant names actors by the mapped actor id and scopes by name. It
+  is not a role check, and a grant has no `via=`: it always reads the
+  delegated identity.
 - **No replay cache.** A captured token is valid until its `exp`, on any
-  connection its issuer's `connection_users` names. Keep `exp` short.
+  connection its issuer's `connection_users` names, and as a
+  `MONGODB-OIDC` credential. Keep `exp` short.
 - **JWKS staleness is bounded, not zero.** A key the identity provider
   revokes is still believed until the next successful refresh, and a
   provider that is down leaves the last good keys in use for up to
@@ -1372,7 +1490,7 @@ at different lengths — each answers a question this one does not:
 | [`blog.md`](blog.md) | the story: every failure in this domain is disguised as its own opposite, including one in this project's own CI |
 | [`blog2.md`](blog2.md) | the sequel: the verbs after *refuse* — backfill, prefilter, mask, sanitize, stages, recipes, attest — and the one property they share |
 | [`examples/operators/README.md`](examples/operators/README.md) | every `voyd.contrib` stage and operator, with a snippet you can paste into a pipeline today |
-| [`whats-next.md`](whats-next.md) | the spec for delegated agent identity at the wire: what the request-level half does, and what remains — `MONGODB-OIDC`, receipts naming both parties, recipe grants; and `voyd-mcp`'s decisions |
+| [`whats-next.md`](whats-next.md) | the spec for delegated agent identity at the wire, and the decisions each milestone made: request-level tokens, `MONGODB-OIDC` in both modes, receipts naming both parties, recipe grants, and `voyd-mcp` |
 | [`docs/why-not-native.md`](docs/why-not-native.md) | change streams, `$where`, views, `$$USER_ROLES`, TTL, RBAC, Queryable Encryption — what each one gives you and where the line is |
 | [`docs/cosine.md`](docs/cosine.md) | the embedding-model failure, reproducible without an API key, with its provenance and its limits |
 | [`docs/ranking-is-not-permission.md`](docs/ranking-is-not-permission.md) | the long-form design argument for putting a boundary on the wire |

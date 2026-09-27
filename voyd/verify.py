@@ -1,6 +1,7 @@
 """`voyd-verify`: check a set of served documents against public keys.
 
-    voyd-verify --keys attest.pub [--policy SHA256] < context.jsonl
+    voyd-verify --keys attest.pub [--policy SHA256]
+                [--principal NAME] [--actor NAME] < context.jsonl
 
 One document per line, as MongoDB Extended JSON (``bson.json_util.dumps``,
 canonical or relaxed -- the digest does not care which). Prints one line per
@@ -33,6 +34,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="the policy hash(es) the documents must have been "
                          "served under; repeatable. Without it any policy "
                          "passes and the hash is only reported")
+    ap.add_argument("--principal", metavar="NAME", default=None,
+                    help="every document was served by delegation for this "
+                         "user (the token's mapped principal, e.g. its sub). "
+                         "Recomputes the stamp's principal hash")
+    ap.add_argument("--actor", metavar="NAME", default=None,
+                    help="every document was served by delegation to this "
+                         "agent (the token's mapped actor, e.g. act.sub)")
     ap.add_argument("input", nargs="?", default="-",
                     help="JSON lines file, or - for stdin (default)")
     ap.add_argument("--json", action="store_true",
@@ -51,7 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"voyd-verify: {exc}", file=sys.stderr)
         return 2
 
-    report = attest.verify_all(docs, keys, policy=args.policy)
+    report = attest.verify_all(docs, keys, policy=args.policy,
+                               principal=args.principal, actor=args.actor)
     for n, verdict in enumerate(report.verdicts, 1):
         if args.json:
             print(json.dumps({"line": n, "ok": verdict.ok,

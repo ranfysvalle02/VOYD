@@ -36,7 +36,7 @@ from . import seal
 from .jwks import Trust
 from .policy import Guard, Virtuals
 from .proxy import serve
-from .upstream import vault_uri
+from .upstream import credentials, vault_uri
 from .report import summarise
 
 
@@ -459,6 +459,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--attest-keygen", metavar="PATH", default=None,
                     help="write a new Ed25519 key pair to PATH and "
                          "PATH.pub, print its key id, and exit")
+    ap.add_argument("--oidc", choices=("passthrough", "terminate"),
+                    default=None,
+                    help="authenticate connections with MONGODB-OIDC, the "
+                         "token verified against the policy's issuer(). "
+                         "passthrough: the deployment validates it too, and "
+                         "must report the user the issuer's server_user "
+                         "names. terminate: the boundary answers the "
+                         "conversation and talks upstream as itself -- "
+                         "unauthenticated, or with SCRAM-SHA-256 "
+                         "credentials in --target")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -508,6 +518,18 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(held, int):
             return held
         trust = held
+    if args.oidc:
+        if trust is None:
+            print("voyd-wire: --oidc verifies a token against an issuer(), and "
+                  "the policy declares none", file=sys.stderr)
+            return 2
+        trust.oidc = args.oidc
+        if args.oidc == "terminate":
+            try:
+                trust.upstream_auth = credentials(args.target)
+            except ValueError as exc:
+                print(f"voyd-wire: {exc}", file=sys.stderr)
+                return 2
     for c in args.guard:
         guards.setdefault(c, Guard.defaults(
             c, at_field=args.at_field, mark_field=args.mark_field))
