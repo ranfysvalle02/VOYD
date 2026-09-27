@@ -271,9 +271,9 @@ The reason travels with the refusal, so an access review reads
 *patient_restricted*, not *filtered*.
 
 **The edge.** Nothing here is a HIPAA compliance claim, and the known
-gaps in the README apply in full — nobody has run this but its author.
-It is a mechanism a compliance programme could stand on, not the
-programme.
+gaps in the README apply in full. It is a mechanism a compliance
+programme could stand on, not the programme — and one built to be
+verified against your own environment before it carries that weight.
 
 ---
 
@@ -608,7 +608,8 @@ A list of fits is only believable next to a list of misfits.
   for `voyd-wire`. `voyd-plan --audit` and
   [`examples/shadow.py`](examples/shadow.py) answer most of that question
   without a proxy.
-- **Anything that needs production evidence today.** Nobody has run this
-  but its author. Every case above is a design that holds by
-  construction and has been exercised by this repository's tests, not a
-  deployment that has survived a year.
+- **Anything that needs a year of production evidence.** Every case
+  above is a design that holds by construction and has been exercised by
+  this repository's tests — not a deployment that has survived a year,
+  yet. `voyd-plan --audit` is the way to start collecting that evidence
+  against your own traffic without deploying anything.

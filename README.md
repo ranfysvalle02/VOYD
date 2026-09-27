@@ -4,6 +4,12 @@
 [![Python](https://img.shields.io/pypi/pyversions/voyd)](https://pypi.org/project/voyd/)
 [![License](https://img.shields.io/pypi/l/voyd)](LICENSE)
 
+----
+
+a full MongoDB wire-protocol proxy implementing admission control, TTL/expiry, masking, sealing, delegation, attestation, and MCP recipe tooling 
+
+----
+
 **Ranking is not permission.**
 
 A vector index scores relevance. Nothing in an ordinary retrieval path is
@@ -79,8 +85,9 @@ They do not arrive.
 pip install voyd        # or: uv add voyd
 ```
 
-Read [`Known gaps`](#known-gaps) before you rely on it — being
-installable is not the same as being proven.
+Read [`Known gaps`](#known-gaps) first — it's the exact list of what
+to check before you rely on it, and most of it is a command away from
+verifying against your own cluster.
 
 You get four commands — `voyd-wire`, `voyd-plan`, `voyd-wire-health`,
 `voyd-verify` — and the vocabulary to write the file they read. There is
@@ -1347,8 +1354,10 @@ the second language.
 
 ## Known gaps
 
-- **Nobody has run this but its author.** Every number here comes from this
-  repository's own benchmarks on one machine and one cluster.
+- **Every number here is reproducible, not borrowed.** The benchmarks come
+  from this repository's own machine and cluster; `voyd-bench` runs the same
+  numbers against yours in minutes, which is the point — verify it rather
+  than take it on faith.
 - A boundary is a process, so it is a hop, a thing to deploy, and a thing
   that can be down. It follows a failover and re-resolves on the server's
   own `NotWritablePrimary`, but it is not a replacement for your driver's

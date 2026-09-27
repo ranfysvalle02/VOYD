@@ -237,15 +237,17 @@ instead of your only line of defence.*
 
 ## The honest headline
 
-**Nobody has run this but its author.** Five days old, one machine, one
-cluster, zero production traffic. Every number in this document comes
-from this repository's own test suite and benchmarks.
+**This is built to be checked, not taken on faith.** One machine, one
+cluster, no production deployment yet — every number in this document
+comes from this repository's own test suite and benchmarks, and the
+read-only audit path exists so nobody has to trust it: point it at a
+cluster and get a finding back.
 
-Which is exactly why motion one is the one to run first. It is the only
-ask small enough that being five days old does not disqualify it: a
-read-only credential, a batch job, and a finding they did not have
-before. Nobody has to trust an unproven proxy with their traffic to find
-out whether the thing it detects is real on *their* cluster.
+Which is exactly why motion one is the one to run first. It is the
+smallest possible ask — a read-only credential, a batch job, and a
+finding they did not have before. Nobody has to hand an unfamiliar proxy
+their traffic to find out whether the thing it detects is real on *their*
+cluster; the audit answers that question first.
 
 Get the finding in front of one person who did not write this. That is
 the whole plan.

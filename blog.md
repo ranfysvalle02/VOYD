@@ -406,9 +406,10 @@ people decide to stop asking it.
 The longer argument for the design is in
 [docs/ranking-is-not-permission.md](docs/ranking-is-not-permission.md).*
 
-*Nobody has run this but its author. Every number here comes from one
-machine and one cluster, and the one honest gap in the story above is
-that `voyd-plan --target` has never sampled a cluster from inside a CI
-runner — the structural half is proven end to end, and the sampling half
-is proven only on a laptop. Which is exactly the kind of distinction this
-whole project exists to insist on, so it would be poor form to bury it.*
+*Every number here comes from one machine and one cluster — this
+repository's own. The structural half of the claim (what gets refused,
+and why) is proven end to end; the sampling half (`voyd-plan --target`)
+is proven on a laptop and has not yet been run from inside a CI runner
+against a live cluster. That is the next milestone, not a hidden caveat —
+and it is exactly the kind of distinction this whole project exists to
+insist on, on your numbers too.*

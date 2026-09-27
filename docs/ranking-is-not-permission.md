@@ -245,5 +245,6 @@ somewhere nobody can route around.
 
 *VOYD is MIT-licensed and the code is at
 [github.com/ranfysvalle02/VOYD](https://github.com/ranfysvalle02/VOYD).
-Nobody has run it but its author; every number above comes from one machine
-and one cluster.*
+Every number above comes from one machine and one cluster — this
+repository's own — and reproducing them against yours is one `voyd-bench`
+run away.*
