@@ -256,6 +256,98 @@ connection. The prefix of a virtual read gets no backfill or
 pre-filter. And `explain` of a pipeline with a virtual step is refused,
 because a plan for half a pipeline describes a query nobody sent.
 
+### A toolkit, in one line
+
+Nobody should have to write BM25 on a Tuesday night. `voyd.contrib`
+ships the retrieval steps most pipelines end up rebuilding, local and
+deterministic, standard library only:
+
+```python
+# voydfile.py
+from voyd import contrib
+contrib.install()        # or rank.install("$bm25", "$mmr")
+```
+
+`$redactPII`, `$chunk`, `$tokenEstimate`, `$highlight` as operators;
+`$bm25`, `$mmr`, `$dedupe`, `$freshness`, `$rrf`, `$contextPack`,
+`$cite` as stages. They register through the same `@stage` and
+`@operator` your own code does, so they inherit the same guarantee: none
+of them has ever seen a refused row. `examples/operators/` has a
+copy-paste snippet for each and three scripts that run today.
+
+## A pipeline with one reviewed home
+
+Retrieval logic spreads. The same `$vectorSearch` with the same filter
+and the same rerank lives in four services, two notebooks and somebody's
+shell history, and each copy drifts on its own schedule.
+
+```python
+@recipe("support_context", collection="tickets")
+def support_context(q: str, k: int = 8):
+    return [
+        {"$vectorSearch": {"index": "v", "path": "embedding",
+                           "query": q, "numCandidates": k * 10, "limit": k}},
+        {"$addFields": {"clean": {"$redactPII": "$text"}}},
+    ]
+```
+
+```js
+db.tickets.aggregate([{ $recipe: { name: "support_context",
+                                   params: { q: "refund", k: 5 } } }])
+```
+
+A recipe is a view for retrieval. The client names it; the proxy
+expands it before anything else on the wire happens, so a recipe gets
+every refusal, push-down, backfill and virtual split a hand-written
+pipeline would — the expanded message is byte-for-byte the aggregate
+you could have typed.
+
+The part that took care is that **parameters are values, never code**.
+They are typed from the function's annotations, dicts are refused, a
+string beginning with `$` is refused, and the returned pipeline is
+checked against the vocabulary its declared expansions used at load. A
+parameter can change a value. It cannot change a name: `q: "$$ROOT"` is
+an error, not a document.
+
+`@guard("tickets", recipes_only=True)` closes the collection to
+anything else — an ad-hoc `find`, an `aggregate`, a `$lookup` from next
+door. Each recipe carries a content hash in metrics and logs, so an
+audit can say which version served a read, and `voyd-plan` reports a
+recipe changing the way it reports a rule changing.
+
+## A chunk that can prove where it came from
+
+```python
+@guard("notes", attest=True)
+```
+
+Every document served from that collection carries a `_voyd` stamp,
+signed last — after the mask, after the backfill cut, after every stage — so
+it signs exactly the bytes the client received:
+
+    kid      which proxy key signed it
+    policy   the hash of the policy file that admitted it
+    digest   the document as served, masked values as null
+    caller   who it was served to, pseudonymously
+    read     which read, at which position, chained to the one before
+
+Ed25519, so a verifier needs only a public key. `voyd.attest.verify`
+runs in the client with no proxy and no database; `voyd-verify` does the
+same from a shell. Edit one character of a served chunk and the digest
+fails. Relabel the stamp and the signature fails. Splice two reads
+together and the chain fails.
+
+That turns the boundary's promise into evidence. An auditor asking
+*did this prompt contain anything it should not have* no longer has to
+trust the application's logging. They can check the chunks. And because
+a masked field is signed as null, the stamp proves the client never had
+the value — not that it promised not to use it.
+
+It proves provenance, not truth: a signed chunk can still be wrong. And
+whoever holds the private key can mint stamps, which is why the key is a
+VOYD key that never leaves the proxy — and not a model key, which never
+arrives there.
+
 ## Where the model call lives
 
 VOYD never calls a model and never holds a model credential. There is no
@@ -276,13 +368,17 @@ be talked out of it.
     mask         the document leaves, one of its values does not
     sanitize     the document leaves, without the part aimed at the model
     stage        a step runs on what was admitted, and cannot add to it
+    recipe       the pipeline is the reviewed one, whoever typed the call
+    attest       what was served can be proved, and edits cannot
 
-Six verbs, one property. Each of them runs where the boundary already
+Eight verbs, one property. Each of them runs where the boundary already
 was, and each can only make a read smaller than what the rules alone
 would have allowed. Backfill cuts, it never adds. Pre-filtering narrows,
 and is judged afterwards anyway. A mask and a sanitiser rewrite what was
 admitted and cannot reach what was refused. A virtual stage is handed
-only what was admitted, and everything it returns is judged again.
+only what was admitted, and everything it returns is judged again. A
+recipe expands into a pipeline that meets every rule, and a stamp adds
+evidence and nothing else.
 
 Ranking is still not permission. It turns out permission is not only
 yes or no either.
