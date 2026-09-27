@@ -56,7 +56,7 @@ attest = [
 # so its one dependency is the protocol; verifying the caller's token needs
 # `cryptography`, which is the attest extra's.
 mcp = [
-    "mcp>=1.10",
+    "mcp>=2.2",
     "cryptography>=42",
 ]
 # Everything optional, which is one thing. Nothing here computes an
