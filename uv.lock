@@ -1537,6 +1537,7 @@ crypto = [
 ]
 dev = [
     { name = "cryptography" },
+    { name = "mcp" },
     { name = "mypy" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -1559,6 +1560,7 @@ requires-dist = [
     { name = "cryptography", marker = "extra == 'attest'", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'dev'", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'mcp'", specifier = ">=42" },
+    { name = "mcp", marker = "extra == 'dev'", specifier = ">=2.2" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26" },

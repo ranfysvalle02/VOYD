@@ -385,6 +385,7 @@ async def derive_on_update(raw: bytes, req_id: int, resp_to: int,
             return raw, _refuse(req_id, guard.collection,
                                 "cannot admit this derived update: "
                                 + "; ".join(broken), verbose)
+        assert isinstance(set_values, Mapping)
         values = _provenance(guard, closure, deadlines, tenant, claims,
                      own_deadline=(set_values.get(guard.spec.at_field)
                            if isinstance(set_values, Mapping)
@@ -415,7 +416,8 @@ def _protected_paths(update: Mapping, protected: set[str | None]) -> set[str]:
 
 def _provenance(guard: Guard, closure: list, deadlines: list, tenant: object,
                 claims: Mapping | None, *, own_deadline: object = None) -> dict:
-    values = {guard.spec.lineage_field: closure, "written_by": _writer(claims)}
+    values: dict[str | None, object] = {guard.spec.lineage_field: closure,
+                                        "written_by": _writer(claims)}
     if guard.spec.tenant:
         values[guard.spec.tenant] = tenant
     if deadlines:
@@ -428,8 +430,8 @@ def _provenance(guard: Guard, closure: list, deadlines: list, tenant: object,
 
 def _writer(claims: Mapping | None) -> dict:
     if claims and claims.get("delegated"):
-        principal = claims.get("principal")
-        actor = claims.get("actor")
+        principal = claims.get("principal") or {}
+        actor = claims.get("actor") or {}
         return {"principal": attest.principal_hash(principal.get("user")),
                 "actor": attest.actor_hash(actor.get("user")),
                 "token": claims.get("token")}
