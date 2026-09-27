@@ -9,7 +9,7 @@ structural finding that needs no data, and a count that needs some.
 
 The second is that the plan **refuses to answer** the questions it cannot.
 A set-relative rule is not a weaker per-document rule, it is a different
-question, and a plan that quietly evaluated `budget(4000)` against one
+question, and a plan that quietly evaluated `distinct()` against one
 document at a time would print a confident number about a page that never
 existed. So the tests below assert what is set aside as hard as they
 assert what is counted -- because the failure mode of a planning tool is
@@ -157,18 +157,18 @@ def test_an_unguarded_collection_admits_everything(tmp_path):
 # ---- what it refuses to answer -----------------------------------------
 
 def test_a_set_relative_rule_is_set_aside_by_name(tmp_path):
-    # `budget` refuses a document because of the *other* documents on the
+    # `distinct` refuses a document because of the *other* documents on the
     # page. Evaluated against a sample it would either raise or invent an
     # answer about a page that never existed.
     loaded = specs(tmp_path, "in_force.py", """
-        from voyd import guard, deadline, budget
+        from voyd import guard, deadline, distinct
         @guard("notes")
         class Notes:
             expire_at = deadline()
-            tokens = budget(4000)
+            chunk = distinct()
     """)
     kept, aside = plannable(loaded["notes"], with_caller=False)
-    assert [(s.rule, s.why) for s in aside] == [("over_budget", SET_RELATIVE)]
+    assert [(s.rule, s.why) for s in aside] == [("redundant", SET_RELATIVE)]
     assert all(not getattr(r, "needs_tab", False) for r in kept.rules)
     # And the rest of the policy is still planned, not abandoned with it.
     assert any(r.reason == "deadline" for r in kept.rules)
@@ -197,15 +197,15 @@ def test_setting_every_rule_aside_reports_that_nothing_was_compared(tmp_path):
     # would come back guarded by two rules the operator never wrote -- and
     # the plan would report a difference this code invented.
     loaded = specs(tmp_path, "in_force.py", """
-        from voyd import guard, budget
+        from voyd import guard, distinct
         @guard("notes")
         class Notes:
-            tokens = budget(4000)
+            chunk = distinct()
     """)
     kept, aside = plannable(loaded["notes"], with_caller=False)
     assert kept is None and len(aside) == 1
     one = compare("notes", loaded["notes"], loaded["notes"],
-                  [{"tokens": 10}], when=NOW)
+                  [{"chunk": "a"}], when=NOW)
     assert one.not_compared is True
     assert one.sampled == 0 and not one.changed
 
@@ -406,17 +406,17 @@ def test_the_report_leads_with_what_becomes_reachable(tmp_path):
 
 def test_the_report_names_what_it_did_not_plan(tmp_path):
     loaded = specs(tmp_path, "in_force.py", """
-        from voyd import guard, deadline, budget
+        from voyd import guard, deadline, distinct
         @guard("notes")
         class Notes:
             expire_at = deadline()
-            tokens = budget(4000)
+            chunk = distinct()
     """)
     result = plan(loaded, loaded, lambda _c: [{"expire_at": FUTURE,
-                                               "tokens": 10}], when=NOW)
+                                               "chunk": "a"}], when=NOW)
     text = render(result)
     assert SET_RELATIVE in text
-    assert "notes.over_budget" in text
+    assert "notes.redundant" in text
     assert "A sample is not a page" in text
 
 

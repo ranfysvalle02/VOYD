@@ -59,8 +59,8 @@ whether ``lift()`` works and whether imposing it schedules the reaper. See
 
 **A rule is a protocol, not a list.** ``reason`` + ``refuses(doc)`` +
 ``clause()``, and a stranger's rule is a first-class one. That is what makes
-the set-relative reasons possible -- a token budget, a de-duplicator, a
-provenance quota -- which refuse a document because of the *other* documents
+the set-relative reasons possible -- a de-duplicator, a provenance quota
+-- which refuse a document because of the *other* documents
 on the page, and which no index filter and no policy engine can express. See
 ``examples/rosetta.py`` and ``examples/portfolio.py``.
 
@@ -87,7 +87,7 @@ no mock tier, on purpose, because these properties are only true if the
 
 from __future__ import annotations
 
-from .declare import (auto_embed, budget, clearance, deadline, distinct,
+from .declare import (auto_embed, clearance, deadline, distinct,
                       embedded_with, guard, holdable, mask, restricted_to,
                       operator, recipe, rerank, revocable, sanitized,
                       sealed, stage, subjects, tenant, transform)
@@ -97,7 +97,7 @@ __version__ = "0.2.0"
 __all__ = [
     # The declarative policy surface -- everything `voydfile.py` needs.
     "guard", "deadline", "revocable", "holdable", "tenant",
-    "restricted_to", "clearance", "embedded_with", "budget", "distinct",
+    "restricted_to", "clearance", "embedded_with", "distinct",
     "sealed", "auto_embed", "subjects", "sanitized", "mask",
     # Page-shaping, which is not a rule and is exported beside them
     # anyway: it is declared in the same file, and a vocabulary split

@@ -9,11 +9,6 @@ Built with `db=None` on purpose: nothing here queries anything. That is
 not thrift, it is the property that lets the same check run on a wire at
 all, and the tests construct these exactly as the proxy does.
 
-`Budgets` is the one piece of state that outlives a message, and it is
-here because it belongs to the same decision: a cumulative rule spans a
-*read* while this boundary is handed a *batch*, and the client picks how
-many batches a read arrives in.
-
 `enforce` is the fast path -- lazy decode, cheapest questions first, byte
 for byte forwarding of everything that is not a guarded cursor batch.
 `judge` is the same thing with decryption in front of it for collections
@@ -31,8 +26,6 @@ from voyd.engine.admission.masks import apply as apply_masks
 from .. import cascade, metrics, seal
 from ..codec import LAZY, decode_op_msg, encode_op_msg
 
-
-_FRESH_TAB: Any = object()
 
 
 class Guard:
@@ -147,19 +140,9 @@ class Guard:
         self.handle.receipts_log.masked += total
         return out
 
-    @property
-    def cumulative(self) -> bool:
-        """Does any rule here compare a document against the page so far?
-
-        The gate on `Budgets` doing anything at all. A `budget()` or a
-        `distinct()` needs a running total that outlives one batch;
-        everything else is per document and needs no state between them.
-        """
-        return any(getattr(r, "needs_tab", False) for r in self.spec.rules)
-
-    def filter(self, docs: list[dict], caller: dict | None = None,
-               tab: Any = _FRESH_TAB) -> list[dict]:
-        kept = self._bound(docs, caller, tab, shape=True)
+    def filter(self, docs: list[dict], caller: dict | None = None
+               ) -> list[dict]:
+        kept = self._bound(docs, caller, shape=True)
         self.refused += len(docs) - len(kept)
         self.admitted += len(kept)
         return kept
@@ -174,11 +157,11 @@ class Guard:
         `admitted`, which counted these documents the first time. What this
         pass refuses *is* counted, because it is a refusal like any other.
         """
-        kept = self._bound(docs, caller, _FRESH_TAB, shape=False)
+        kept = self._bound(docs, caller, shape=False)
         self.refused += len(docs) - len(kept)
         return kept
 
-    def _bound(self, docs: list[dict], caller: dict | None, tab: Any, *,
+    def _bound(self, docs: list[dict], caller: dict | None, *,
                shape: bool) -> list[dict]:
         if self.spec.attest:
             # `_voyd` is the boundary's to write. One stored in the row, or
@@ -206,12 +189,7 @@ class Guard:
             scopes = {d.get(self.spec.tenant) for d in docs}
             handle = handle.for_tenant(scopes.pop() if len(scopes) == 1
                                        else object())
-        # `_FRESH_TAB` means "this call is the whole read", which is true
-        # of everything except a cursor batch. `Budgets` hands in a tab
-        # that spans the cursor; see its docstring for why a fresh one per
-        # batch is a hole rather than an inefficiency.
-        return (handle.reachable(docs, shape=shape) if tab is _FRESH_TAB
-                else handle.reachable(docs, tab=tab, shape=shape))
+        return handle.reachable(docs, shape=shape)
 
     @property
     def neutralised(self) -> int:
@@ -339,76 +317,8 @@ def guard_for(guards: dict[str, Guard], body: Mapping,
     return guards.get(name) if isinstance(name, str) else None
 
 
-class Budgets:
-    """One running total per cursor, because the client picks the batch size.
-
-    A cumulative rule -- `budget()`, `distinct()` -- compares a document
-    against the total of the page so far. The handle opens one tab per
-    `reachable()` call, and on the wire that is one call per *batch*. A
-    cursor delivers one logical read in as many batches as the client asks
-    for, and `batchSize` is a field in the client's own `find`.
-
-    So without this, a declared budget of 100 tokens is a budget of 100
-    tokens **per batch**, and `batchSize=2` over ten 40-token documents
-    serves all ten. Nothing errors, nothing is logged, and the policy file
-    says the rule is in force. That is the shape of hole this whole
-    project is about, so the fix is not an optimisation and the tab is not
-    optional.
-
-    Keyed by the server's cursor id, held per connection, and dropped when
-    the cursor is exhausted or killed. Per connection rather than on the
-    `Guard`, which every connection shares: a tab is one client's read.
-
-    Costs nothing when no guarded collection declares a cumulative rule,
-    which is the ordinary case -- `Guard.cumulative` is the gate and the
-    dict stays empty.
-    """
-
-    __slots__ = ("_open",)
-
-    def __init__(self) -> None:
-        self._open: dict[tuple[str, int], Any] = {}
-
-    def tab_for(self, guard: Guard, cursor_id: Any) -> Any:
-        """The tab this batch should be charged against.
-
-        `_FRESH_TAB` for a read that is already whole: no cumulative rule
-        to carry, or a cursor the server exhausted in one reply (`id: 0`),
-        where there is no second batch for a total to span.
-        """
-        if not guard.cumulative:
-            return _FRESH_TAB
-        if not isinstance(cursor_id, int) or cursor_id == 0:
-            return _FRESH_TAB
-        key = (guard.collection, cursor_id)
-        tab = self._open.get(key)
-        if tab is None:
-            tab = guard.handle.open_tab()
-            self._open[key] = tab
-        return tab
-
-    def done(self, cursor_id: Any) -> None:
-        """Forget a cursor's totals. Called when the server says `id: 0`.
-
-        Without this a long-lived connection accumulates one tab per query
-        it has ever run. Cursor ids are not reused while a cursor is live,
-        so dropping on exhaustion is the whole of the lifecycle.
-        """
-        if not isinstance(cursor_id, int) or cursor_id == 0 or not self._open:
-            return
-        for key in [k for k in self._open if k[1] == cursor_id]:
-            del self._open[key]
-
-    def forget(self, cursor_ids: Any) -> None:
-        """A client abandoned these cursors with `killCursors`."""
-        if isinstance(cursor_ids, list):
-            for cid in cursor_ids:
-                self.done(cid)
-
-
 def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
-            verbose: bool, caller: dict | None = None,
-            budgets: "Budgets | None" = None) -> bytes:
+            verbose: bool, caller: dict | None = None) -> bytes:
     """Apply admission to a cursor batch on its way back to the client.
 
     Everything that is not a guarded cursor batch is forwarded byte for byte.
@@ -449,12 +359,7 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
     # declared guard is about to judge. Still lazy: the rules name a handful
     # of top-level fields, so a vector never becomes a list of floats -- and a
     # document that survives is re-encoded from the bytes it arrived in.
-    cursor_id = cursor.get("id")
-    tab = (budgets.tab_for(guard, cursor_id) if budgets is not None
-           else _FRESH_TAB)
-    kept = guard.filter(batch, caller, tab)
-    if budgets is not None and cursor_id == 0:
-        budgets.done(cursor_id)
+    kept = guard.filter(batch, caller)
     # The bytes are forwarded untouched only when the batch came back
     # *identical* -- same length and the same objects. Length alone was
     # the test, and it is the right test for whole-document refusal and
@@ -518,8 +423,7 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
                 guards: dict[str, Guard], verbose: bool,
                 vault: "seal.Vault | None",
                 meter: "metrics.Meter | None" = None,
-                caller: dict | None = None,
-                budgets: "Budgets | None" = None) -> bytes:
+                caller: dict | None = None) -> bytes:
     """`enforce`, plus decryption for the collections that declared it.
 
     **The fast path is byte-for-byte the old one.** With no `--key-vault`,
@@ -540,14 +444,14 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
     process -- but it is wasted work worth naming.
     """
     if vault is None:
-        return enforce(raw, req_id, resp_to, guards, verbose, caller, budgets)
+        return enforce(raw, req_id, resp_to, guards, verbose, caller)
 
     peek = decode_op_msg(raw, LAZY)
     if peek is None:
         return raw
     collection = _collection_of(peek[1])
     if not vault.seals(collection):
-        return enforce(raw, req_id, resp_to, guards, verbose, caller, budgets)
+        return enforce(raw, req_id, resp_to, guards, verbose, caller)
 
     # Eager, unlike the fast path: these documents are about to be rebuilt
     # with a decrypted field in them, so there is no forwarding the bytes
@@ -575,12 +479,7 @@ async def judge(raw: bytes, req_id: int, resp_to: int,
     if guard is not None:
         if tally:
             guard.note_sealed(tally)
-        cursor_id = cursor.get("id")
-        tab = (budgets.tab_for(guard, cursor_id) if budgets is not None
-               else _FRESH_TAB)
-        kept = guard.filter(plain, caller, tab)
-        if budgets is not None and cursor_id == 0:
-            budgets.done(cursor_id)
+        kept = guard.filter(plain, caller)
     else:
         kept = plain
 

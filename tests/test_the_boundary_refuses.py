@@ -11,8 +11,8 @@ but the four properties the rest of the system is built on top of:
                        responds differently to `quarantined` than to
                        `deadline`, so the first reason is the specific one.
     the order is not the declared order  cumulative rules are asked last and
-                       the ones that *charge* last of all, so a budget never
-                       spends room on a document another rule refuses.
+                       the ones that *charge* last of all, so a quota never
+                       spends allowance on a document another rule refuses.
     the two halves agree  a rule's `clause()` is an optimisation, so the
                        documents it drops server-side must be exactly the
                        ones `refuses` would drop on the way out.
@@ -25,17 +25,54 @@ from datetime import timedelta
 import pytest
 
 from voyd.engine import UTC, now
-from voyd.engine.admission import (DEADLINE, NOT_CLEARED, OVER_BUDGET,
-                                   QUARANTINED, REDUNDANT, REVOKED, UNCOSTED,
-                                   UNREADABLE, UNRECOVERABLE, AdmissionSpec,
-                                   Budget, Clearance, Deadline, Distinct,
+from voyd.engine.admission import (DEADLINE, NOT_CLEARED, QUARANTINED,
+                                   REDUNDANT, REVOKED, UNREADABLE,
+                                   UNRECOVERABLE, AdmissionSpec,
+                                   Clearance, Deadline, Distinct,
                                    EmbeddedWith, Marked, Restricted,
                                    Unrecoverable, quarantined, revoked,
                                    why_refused)
-from voyd.engine.admission.rules import Tab, Tabs
+from voyd.engine.admission.rules import Tabs
 
 PAST = now() - timedelta(hours=1)
 FUTURE = now() + timedelta(hours=1)
+
+
+class _Used:
+    def __init__(self) -> None:
+        self.used = 0
+        self.exhausted = False
+
+
+class Quota:
+    """A third-party cumulative rule that *charges*: at most ``cap`` per read.
+
+    Written against the public protocol, the way `examples/portfolio.py`
+    writes its rules, so the asking order is tested on a stranger's rule.
+    """
+
+    reason = "over_quota"
+    needs_tab = True
+    charges = True
+    bypassable = True
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+
+    def new_tab(self) -> _Used:
+        return _Used()
+
+    def why(self, doc, *, when=None, tab=None):
+        if tab is None:
+            return None
+        if tab.used >= self.cap:
+            tab.exhausted = True
+            return self.reason
+        tab.used += 1
+        return None
+
+    def clause(self):
+        return None
 
 
 def spec(*rules, **kw) -> AdmissionSpec:
@@ -197,42 +234,15 @@ def test_ciphertext_reaching_a_read_path_that_never_decrypted_it_is_named():
 
 # ---- set-relative reasons: a property of the page, not the document -----
 
-def test_a_budget_admits_a_strict_prefix_and_latches_closed():
-    rule = Budget(limit=100, cost_field="tokens")
-    s = spec(Deadline(), rule)
-    tab = Tabs({id(rule): rule.new_tab()})
-
-    def verdict(cost):
-        return why_refused({"tokens": cost}, s, tab=tab)
-
-    assert verdict(60) is None
-    # Does not fit. Not partially spent, and the page is now closed: a
-    # later small hit is not slipped in ahead of it, because that would
-    # reorder results by size rather than by relevance.
-    assert verdict(60) == OVER_BUDGET
-    assert verdict(1) == OVER_BUDGET
-    assert tab.spent == 60
-
-
 def test_the_same_document_is_admitted_alone_and_refused_in_company():
     # The property no index filter and no policy engine can express.
-    doc = {"tokens": 80}
-    assert ask(doc, Budget(limit=100)) is None
-    rule = Budget(limit=100)
-    s, tab = spec(rule), None
-    tab = Tabs({id(rule): rule.new_tab()})
-    assert why_refused(doc, s, tab=tab) is None
-    assert why_refused(dict(doc), s, tab=tab) == OVER_BUDGET
-
-
-def test_a_cost_that_cannot_be_read_is_refused_but_does_not_close_the_page():
-    rule = Budget(limit=100)
+    doc = {"chunk": "a"}
+    assert ask(doc, Distinct(on="chunk")) is None
+    rule = Distinct(on="chunk")
     s = spec(rule)
     tab = Tabs({id(rule): rule.new_tab()})
-    for bad in (None, "many", -1, True, 3.7):
-        assert why_refused({"tokens": bad}, s, tab=tab) == UNCOSTED, bad
-    # One uncostable document says nothing about the room left.
-    assert why_refused({"tokens": 90}, s, tab=tab) is None
+    assert why_refused(doc, s, tab=tab) is None
+    assert why_refused(dict(doc), s, tab=tab) == REDUNDANT
 
 
 def test_a_duplicate_is_dropped_and_the_first_survivor_takes_the_slot():
@@ -265,48 +275,36 @@ def test_distinct_refuses_to_guess_what_makes_two_documents_the_same():
         Distinct(on=3)
 
 
-def test_a_budget_whose_arithmetic_would_be_ambiguous_fails_at_construction():
-    # Cheap at construction, rather than every document `over_budget` at
-    # runtime with receipts that still look exact.
-    with pytest.raises(TypeError):
-        Budget(limit=3.7)          # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        Budget(limit=True)         # type: ignore[arg-type]
-    with pytest.raises(ValueError):
-        Budget(limit=-1)
-    with pytest.raises(ValueError):
-        Tab(limit=10).charge(-1)
-
-
 # ---- the asking order is the package's, not the policy author's ---------
 
-def test_a_budget_never_spends_room_on_a_document_another_rule_refuses():
-    budget = Budget(limit=100)
+def test_a_charging_rule_never_spends_on_a_document_another_rule_refuses():
+    quota = Quota(cap=1)
     # Declared *first*, which is the order that would be wrong.
-    s = spec(budget, Deadline(), revoked())
-    tab = Tabs({id(budget): budget.new_tab()})
-    assert why_refused({"tokens": 90, "expire_at": PAST}, s, tab=tab) == DEADLINE
-    assert tab.spent == 0, "an expired document was charged for"
-    assert why_refused({"tokens": 90}, s, tab=tab) is None
-    assert tab.spent == 90
+    s = spec(quota, Deadline(), revoked())
+    tab = Tabs({id(quota): quota.new_tab()})
+    assert why_refused({"expire_at": PAST}, s, tab=tab) == DEADLINE
+    assert tab.for_rule(quota).used == 0, "an expired document was charged for"
+    assert why_refused({}, s, tab=tab) is None
+    assert tab.for_rule(quota).used == 1
 
 
-def test_a_de_duplicator_is_asked_before_the_budget_that_charges():
-    # Four copies of one passage must not report `over_budget` for content
-    # that never reached the page.
-    budget, distinct = Budget(limit=100), Distinct(on="chunk")
-    s = spec(budget, distinct)
-    tab = Tabs({id(budget): budget.new_tab(), id(distinct): distinct.new_tab()})
-    assert why_refused({"chunk": "a", "tokens": 90}, s, tab=tab) is None
+def test_a_de_duplicator_is_asked_before_the_rule_that_charges():
+    # Four copies of one passage must not spend a quota on content that
+    # never reached the page.
+    quota, distinct = Quota(cap=2), Distinct(on="chunk")
+    s = spec(quota, distinct)
+    tab = Tabs({id(quota): quota.new_tab(), id(distinct): distinct.new_tab()})
+    assert why_refused({"chunk": "a"}, s, tab=tab) is None
     for _ in range(3):
-        assert why_refused({"chunk": "a", "tokens": 90}, s, tab=tab) == REDUNDANT
-    assert tab.spent == 90
+        assert why_refused({"chunk": "a"}, s, tab=tab) == REDUNDANT
+    assert tab.for_rule(quota).used == 1
+    assert why_refused({"chunk": "b"}, s, tab=tab) is None
 
 
 def test_two_cumulative_rules_do_not_share_one_running_total():
     # Keyed by identity, so two equal-but-deliberate declarations cannot
-    # have one limit silently govern the other.
-    a, b = Budget(limit=100), Budget(limit=100)
+    # have one rule's memory silently govern the other.
+    a, b = Distinct(on="chunk"), Distinct(on="chunk")
     assert a == b and id(a) != id(b)
     tabs = Tabs({id(a): a.new_tab(), id(b): b.new_tab()})
     assert tabs.for_rule(a) is not tabs.for_rule(b)
@@ -335,17 +333,6 @@ def test_a_rule_that_raises_refuses_the_document_and_is_named():
     # An exception inside a filter is how the filter gets skipped, and a
     # third-party rule must not be a way back to that.
     assert ask({}, Exploding()) == "jurisdiction"
-
-
-def test_a_third_party_costing_callable_that_raises_is_uncosted_not_free():
-    def cost(doc):
-        raise RuntimeError("tokenizer exploded")
-
-    rule = Budget(limit=100, cost=cost)
-    s = spec(rule)
-    tab = Tabs({id(rule): rule.new_tab()})
-    assert why_refused({}, s, tab=tab) == UNCOSTED
-    assert tab.spent == 0
 
 
 def test_a_spec_with_no_rules_still_refuses_the_two_defaults():
@@ -383,7 +370,7 @@ def test_the_rules_with_no_expressible_clause_say_so_rather_than_guess():
     # A clause-only rule would be a hole; per-document-only is merely
     # slower. Each of these is the second kind, on purpose.
     for rule in (Unrecoverable(), Clearance(order=("a",)), Restricted(),
-                 Budget(limit=1), Distinct(on="chunk")):
+                 Distinct(on="chunk")):
         assert rule.clause() is None, rule
 
 
@@ -431,7 +418,7 @@ def test_a_subject_declaration_that_cannot_be_acted_on_is_refused_at_load():
 
 def test_a_cumulative_rule_with_nowhere_to_keep_its_total_is_refused():
     class Halfway:
-        reason = "budgetish"
+        reason = "quotaish"
         needs_tab = True
 
         def refuses(self, doc, *, when=None, tab=None):
@@ -481,12 +468,11 @@ def test_the_asking_order_is_the_order_why_refused_uses():
     # cache is fast and wrong.
     from voyd.engine.admission.spec import asking_order
 
-    budget, distinct, deadline = (Budget(limit=10), Distinct(on="chunk"),
-                                  Deadline())
-    order = asking_order(spec(budget, distinct, deadline))
+    quota, distinct, deadline = Quota(cap=10), Distinct(on="chunk"), Deadline()
+    order = asking_order(spec(quota, distinct, deadline))
     assert order[0] is deadline, "a pure rule was asked after a cumulative one"
     assert order[1] is distinct, "a rule that charges was asked too early"
-    assert order[2] is budget
+    assert order[2] is quota
 
 
 def test_a_spec_with_no_rules_still_derives_the_two_defaults():

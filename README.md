@@ -175,7 +175,6 @@ since there would be nowhere to record that the fact was forgotten.
 | `clearance(order, roles)` | an ordered ladder, the caller's rung read from their roles |
 | `subjects(key=...)` | an array whose elements are subjects in their own right |
 | `embedded_with(model)` | refuse a vector produced by a different model |
-| `budget(n)` | refuse once the prompt has no room left |
 | `distinct()` | refuse a repeat of content already on the page |
 | `sealed()` | ciphertext at rest, under a key scoped to the tenant |
 | `auto_embed(model)` | the *server* embeds this text; refuse a client's own vector |
@@ -226,8 +225,8 @@ the server, never from the client, and an unidentified caller sees the mask.
 Top-level fields only — the attribute name is the path. Mask the parent of
 a nested value; elements of a `subjects()` array are not masked one by one.
 
-`budget(n)` and `distinct()` are **set-relative**: they refuse a document
-because of the *other* documents on the page, so the same document is
+`distinct()` is **set-relative**: it refuses a document because of the
+*other* documents on the page, so the same document is
 admitted alone and refused in company. No index filter and no policy engine
 can express that — `$vectorSearch` decides each candidate before the page
 exists, and `enforce(subject, object, action)` has nowhere to put the rest
@@ -424,9 +423,9 @@ opposite reason: a rule that fails open is a leak, a transform that fails
 open is impossible, and refusing a whole read over a broken reranker
 would be an outage caused by an optimisation.
 
-Cumulative rules are held back to the terminal pass, so a `budget()`
-charges the page that is *served* rather than the one that was proposed
-and then reranked down.
+Cumulative rules are held back to the terminal pass, so `distinct()`
+keeps the first copy on the page that is *served* rather than on the one
+that was proposed and then reranked.
 
 A collection with no transforms runs the loop it always ran.
 
@@ -720,10 +719,9 @@ member. Those are facts about the
 policy, so they are not weakened by a sample and do not disappear against
 an empty collection.
 
-**It refuses to answer three questions, by name.** `budget()` and
-`distinct()` are set-relative — they refuse a document because of the other
-documents on the page, and a sample is not a page — so they are set aside
-and printed rather than evaluated one document at a time. `clearance()` and
+**It refuses to answer three questions, by name.** `distinct()` is
+set-relative — it refuses a document because of the other documents on the
+page, and a sample is not a page — so it is set aside and printed rather than evaluated one document at a time. `clearance()` and
 `restricted_to()` decide by who is asking, so they are planned only against
 a caller you name with `--as`. And the tenant is enforced by the handle
 against the scope a read is bound to rather than by a rule, so a plan
@@ -1131,6 +1129,9 @@ the second language.
 - A transform cannot widen a read, and that is the only promise made
   about one. It can still be slow, wrong, or expensive, and nothing here
   bounds how long somebody's reranker runs inside the egress path.
+- On the wire, `distinct()` judges one reply at a time. A copy that
+  arrives in a later `getMore` batch of the same cursor is not compared
+  with the ones already served.
 - Backfill fills a lone `$vectorSearch` and nothing else. A pipeline with
   a stage after the search, a `$search`, or a `$rankFusion` still comes
   back short by whatever was refused, and a widened page that is mostly
@@ -1156,9 +1157,8 @@ the second language.
   server's profiler and logs, and `currentOp` all see it.
 - Virtual steps run with no time bound but the client's own. A slow one
   holds its connection's request loop; nothing here cancels it.
-- A `budget()` or `distinct()` rule is re-asked of what a step returns, so
-  fields a step adds count against the budget, and duplicate rows from an
-  `$unwind` are judged as duplicates.
+- A `distinct()` rule is re-asked of what a step returns, so duplicate
+  rows from an `$unwind` are judged as duplicates.
 - The terminal pass after a step restores the fields the verdict reads
   from the admitted source, so a step cannot change them — even to a value
   the policy would accept.

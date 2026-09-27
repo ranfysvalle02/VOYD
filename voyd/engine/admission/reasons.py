@@ -36,25 +36,10 @@ UNRECOVERABLE = "unrecoverable"
 # ``off_scope`` is worth a page.
 OFF_SCOPE = "off_scope"
 
-# The context-token budget for this read was spent before this hit could be
-# admitted. Not a reason the fact is *forgotten* -- a reason there was no room
-# for it in the prompt being assembled. Counted apart so a climbing
-# ``over_budget`` reads as "raise the budget or tighten retrieval", not "the
-# system is forgetting things".
-OVER_BUDGET = "over_budget"
-# The budget could not be charged for this document: its cost field is missing
-# or not a non-negative number. Fails closed like an unreadable deadline -- a
-# hit whose size cannot be established has no business silently taking room --
-# but, unlike being over budget, it does not close the page: one uncostable
-# document says nothing about how much room is left.
-UNCOSTED = "uncosted"
-# A near-identical document was already admitted to this same read. The second
-# *set*-relative reason, and it is worth saying how it differs from the first:
-# ``over_budget`` is about how much room is left, ``redundant`` is about what
-# is already in the room. Neither is a property of the document -- both are
-# properties of the page it is joining -- which is why no index filter and no
-# per-object policy engine can express either. Counted apart from everything
-# above because a climbing ``redundant`` is a *chunking* problem, not a
+# A near-identical document was already admitted to this same read. Not a
+# property of the document but of the page it is joining, which is why no
+# index filter and no per-object policy engine can express it. Counted apart
+# from everything above because a climbing ``redundant`` is a *chunking* problem, not a
 # forgetting one: the same passage was indexed several times.
 REDUNDANT = "redundant"
 

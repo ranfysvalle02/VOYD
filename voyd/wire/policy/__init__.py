@@ -50,7 +50,7 @@ that are say so in `erasure`.
 from __future__ import annotations
 
 from .erasure import cascade_first, cascade_first_for_one, erase_first
-from .guarding import SUPPLIABLE_CLAIMS, Budgets, Guard, enforce
+from .guarding import SUPPLIABLE_CLAIMS, Guard, enforce
 from .guarding import _wants_a_caller as _wants_a_caller
 from .guarding import guard_for, judge, mask_reduced, unsuppliable_claims
 from .backfill import Backfill
@@ -79,7 +79,7 @@ from .verbs import (delete_reply, derive_on_insert,
 
 __all__ = [
     # ---- refuse a document ----
-    "Guard", "Budgets", "Backfill", "enforce", "judge", "guard_for",
+    "Guard", "Backfill", "enforce", "judge", "guard_for",
     "unsuppliable_claims", "SUPPLIABLE_CLAIMS", "mask_reduced",
 
     # ---- rewrite a command ----

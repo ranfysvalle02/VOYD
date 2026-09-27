@@ -458,11 +458,11 @@ class AdmissionCore:
         return rule.clause()
 
     def open_tab(self) -> Tabs | None:
-        """A fresh budget for one read, or ``None`` if no cumulative rule.
+        """Fresh per-read state, or ``None`` if no cumulative rule.
 
         One tab per read, never stored on the handle: the handle is shared
-        across concurrent callers, so a running total on it would bleed one
-        request's spend into another's -- see ``Tab`` for the full argument.
+        across concurrent callers, so per-read state on it would bleed one
+        request's page into another's -- see ``Tabs`` for the full argument.
         Costs nothing when no cumulative rule is declared, which is the
         ordinary case: the loop finds nothing and returns ``None``, and
         ``_admit`` hands that straight through to a rule that ignores it.
@@ -492,9 +492,9 @@ class AdmissionCore:
         query clause -- every hit from ``$vectorSearch``, where the deadline is
         deliberately not an index filter.
 
-        ``tab`` is the read's running budget, threaded through so a cumulative
-        rule can charge it. ``None`` on a point read or when no budget is
-        declared, in which case a cumulative rule has nothing to say.
+        ``tab`` is the read's per-read state, threaded through so a cumulative
+        rule can consult it. ``None`` on a point read or when no cumulative
+        rule is declared, in which case a cumulative rule has nothing to say.
         """
         if doc is None:
             return doc
@@ -571,13 +571,12 @@ class AdmissionCore:
         and correct in the suite.
 
         **Why cumulative rules are not asked.** ``tab`` is deliberately not
-        threaded in. A budget is a property of the set being assembled for
-        one prompt, charged once per retrieval unit; charging it again per
-        element would spend the same allowance twice and make a page's
-        ``spent`` depend on how the corpus happens to be nested. ``Budget``
-        already returns ``None`` for a ``tab`` of ``None`` -- "not a set
-        read: nothing to say" -- so this needs no special case, only the
-        decision written down.
+        threaded in. A cumulative rule answers a question about the set being
+        assembled for one prompt, once per retrieval unit; asking it again per
+        element would make its answer depend on how the corpus happens to be
+        nested. ``Distinct`` already returns ``None`` for a ``tab`` of
+        ``None`` -- "not a set read: nothing to say" -- so this needs no
+        special case, only the decision written down.
         """
         path = self.spec.subjects
         if not path:
@@ -741,11 +740,11 @@ class AdmissionCore:
         successfully emit one. Code that never receives a fact cannot
         mishandle it.
 
-        Cumulative rules are held back from the first pass. A budget must
-        charge the page that is served and not the one that was proposed
-        and then reranked down -- the same argument ``why_refused``
+        Cumulative rules are held back from the first pass. A cumulative
+        rule must judge the page that is served and not the one that was
+        proposed and then reranked down -- the same argument ``why_refused``
         already makes about asking ``charges`` rules last. It means a
-        budget is asked exactly once per document, in the terminal pass,
+        cumulative rule is asked exactly once per document, in the terminal pass,
         which is also the only pass that can know what the page finally
         contains.
 
@@ -786,14 +785,14 @@ class AdmissionCore:
         ``$rankFusion`` hits have not been through ``_query`` and never will
         be, so they are admitted one at a time, here.
 
-        A budget applies: this is a set being assembled for a prompt, so a
-        tab spans the list and cuts it at the token ceiling.
+        Cumulative rules apply: this is a set being assembled for a prompt,
+        so one tab spans the list.
 
         **Pass ``tab`` when this list is one instalment of a larger read.**
         A cumulative rule compares a document against the running total of
         the page so far, and "the page" is not always one call: a cursor
         delivers a page in batches, and a fresh tab per batch means a
-        budget of 100 admits 100 *per batch*. Whoever knows the read is
+        de-duplicator forgets what the last batch admitted. Whoever knows the read is
         one read owns the tab and hands it in. ``open_tab()`` builds one.
         """
         if self.tenant and self._scope is _UNSET:
@@ -846,18 +845,18 @@ class AdmissionCore:
                   ) -> tuple[list[dict], dict[str, int], Tabs | None, int]:
         """Admit a candidate set without recording anything yet.
 
-        Returns the tab as well, so ``saturate`` can read how much budget was
-        spent and whether it was exhausted. A fresh tab per call is deliberate:
+        Returns the tab as well, so ``saturate`` can read whether it was
+        exhausted. A fresh tab per call is deliberate:
         each refill round re-classifies the whole superset from the top, so a
         tab shared across rounds would double-charge the documents it re-sees.
         The loop stops on the round that exhausts, so per-round tabs are exact.
 
         ``max_kept`` matters when search over-fetches. Classification stops
-        once the returned prefix is full, so a budget is charged for what the
-        page selects -- not for extra candidates fetched only as refill
-        insurance. After a budget overflow it keeps classifying the fetched
-        tail without charging it: the latched tab refuses every later fit, but
-        pure rules still run first so reason accounting is identical to
+        once the returned prefix is full, so a cumulative rule records what
+        the page selects -- not extra candidates fetched only as refill
+        insurance. After a rule closes the page it keeps classifying the
+        fetched tail: pure rules still run first so reason accounting is
+        identical to
         ``find`` and ``reachable``.
         """
         tab = self.open_tab()

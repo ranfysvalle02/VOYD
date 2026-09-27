@@ -222,13 +222,6 @@ class Page(list):
                   here the candidates were counted as they went past.
     ``examined``  how many candidates it took to fill the page. The cost of
                   enforcing on read rather than in the index, as a number.
-    ``spent``     budget charged to the selected page prefix when a ``Budget``
-                  rule is in force (``0`` otherwise). Over-fetched candidates
-                  below a full page are never charged. A selected document
-                  whose key later proves unrecoverable may still have reserved
-                  room, deliberately conservative: decryption happens after
-                  selection and a missing key does not make the prompt budget
-                  available to a lower-ranked hit retroactively.
     ``redacted``  how many *embedded subjects* were removed from documents on
                   this page -- a chapter inside an admitted book, a comment
                   inside an admitted ticket. Zero unless the collection
@@ -250,19 +243,19 @@ class Page(list):
                            re-read per candidate, so every hit on the page
                            agrees about what "now" was.
     ``policy_revision``    the revision string the handle was declared with, or
-                           ``None``. ``over_budget`` does not say whether the
-                           budget was 100 or 10000; a revision does.
+                           ``None``. ``not_cleared`` does not say which
+                           clearance ladder was in force; a revision does.
     ``snapshot_complete``  whether this page carries a read snapshot at all. A
                            bare ``list`` degrades to ``False``, which is what
                            makes "incomplete pages cannot be persisted" a check
                            rather than a hope.
     """
 
-    __slots__ = ("refused", "examined", "spent", "redacted",
+    __slots__ = ("refused", "examined", "redacted",
                  "evaluated_at", "policy_revision", "snapshot_complete")
 
     def __init__(self, hits: Iterable[dict] = (), *, refused: dict | None = None,
-                 examined: int = 0, spent: int = 0,
+                 examined: int = 0,
                  redacted: int = 0,
                  evaluated_at: datetime | None = None,
                  policy_revision: str | None = None,
@@ -270,7 +263,6 @@ class Page(list):
         super().__init__(hits)
         self.refused: dict[str, int] = dict(refused or {})
         self.examined = examined
-        self.spent = spent
         self.redacted = redacted
         self.evaluated_at = evaluated_at
         self.policy_revision = policy_revision
@@ -293,6 +285,5 @@ class Page(list):
                         for r, n in sorted(self.refused.items())],
             "refused_total": self.refused_total,
             "examined": self.examined,
-            "spent": self.spent,
             "redacted": self.redacted,
         }

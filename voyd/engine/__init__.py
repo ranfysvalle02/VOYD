@@ -44,10 +44,10 @@ from .errors import (
 from .expiry import Expiry, ExpirySpec
 from .admission import (DEADLINE, KEY_UNAVAILABLE, LIFTED, NOT_CLEARED,
                         OFF_SCOPE, UNNAMED,
-                        OVER_BUDGET, QUARANTINED, REDUNDANT,
-                        REACHABLE, REFUSED, REVOKED, UNCOSTED, UNKNOWN,
+                        QUARANTINED, REDUNDANT,
+                        REACHABLE, REFUSED, REVOKED, UNKNOWN,
                         UNREADABLE, UNRECOVERABLE, WRONG_MODEL,
-                        Budget, Clearance, Deadline, Distinct,
+                        Clearance, Deadline, Distinct,
                         EmbeddedWith, Page,
                          Restricted,
                          Admission, AdmissionSpec, Marked, Unrecoverable,
@@ -85,12 +85,11 @@ __all__ = [
 
     # ---- reasons a fact may not reach a prompt: the rules you construct ----
     "Deadline", "Marked", "revoked", "quarantined",
-    "Clearance", "Restricted", "EmbeddedWith", "Unrecoverable", "Budget",
-    "Distinct",
+    "Clearance", "Restricted", "EmbeddedWith", "Unrecoverable", "Distinct",
     # ---- and the reasons you read back out of receipts() ----
     "DEADLINE", "REVOKED", "UNREADABLE", "QUARANTINED", "WRONG_MODEL",
     "NOT_CLEARED", "OFF_SCOPE", "UNRECOVERABLE", "KEY_UNAVAILABLE", "LIFTED",
-    "REACHABLE", "REFUSED", "UNKNOWN", "OVER_BUDGET", "UNCOSTED", "UNNAMED",
+    "REACHABLE", "REFUSED", "UNKNOWN", "UNNAMED",
     "REDUNDANT",
 
     # ---- proof ----

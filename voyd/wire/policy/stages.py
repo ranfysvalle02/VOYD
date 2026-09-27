@@ -627,9 +627,8 @@ async def _drain(read: VirtualRead, ask: Callable[[dict], Awaitable[Any]],
                  max_docs: int) -> tuple[list[dict], dict]:
     """Every admitted document the native prefix produces.
 
-    Each reply goes through ``judge_reply`` -- the proxy's own `judge`, with
-    one budget tab for the whole cursor -- exactly as if the client had
-    sent the command. The bound is on what came *upstream*, before judging,
+    Each reply goes through ``judge_reply`` -- the proxy's own `judge` --
+    exactly as if the client had sent the command. The bound is on what came *upstream*, before judging,
     because it is a bound on memory.
     """
     carried = {k: read.body[k] for k in _CARRIED if k in read.body}

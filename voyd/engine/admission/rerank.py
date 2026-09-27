@@ -141,9 +141,7 @@ class MMR:
 
     ``top`` truncates after reordering. Left ``None`` it reorders and
     keeps everything, which is the conservative default: a transform that
-    silently shortened a page would be doing a rule's job badly, and a
-    budget already exists for the case where the page has a size limit
-    that must be *enforced* rather than preferred.
+    silently shortened a page would be doing a rule's job badly.
     """
 
     vector_field: str = "embedding"

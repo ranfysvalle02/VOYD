@@ -11,13 +11,14 @@ file:
 - **pure** -- a function of one document (and, for some, the caller): a
   deadline, a revocation, a clearance. Order-independent, side-effect-free,
   testable as pure functions.
-- **cumulative** -- a function of one document *and a running total across
-  the read*: a token budget. It declares ``needs_tab`` and is handed a
-  ``Tab`` scoped to that one read, which it charges as a side effect.
+- **cumulative** -- a function of one document *and what the read has
+  already admitted*: a de-duplicator. It declares ``needs_tab`` and is handed
+  per-read state of its own making, which it updates as a side effect.
 
 That side effect is why cumulative rules are asked **last**, after every pure
-rule has had its say -- ``spec.why_refused`` enforces the order so a budget
-never charges a document that a deadline was going to refuse anyway. A rule
+rule has had its say -- ``spec.why_refused`` enforces the order so a
+cumulative rule never records a document that a deadline was going to refuse
+anyway. A rule
 author does not arrange this; declaring ``needs_tab`` is the whole contract.
 
 Nothing here touches a database, a caller or a receipt. That is what makes
@@ -27,19 +28,16 @@ at the bottom of the package with only the vocabulary beneath it.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, ClassVar, Protocol
+from typing import Any, ClassVar, Protocol
 
 from ..time import aware, living, now
-from .reasons import (DEADLINE, NOT_CLEARED, OVER_BUDGET, QUARANTINED,
+from .reasons import (DEADLINE, NOT_CLEARED, QUARANTINED,
                       REDUNDANT,
-                      REVOKED, UNCOSTED, UNREADABLE, UNRECOVERABLE,
+                      REVOKED, UNREADABLE, UNRECOVERABLE,
                       WRONG_MODEL)
 
-
-log = logging.getLogger("engine.admission")
 
 # ---- rules -------------------------------------------------------------
 #
@@ -70,8 +68,9 @@ class Rule(Protocol):
                       free of a parameter they have no use for.
     ``needs_tab``     the rule is *cumulative*: it compares the document
                       against a running total for the read, so it is handed
-                      a ``Tab`` and is asked only after every pure rule has
-                      admitted the document. A budget is the one built-in.
+                      its per-read state and is asked only after every pure
+                      rule has admitted the document. ``Distinct`` is the
+                      one built-in.
     ``bypassable``    whether ``including_refused()`` sets this rule aside.
                       True for reasons a fact is *forgotten* -- audit and
                       administration exist to see those. False for reasons a
@@ -82,11 +81,9 @@ class Rule(Protocol):
     ``charges``       the rule *spends* its per-read state rather than only
                       reading it, so it is asked after every other rule
                       including the other cumulative ones. Only meaningful
-                      alongside ``needs_tab``. A budget charged for a
-                      document that a later rule then refuses makes
-                      ``Page.spent`` stop being the sum of what was
-                      admitted, which is the one thing ``Tab.charge``
-                      promises.
+                      alongside ``needs_tab``. A quota spent on a
+                      document that a later rule then refuses is quota
+                      spent on content that never reached the page.
     ``reversible``    present *at all* means somebody imposes this reason
                       with a verb -- it reads a mark on ``field`` that an
                       operator sets. Its value says whether that verb has an
@@ -137,68 +134,21 @@ class Rule(Protocol):
     def clause(self) -> dict | None: ...
 
 
-@dataclass
-class Tab:
-    """One read's running budget. Mutable, and scoped to a single read.
-
-    It is *not* stored on the rule or the handle, and that is the whole point.
-    A handle is deduplicated per collection and cloned per caller, so a
-    running total living on it would bleed one request's spend into another's
-    under concurrency -- the same reason ``for_caller`` returns a new handle
-    rather than assigning to ``self``. So the core opens a fresh ``Tab`` for
-    each read and hands it to the cumulative rules; nothing survives the call.
-
-    ``charge`` is all-or-nothing per document: a cost that does not fit is not
-    partially spent, and the tab latches ``exhausted`` so the *first* document
-    that overflows ends admission for the read (a strict prefix -- see
-    ``Budget`` for why "skip the whale and take the next small one" is
-    rejected).
-    """
-
-    limit: int
-    spent: int = 0
-    exhausted: bool = False
-
-    def charge(self, cost: int) -> bool:
-        """Spend ``cost`` if it fits. Returns whether it did.
-
-        A cost that does not fit latches ``exhausted`` and is not spent, so
-        ``spent`` is always the sum of what was actually admitted. Once
-        latched the tab stays closed: a later, smaller cost is refused too,
-        because the prefix ended at the first overflow -- the strict-prefix
-        guarantee lives here, not only in ``Budget``, so any cumulative rule
-        that charges a tab inherits it.
-        """
-        if isinstance(cost, bool) or not isinstance(cost, int) or cost < 0:
-            raise ValueError("Tab.cost must be a non-negative integer")
-        if self.exhausted or self.spent + cost > self.limit:
-            self.exhausted = True
-            return False
-        self.spent += cost
-        return True
-
-
 class Tabs:
     """Per-read state for *every* cumulative rule on a handle, not just one.
 
     A cumulative rule needs somewhere to remember what this read has already
     admitted, and that somewhere cannot be the rule (frozen, shared across
     concurrent callers) or the handle (deduplicated per collection, cloned
-    per caller). ``Tab`` solved that for one rule. This solves it for several
+    per caller). This holds it for every cumulative rule on the handle
     without letting them touch each other's memory.
 
     The reason it is not a plain ``dict`` is the read path. ``find`` and
-    ``saturate`` ask three questions of per-read state -- is the page closed,
-    how much was spent, out of what -- and neither should have to know which
-    of several rules owns a budget. So this answers those in aggregate and
-    hands each rule its own state by identity:
-
-    - ``exhausted`` is true if *any* rule closed the page. A page is closed
-      when one reason says stop; asking which is ``receipts()``'s job.
-    - ``spent`` / ``limit`` come from the one state that reports them. A rule
-      whose memory is a set of hashes has no meaningful ``spent``, and
-      summing it with a token count would produce a number that reads like
-      tokens and is not.
+    ``saturate`` ask one question of per-read state -- is the page closed --
+    and neither should have to know which of several rules closed it. So
+    this answers that in aggregate and hands each rule its own state by
+    identity: ``exhausted`` is true if *any* rule closed the page. A page is
+    closed when one reason says stop; asking which is ``receipts()``'s job.
 
     Keyed by ``id(rule)`` deliberately: two rules can be *equal* (frozen
     dataclasses with the same fields) and still be two declarations the
@@ -220,20 +170,6 @@ class Tabs:
     def exhausted(self) -> bool:
         return any(getattr(s, "exhausted", False) for s in self._states.values())
 
-    @property
-    def spent(self) -> int:
-        for state in self._states.values():
-            if hasattr(state, "spent"):
-                return state.spent
-        return 0
-
-    @property
-    def limit(self) -> int:
-        for state in self._states.values():
-            if hasattr(state, "limit"):
-                return state.limit
-        return 0
-
 
 class CumulativeRule(Rule, Protocol):
     """The documented shape of the one cumulative rule a spec may declare.
@@ -241,15 +177,15 @@ class CumulativeRule(Rule, Protocol):
     Present for authors and type checkers, not used for runtime dispatch and
     not exported from the engine. ``needs_tab`` is a class contract (not a
     constructor switch), ``new_tab`` creates per-read state, and ``why`` may
-    return a sub-reason such as ``uncosted``.
+    return a sub-reason of its own.
     """
 
     needs_tab: ClassVar[bool]
 
-    def new_tab(self) -> Tab: ...
+    def new_tab(self) -> Any: ...
 
     def why(self, doc: dict, *, when: datetime | None = None,
-            tab: Tab | None = None) -> str | None: ...
+            tab: Any = None) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -639,14 +575,14 @@ class Kept:
 class Distinct:
     """Refused because the same content is already in this prompt.
 
-    The second *set*-relative reason, and the one that shows the first was
-    not a special case. A retrieval index returns what ranked; if a document
+    The *set*-relative reason: whether a document is redundant depends on
+    what else is on the page. A retrieval index returns what ranked; if a document
     was chunked twice, or the same passage appears in a policy PDF and the
     wiki page quoting it, the ranker will return both -- correctly, because
     both *are* relevant. Relevance has no opinion about redundancy.
 
     What that costs is not abstract. Duplicate passages spend the same
-    context room a ``Budget`` is trying to protect, and they bias the model:
+    context room a prompt has, and they bias the model:
     a claim repeated three times in a prompt reads as corroborated by three
     sources. The usual fix is a de-duplication pass bolted on after
     retrieval, outside whatever governs the read -- which is the second
@@ -657,7 +593,6 @@ class Distinct:
         class Notes:
             expire_at = deadline()
             forgotten = revocable()
-            tokens = budget(8000)
             chunk_hash = distinct()
 
     ``on`` is the identity of the content, not of the row: a hash a pipeline
@@ -676,7 +611,7 @@ class Distinct:
     reason: str = REDUNDANT
     needs_tab: ClassVar[bool] = True
     # Observes the page; never spends anything. That is what puts this ahead
-    # of a budget in the asking order -- see ``why_refused``.
+    # of a rule that charges in the asking order -- see ``why_refused``.
     charges: ClassVar[bool] = False
     # Not a reason the fact is forgotten, so break-glass may see it: an
     # auditor asking what was reachable wants the duplicates too.
@@ -740,128 +675,6 @@ class Distinct:
         ranking, not this rule pushed down -- and it would not apply to the
         ``$vectorSearch`` leg at all.
         """
-        return None
-
-
-@dataclass(frozen=True)
-class Budget:
-    """Refused because the read's context-token budget was spent.
-
-    The first *cumulative* rule, and the reason the protocol grew a ``Tab``.
-    ``Rule`` answers *may this reach a prompt?*; a budget is the same question
-    with a different reason -- ``over_budget`` -- asked once the room is gone.
-    It is evidence the rule protocol is a primitive rather than a compliance
-    feature: a reason with nothing to do with erasure, expressed in the same
-    shape as one that is.
-
-        # voydfile.py
-        @guard("notes")
-        class Notes:
-            expire_at = deadline()
-            tokens = budget(8000)
-
-        # A page stops at ~8000 tokens, however many batches the client
-        # asked for it in.
-
-    **Cost is the caller's to define, never guessed.** ``cost`` is a callable
-    over the document; by default it reads an integer ``cost_field`` (a
-    ``tokens`` a pipeline already computed). This package ships no tokenizer,
-    because a number that pretends to match a vendor's counting is exactly the
-    fabricated precision it refuses everywhere else. A missing or non-numeric
-    cost is ``uncosted`` -- refused, failing closed like an unreadable
-    deadline, but it does *not* close the page: one uncostable document says
-    nothing about the room left.
-
-    **A strict prefix, on purpose.** The first document that does not fit ends
-    admission for the read; a later, smaller hit is not slipped in ahead of
-    it. Admitting by size would reorder results by how big they are rather
-    than by how relevant -- the same silent reordering ``search.py`` documents
-    for a rule in ``compound.must`` -- so the budget cuts the ranking at a
-    point, it does not repack it. ``search`` already has a relevance order;
-    budgeted ``find`` therefore requires an explicit ``sort`` rather than
-    pretending MongoDB's natural order is a stable policy.
-
-    **No query half, and there never can be one.** ``clause()`` is ``None``: a
-    running total is not something a per-document query can express. That is
-    the safe asymmetry -- per-document-only is slower, not a hole; a
-    clause-only rule would be the hole -- and ``Unrecoverable`` is the
-    existing precedent for a rule that lives entirely on egress.
-
-    Bypassable, because the audit handle is not assembling a prompt and has no
-    budget to keep. Not reversible: nobody imposes a budget with a verb, so
-    ``impose()``/``lift()`` correctly never target it. It applies to reads that
-    return prompt content -- ``search``/``saturate``, ``find``, ``find_one``
-    and ``reachable``. A singleton gets a fresh tab of its own. Cardinality
-    and reconstruction operations (``count``, ``exists``, ``reachability_at``)
-    return no content page and deliberately do not apply it.
-    """
-
-    limit: int
-    cost: Callable[[dict], Any] | None = None
-    cost_field: str = "tokens"
-    reason: str = OVER_BUDGET
-    needs_tab: ClassVar[bool] = True
-    # Spends the tab as a side effect, so this is asked after every
-    # other rule -- including other cumulative ones. A budget charged
-    # for a document another reason then refuses makes `Page.spent` a
-    # number that is not the sum of what was admitted.
-    charges: ClassVar[bool] = True
-    bypassable: ClassVar[bool] = True
-
-    def __post_init__(self) -> None:
-        """Reject a configuration whose arithmetic would be ambiguous.
-
-        Token counts are non-negative integers. Accepting ``3.7`` and silently
-        truncating it to ``3`` would let a page exceed the budget while every
-        receipt still looked exact; accepting ``True`` as ``1`` is the same
-        Python footgun in a different coat. Configuration errors are cheap at
-        construction, so the limit fails there rather than making every
-        document ``over_budget`` at runtime.
-        """
-        if isinstance(self.limit, bool) or not isinstance(self.limit, int):
-            raise TypeError("Budget.limit must be a non-negative integer")
-        if self.limit < 0:
-            raise ValueError("Budget.limit must be a non-negative integer")
-        if not isinstance(self.cost_field, str) or not self.cost_field:
-            raise ValueError("Budget.cost_field must be a non-empty string")
-        if self.cost is not None and not callable(self.cost):
-            raise TypeError("Budget.cost must be callable or None")
-
-    def new_tab(self) -> Tab:
-        """A fresh budget for one read. The core calls this per read."""
-        return Tab(limit=self.limit)
-
-    def _cost_of(self, doc: dict) -> Any:
-        return self.cost(doc) if self.cost is not None else doc.get(self.cost_field)
-
-    def why(self, doc: dict, *, when: datetime | None = None,
-            tab: Tab | None = None) -> str | None:
-        """The reason, charging the tab as a side effect.
-
-        Returns ``None`` (admit and charge), ``over_budget`` (no room), or
-        ``uncosted`` (cannot tell how big it is). Read defensively, because
-        the cost may come from a document field or third-party callable and
-        this runs inside the filter that must never raise.
-        """
-        if tab is None:
-            return None                       # not a set read: nothing to say
-        if tab.exhausted:
-            return self.reason                # the prefix is already closed
-        try:
-            cost = self._cost_of(doc)
-        except Exception:  # noqa: BLE001 - third-party costing must fail closed
-            log.exception("budget cost failed; refusing the document as uncosted")
-            return UNCOSTED
-        if (isinstance(cost, bool) or not isinstance(cost, int)
-                or cost < 0):
-            return UNCOSTED
-        return None if tab.charge(cost) else self.reason
-
-    def refuses(self, doc: dict, *, when: datetime | None = None,
-                tab: Tab | None = None) -> bool:
-        return self.why(doc, when=when, tab=tab) is not None
-
-    def clause(self) -> dict | None:
         return None
 
 

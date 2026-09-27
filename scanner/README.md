@@ -256,7 +256,7 @@ ends: what this infers statically from your conventions is what a `Rule`'s
 every driver, with nothing to remember.
 
 **Where that stops, and why it is the interesting part.** Some rules have no
-query half at all — a token budget refuses a document because of the *other*
+query half at all — a de-duplicator refuses a document because of the *other*
 documents on the page, so it has no per-document filter and never can. There
 is no filter in your source for this tool to look for, and none for a missing
 one to be the deviation from. Semgrep and CodeQL have the same nothing to work

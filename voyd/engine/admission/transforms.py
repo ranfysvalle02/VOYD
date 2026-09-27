@@ -35,7 +35,7 @@ drops a document for a security reason is duplicating a rule badly; the
 rule is the place, and `voyd-plan` can reason about a rule.
 
 Cumulative rules are deliberately held back to the terminal pass. A
-budget should charge for the page that is served, not the one that was
+cumulative rule should judge the page that is served, not the one that was
 proposed and then reranked down -- the same argument ``why_refused``
 already makes about asking ``charges`` rules last, one level up.
 """

@@ -280,10 +280,9 @@ The temptation with a tool like this is to produce a number for
 everything, because a number looks like coverage. It declines in three
 places, by name, in the output.
 
-`budget()` and `distinct()` are *set-relative* — they refuse a document
-because of the **other** documents on the page, so the same document is
-admitted alone and refused in company. A sample is not a page. Evaluating
-them one document at a time would not be a weaker answer; it would be a
+`distinct()` is *set-relative* — it refuses a document because of the
+**other** documents on the page, so the same document is admitted alone
+and refused in company. A sample is not a page. Evaluating it one document at a time would not be a weaker answer; it would be a
 confident answer to a different question.
 
 `clearance()` and `restricted_to()` decide by who is asking, so they are

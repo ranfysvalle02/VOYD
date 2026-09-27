@@ -39,7 +39,7 @@ import pytest
 from voyd.declare import (OPERATORS, OPTIONS, REGISTRY, STAGES, TRANSFORMS,
                           load, operator, stage)
 from voyd.wire.codec import decode_op_msg, encode_op_msg
-from voyd.wire.policy import (Budgets, Guard, Virtuals, judge, names_scratch,
+from voyd.wire.policy import (Guard, Virtuals, judge, names_scratch,
                               plan_virtual, refuse_scratch, run_virtual)
 from voyd.wire.policy.stages import terminal, trace, _key
 from voyd.wire.scratch import created_at, ours, scratch_name
@@ -143,10 +143,9 @@ def serve(guards, pipeline, *batches, virtuals, scratch=None,
     read, why = plan_virtual(body, guards, virtuals)
     assert why is None, why
     assert read is not None
-    tabs = Budgets()
 
     async def judged(raw):
-        return await judge(raw, 1, 0, guards, False, None, None, None, tabs)
+        return await judge(raw, 1, 0, guards, False, None, None, None)
     raw = asyncio.run(run_virtual(
         read, 9, ask=upstream(*batches), judge_reply=judged,
         scratch=scratch or NoScratch(), virtuals=virtuals))

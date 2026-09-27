@@ -149,8 +149,8 @@ natively, and a lot of teams should be using it and are not.
 
 **Where views stop.**
 
-- **They cannot express a set-relative rule.** `budget(8000)` and
-  `distinct()` refuse a document because of the *other documents on the
+- **They cannot express a set-relative rule.** `distinct()` refuses a
+  document because of the *other documents on the
   page* — the same document admitted alone and refused in company. A
   view pipeline is evaluated per document against the collection, and
   there is no "page" at that point to be relative to.
@@ -261,7 +261,7 @@ new." Everything else in VOYD's column, a well-built view gets you.
 Three things, and they all come from the same property — the check is a
 pure function with no database under it.
 
-**Set-relative rules.** `budget(n)` refuses because of the page, not the
+**Set-relative rules.** `distinct()` refuses because of the page, not the
 document. No index filter can express that; `$vectorSearch` decides each
 candidate before the page exists. No policy engine can either;
 `enforce(subject, object, action)` has nowhere to put the rest of the

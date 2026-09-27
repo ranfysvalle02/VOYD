@@ -72,9 +72,9 @@ class Sealing(_Composed):
         """Attach a resolved ``Sealing``. Returns ``self``.
 
         A cumulative rule and sealing are rejected together for now. Sealing
-        can refuse a selected hit only after asynchronous decryption; charging
-        a budget before that would report room spent on content never returned,
-        while charging after it requires the refill loop to decrypt before
+        can refuse a selected hit only after asynchronous decryption; recording
+        a hit in per-read state before that would count content never
+        returned, while recording after it requires the refill loop to decrypt before
         cumulative admission. Both are implementable, but silently choosing
         the first is a false precision claim. Fail at construction until the
         read path owns that ordering explicitly.
@@ -85,7 +85,7 @@ class Sealing(_Composed):
             raise ValueError(
                 f"{self.collection}: sealing cannot yet compose with "
                 f"cumulative rule(s) {cumulative}; decryption must happen "
-                "before budget charging so Page.spent stays truthful")
+                "before cumulative admission so the page it judges is the one served")
         self.sealing = sealing
         return self
 

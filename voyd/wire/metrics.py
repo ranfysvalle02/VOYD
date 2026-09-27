@@ -69,8 +69,8 @@ from voyd.engine.admission import reasons as R
 # here, loudly, at import.
 REASONS: tuple[str, ...] = (
     R.DEADLINE, R.REVOKED, R.UNREADABLE, R.QUARANTINED, R.WRONG_MODEL,
-    R.NOT_CLEARED, R.UNRECOVERABLE, R.OFF_SCOPE, R.OVER_BUDGET,
-    R.UNCOSTED, R.REDUNDANT, R.KEY_UNAVAILABLE, R.UNNAMED,
+    R.NOT_CLEARED, R.UNRECOVERABLE, R.OFF_SCOPE, R.REDUNDANT,
+    R.KEY_UNAVAILABLE, R.UNNAMED,
     R.INJECTION_SIGNATURE,
 )
 # Anything the engine reports that is not above. It exists so a new reason

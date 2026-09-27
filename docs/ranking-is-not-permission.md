@@ -153,12 +153,11 @@ and a jurisdiction rule you write yourself in the policy file with no
 privileged path for the builtins.
 
 And then the category turns out to be bigger than access control, which is
-the part I did not expect. A *token budget* is the same shape: `may this
-reach the prompt?`, answered `no, there is no room`. So is a de-duplicator:
-`no, that passage is already in the context`.
+the part I did not expect. A de-duplicator is the same shape: `may this
+reach the prompt?`, answered `no, that passage is already in the context`.
 
-Those two are strange in a way worth naming. They are **set-relative** —
-they refuse a document because of the *other* documents on the page, so the
+That one is strange in a way worth naming. It is **set-relative** — it
+refuses a document because of the *other* documents on the page, so the
 same document is admitted alone and refused in company. Nothing else in the
 stack can express that. `$vectorSearch` decides each candidate before the
 page exists. A policy engine's `enforce(subject, object, action)` has no

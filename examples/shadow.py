@@ -31,9 +31,9 @@ leaky one.
 
 **Install only reasons that mean "forgotten" while you measure.** A
 ``Deadline`` and a revocation mark both mean the fact is gone, so the delta
-has one meaning and a pilot can act on it. Add a ``Budget`` and it starts
-meaning "forgotten, *or* simply further down the page than the token ceiling
-reached" -- two different facts under one number, which is how a trial
+has one meaning and a pilot can act on it. Add a ``Distinct`` and it starts
+meaning "forgotten, *or* simply a second copy of something already on the
+page" -- two different facts under one number, which is how a trial
 produces a figure nobody can do anything with.
 
 ``lineage_field`` is not that kind of addition and is worth switching on from
@@ -85,7 +85,7 @@ async def run(db) -> dict:
     the number convinces somebody, the same spec becomes a policy file and
     the connection string does the rest.
     """
-    # Two reasons and no more -- see the header on why a `Budget` here
+    # Two reasons and no more -- see the header on why a `Distinct` here
     # would make the number mean two things. `lineage_field` is not a third
     # reason, it is what makes the existing one travel.
     notes = Admission(db, AdmissionSpec(

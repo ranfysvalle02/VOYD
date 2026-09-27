@@ -54,13 +54,10 @@ class ReadPath(_Composed):
         doc = await self.db[self.collection].find_one(self._query(filters),
                                                       *args, **kw)
         # A singleton is still prompt content. It gets its own tab rather than
-        # bypassing a Budget merely because no page object is involved.
+        # bypassing a cumulative rule merely because no page object is
+        # involved.
         tab = self.open_tab()
         admitted = self._admit(doc, tab=tab)
-        if tab is not None and tab.exhausted:
-            log.warning(
-                "find_one on %s refused by budget: %s spent of %s",
-                self.collection, tab.spent, tab.limit)
         if admitted is None:
             return None
         if not self.seals:
@@ -94,16 +91,16 @@ class ReadPath(_Composed):
         if tab is not None and sort is None:
             raise ValueError(
                 f"{self.collection}: a cumulative rule needs a deterministic "
-                "find order, because 'the first 100 tokens' is only a fact "
+                "find order, because 'the first copy' is only a fact "
                 "about an ordered read. Pass sort=(field, direction)")
         cur = self.db[self.collection].find(self._query(filters), *args, **kw)
         if sort is not None:
             cur = cur.sort(*sort) if isinstance(sort, tuple) else cur.sort(sort)
-        # A budget applies here too -- special-casing which read enforces
-        # a rule is how two enforcement points drift. A budget-truncated
-        # page is short, and short is indistinguishable from "that is all
-        # there was" unless the page says so, which is what ``spent`` and
-        # ``refused`` below are for.
+        # Cumulative rules apply here too -- special-casing which read
+        # enforces a rule is how two enforcement points drift. A page a rule
+        # closed is short, and short is indistinguishable from "that is all
+        # there was" unless the page says so, which is what ``refused``
+        # below is for.
         admitted: list[dict] = []
         async for doc in cur:
             kept = self._admit(doc, when=evaluated_at, tab=tab)
@@ -117,9 +114,8 @@ class ReadPath(_Composed):
             if tab is not None and tab.exhausted:
                 break
         if tab is not None and tab.exhausted:
-            log.warning(
-                "find on %s truncated by budget: %d admitted, ~%s spent of %s",
-                self.collection, len(admitted), tab.spent, tab.limit)
+            log.warning("find on %s closed by a cumulative rule: %d admitted",
+                        self.collection, len(admitted))
         if self.seals:
             # Admitted first, then decrypted. A revoked or expired document is
             # refused by its mark without anybody paying for a key lookup, and
@@ -135,12 +131,11 @@ class ReadPath(_Composed):
         # count that has to ride on the page.
         admitted, redacted = self._harvest(admitted)
         # Carried on the page rather than left in the log. A caller holding
-        # a short page has to be able to tell "the budget stopped it" from
+        # a short page has to be able to tell "a rule stopped it" from
         # "there were only two", and a WARNING in somebody's aggregator is
         # not an answer the caller can act on.
         return Page(admitted, evaluated_at=evaluated_at, redacted=redacted,
                     policy_revision=self.spec.policy_revision,
-                    spent=tab.spent if tab is not None else 0,
                     refused=dict(self.receipts_log.refused),
                     snapshot_complete=True)
 

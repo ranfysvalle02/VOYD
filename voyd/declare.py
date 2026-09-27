@@ -3,7 +3,7 @@
 The whole of a policy, and the whole of what anybody has to write::
 
     # voydfile.py
-    from voyd import guard, deadline, revocable, tenant, budget, distinct
+    from voyd import guard, deadline, revocable, tenant, distinct
 
     @guard("notes")
     class Notes:
@@ -14,7 +14,6 @@ The whole of a policy, and the whole of what anybody has to write::
     @guard("prompts")
     class Prompts:
         expire_at = deadline()
-        tokens    = budget(8000)
         chunk     = distinct()
 
 Then::
@@ -48,7 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
-from .engine import (Budget, Clearance, Deadline, Distinct, EmbeddedWith,
+from .engine import (Clearance, Deadline, Distinct, EmbeddedWith,
                      Marked, Restricted, revoked)
 from .engine.admission.rules import Unrecoverable
 from .engine.admission import AdmissionSpec
@@ -236,17 +235,12 @@ def embedded_with(model: str) -> _Field:
     return _Field("rule", lambda f: EmbeddedWith(model=model, field=f))
 
 
-def budget(limit: int) -> _Field:
-    """This field is the per-document cost; refuse once ``limit`` is spent.
+def distinct() -> _Field:
+    """This field is the content identity; refuse a repeat already on the page.
 
     Set-relative: the same document is admitted alone and refused in company,
     which no index filter and no policy engine can express.
     """
-    return _Field("rule", lambda f: Budget(limit=limit, cost_field=f))
-
-
-def distinct() -> _Field:
-    """This field is the content identity; refuse a repeat already on the page."""
     return _Field("rule", lambda f: Distinct(on=f))
 
 

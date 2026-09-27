@@ -231,30 +231,29 @@ def test_one_broken_transform_does_not_take_the_others_with_it():
     assert served(core, [LIVE, dict(LIVE, _id=9)]) == [9, 1]
 
 
-# ---- what a budget charges ---------------------------------------------
+# ---- what a cumulative rule judges -------------------------------------
 
-def test_a_budget_charges_the_page_that_is_served_not_the_one_proposed():
+def test_a_de_duplicator_judges_the_page_that_is_served_not_the_one_proposed():
     """Cumulative rules are held back to the terminal pass, on purpose.
 
-    A transform that drops documents runs before the budget is charged,
-    so `Page.spent` stays the sum of what was admitted -- the promise
-    `Tab.charge` makes. Charging the pre-rerank page would bill a prompt
-    for text it never contained.
+    A transform that reorders the page runs before `Distinct` is asked, so
+    the copy kept is the first one on the page that is served. Asking it
+    of the proposed page would keep a copy the transform then moved below
+    its twin, and serve the twin's slot empty.
     """
-    from voyd.engine.admission.rules import Budget, Deadline
+    from voyd.engine.admission.rules import Deadline, Distinct
 
     spec = AdmissionSpec(
         "notes",
-        rules=(Deadline("expire_at"), Budget(limit=10, cost_field="tokens")),
-        transforms=(Named("keep-one", lambda docs, req: docs[:1]),))
+        rules=(Deadline("expire_at"), Distinct(on="chunk")),
+        transforms=(Named("reverse", lambda docs, req: list(reversed(docs))),))
     core = AdmissionCore(db=None, spec=spec)
-    docs = [{"_id": i, "expire_at": FUTURE, "tokens": 6}
+    docs = [{"_id": i, "expire_at": FUTURE, "chunk": "same"}
             for i in range(3)]
     out = core.reachable(docs, when=NOW)
-    # One document survives the transform and costs 6 of 10. Without the
-    # hold-back, two would have been charged before the transform ran and
-    # the budget would have latched.
-    assert [d["_id"] for d in out] == [0]
+    # The transform put 2 first. Without the hold-back, 0 would have
+    # claimed the slot before the transform ran.
+    assert [d["_id"] for d in out] == [2]
 
 
 # ---- declaring one -----------------------------------------------------

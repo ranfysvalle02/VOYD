@@ -24,7 +24,7 @@ What this file will not do is guess. Three kinds of question cannot be
 answered per document, and each is set aside **by name** rather than
 folded into a total:
 
-    set-relative rules   ``budget``/``distinct`` refuse a document because
+    set-relative rules   ``distinct`` refuses a document because
                          of the *other* documents on the page. A sample is
                          not a page, so a per-document answer about one is
                          not a weaker answer -- it is a different question.

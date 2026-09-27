@@ -86,7 +86,7 @@ from typing import Mapping, TypedDict
 from . import cascade
 from . import seal
 from . import metrics
-from .policy import (Backfill, Budgets, Guard, _wants_a_caller, _was_reduced,
+from .policy import (Backfill, Guard, _wants_a_caller, _was_reduced,
                      cascade_first, cascade_first_for_one, delete_reply,
                      derive_on_insert, erase_first, expand_recipe,
                      guard_for, has_recipes, judge,
@@ -187,7 +187,6 @@ class _Pump(TypedDict):
     # remember this.
     reduced: set[int]
     reduced_cursors: set[int]
-    budgets: Budgets
     backfill: Backfill
     draining: "asyncio.Event | None"
     # The policy file's `@stage`/`@operator` functions and their bounds, and
@@ -212,7 +211,6 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                who: "CallerIdentity | None" = None,
                reduced: set[int] | None = None,
                reduced_cursors: set[int] | None = None,
-               budgets: "Budgets | None" = None,
                backfill: "Backfill | None" = None,
                draining: "asyncio.Event | None" = None,
                virtuals: "Virtuals | None" = None,
@@ -358,15 +356,13 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         if who is not None:
                             await who.resolve(verbose)
                         claims = who.claims if who else None
-                        tabs = Budgets()
                         if stamps is not None:
                             stamps.note_virtual(virtual.guard.collection,
                                                 req_id, guards)
 
                         async def judged(reply: bytes) -> bytes:
                             return await judge(reply, req_id, 0, guards,
-                                               verbose, vault, meter, claims,
-                                               tabs)
+                                               verbose, vault, meter, claims)
                         answer = await run_virtual(
                             virtual, req_id,
                             ask=(back_channel.exchange if back_channel
@@ -450,11 +446,6 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         reduced_cursors.discard(more)
                 if backfill is not None and isinstance(more, int):
                     backfill.continuing(more, req_id)
-                # A cursor the client gives up on will never report `id: 0`,
-                # so its running total would sit in `Budgets` for the life
-                # of the connection. This is the other end of that lifecycle.
-                if budgets is not None and "killCursors" in body:
-                    budgets.forget(body.get("cursors"))
                 if backfill is not None and "killCursors" in body:
                     backfill.forget(body.get("cursors"))
                 if refusal is not None:
@@ -574,7 +565,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 else:
                     raw = await judge(raw, req_id, resp_to, guards,
                                       verbose, vault, meter,
-                                      who.claims if who else None, budgets)
+                                      who.claims if who else None)
                 if backfill is not None:
                     # After `judge`, never before: the cut may only remove
                     # what the per-document check already let through.
@@ -726,7 +717,7 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                          "back_channel": channel,
                          "who": CallerIdentity(channel),
                          "reduced": set(), "reduced_cursors": set(),
-                         "budgets": Budgets(), "backfill": Backfill(),
+                         "backfill": Backfill(),
                          "draining": draining, "virtuals": virtuals,
                          "scratch": scratch,
                          "stamps": (Stamps() if any(

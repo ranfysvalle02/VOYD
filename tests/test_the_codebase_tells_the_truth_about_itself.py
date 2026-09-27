@@ -139,7 +139,7 @@ def test_the_public_surface_is_deliberate():
 
     assert set(voyd.__all__) == {
         "guard", "deadline", "revocable", "holdable", "tenant",
-        "restricted_to", "clearance", "embedded_with", "budget", "distinct",
+        "restricted_to", "clearance", "embedded_with", "distinct",
         "sealed", "auto_embed", "subjects", "sanitized",
         # Not a rule either: a rewrite of an admitted document, run after
         # every rule and every transform. See `masks.py`.

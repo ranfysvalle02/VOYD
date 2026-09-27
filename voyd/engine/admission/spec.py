@@ -114,9 +114,9 @@ class AdmissionSpec:
     recipes_only: bool = False
     # A stable label for *this* configuration of rules, carried into a stored
     # ``record_use`` so a consequence can be tied to the policy that produced
-    # it. Part of identity on purpose: ``Budget(100)`` and ``Budget(10000)``
-    # both report ``over_budget``, so a reason name is not enough to tell two
-    # policies apart after the fact -- a revision is. ``None`` until a
+    # it. Part of identity on purpose: ``Clearance`` over two different
+    # ladders reports ``not_cleared`` either way, so a reason name is not
+    # enough to tell two policies apart after the fact -- a revision is. ``None`` until a
     # deployment names one; ``record_use`` requires it, ordinary reads do not.
     policy_revision: str | None = None
     # Whether a wire boundary signs what it serves from this collection --
@@ -131,13 +131,10 @@ class AdmissionSpec:
         spec = self if self.rules else replace(self, rules=default_rules)
         cumulative = [r for r in spec.rules
                       if getattr(r, "needs_tab", False)]
-        # Several cumulative rules are allowed, and the sentence that used to
-        # be here said why they were not: "they cannot share a running total,
-        # the first rule's limit would silently govern the rest." That was
-        # true of one shared `Tab` and is the whole reason `Tabs` keys state
-        # by `id(rule)` -- a budget and a de-duplicator have nothing to say to
-        # each other, and now they cannot. What has not changed is that each
-        # one must bring its own state, which is the check below.
+        # Several cumulative rules are allowed. `Tabs` keys state by
+        # `id(rule)`, so two cumulative rules have nothing to say to each
+        # other and cannot. Each one must bring its own state, which is the
+        # check below.
         if spec.subjects is not None and not spec.subjects.strip():
             raise ValueError(
                 f"{self.collection}: subjects= must name a field, not an "
@@ -194,10 +191,10 @@ def _ask(rule, doc: dict, *, when: datetime | None,
     """Ask one rule for its reason, handing it only what it declared it needs.
 
     A rule that exposes ``why`` returns the reason string directly, so it can
-    name more than one (``Deadline`` separates expiry from unreadable,
-    ``Budget`` separates over-budget from uncosted). A rule with only
+    name more than one (``Deadline`` separates expiry from unreadable). A
+    rule with only
     ``refuses`` returns a bool, and its single ``reason`` is the name. Claims
-    are passed only to ``needs_caller`` rules and the ``Tab`` only to
+    are passed only to ``needs_caller`` rules and per-read state only to
     ``needs_tab`` ones, so the ordinary rules keep a signature with nothing
     irrelevant in it.
     """
@@ -272,22 +269,20 @@ def why_refused(doc: dict, spec: AdmissionSpec,
     expired, because the two demand different responses.
 
     **Cumulative rules (``needs_tab``) are asked last, whatever the declared
-    order, and the ones that *charge* are asked last of all.** A budget
-    charges its ``Tab`` as a side effect, so asking it before a deadline
-    would spend room on a document that was going to be refused anyway -- it
+    order, and the ones that *charge* are asked last of all.** A cumulative
+    rule updates its per-read state as a side effect, so asking it before a
+    deadline would record a document that was going to be refused anyway -- it
     must be asked only for documents every other rule already admitted.
     Ordering that correctly is not the rule author's job to remember (this
     package's whole complaint about conventions), so it is done here:
     ``sorted`` is stable, so each group keeps its declared order.
 
-    The second half of that key arrived with the second cumulative rule and
-    is the same argument one level in. ``Distinct`` refuses a duplicate
-    without charging anything; ``Budget`` charges. Declared the other way
-    round, a budget spends real room on a document ``Distinct`` is about to
-    drop, and then ``Page.spent`` is no longer the sum of what was admitted
-    -- which is exactly what ``Tab.charge`` promises. Four copies of one
-    passage would report ``over_budget`` for content that never reached the
-    page. So ``charges`` is a class contract, not a declaration order.
+    The second half of that key is the same argument one level in.
+    ``Distinct`` refuses a duplicate without charging anything; a quota rule
+    charges. Declared the other way round, a quota spends real allowance on
+    a document ``Distinct`` is about to drop, and four copies of one passage
+    would exhaust it with content that never reached the page. So
+    ``charges`` is a class contract, not a declaration order.
 
     Never raises, whatever a rule does. A rule that throws is treated as a
     refusal and named, because an exception inside a filter is how the
@@ -307,11 +302,9 @@ def why_refused(doc: dict, spec: AdmissionSpec,
         # and nothing else. It exists for the egress sandwich in
         # ``core._egress``: a transform is shown documents that have
         # already survived every pure rule, and the cumulative rules are
-        # held back for the terminal pass so a budget charges the page
-        # that is actually served rather than the one that was proposed.
-        # Asking a cumulative rule twice would charge it twice, and
-        # ``Tab.charge`` promising that ``Page.spent`` is the sum of what
-        # was admitted is the thing that would stop being true.
+        # held back for the terminal pass so they judge the page that is
+        # actually served rather than the one that was proposed. Asking a
+        # cumulative rule twice would record every document twice.
         if pure_only and getattr(rule, "needs_tab", False):
             continue
         try:

@@ -18,7 +18,7 @@ one handle:
     TTL / expiry  a deadline in the past             -- Deadline(), shipped
     feature flag  visible only to callers who hold it -- a custom rule, below
     RLS           an audience the caller must be in   -- Restricted(), shipped
-    token budget  refuse once the prompt is full      -- Budget(), shipped
+    de-duplication  refuse a copy already on the page -- Distinct(), shipped
 
 Two of them are written here, against the public protocol, to show the
 extension point is real and not decoration. The other three ship. One
@@ -28,9 +28,9 @@ read path can skip any -- and reports each by name.
 The payoff is in two parts. Part A shows the four query-expressible reasons
 enforced on *both* halves at once, agreeing: the thing a hand-written
 `deleted=true` filter never gives you, because a `$vectorSearch` hit does not
-pass through it. Part B is the one `deleted=true` can never become: a budget is
-not a per-document property at all -- it is a running total -- so it has no
-query half by nature. Not a stronger flag; a different kind of predicate.
+pass through it. Part B is the one `deleted=true` can never become: redundancy
+is not a per-document property at all -- it depends on what else is on the
+page -- so it has no query half by nature. Not a stronger flag; a different kind of predicate.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from datetime import timedelta
 
 from pymongo import AsyncMongoClient
 
-from voyd.engine import Budget, Deadline, Restricted, now
+from voyd.engine import Deadline, Distinct, Restricted, now
 from voyd.engine.admission import Admission, AdmissionSpec
 
 # The examples all read the same variable, so one export points every
@@ -150,31 +150,30 @@ async def part_a(db) -> None:
 
 
 async def part_b(db) -> None:
-    """The reason `deleted=true` can never become: a running total."""
-    budgeted = Admission(db, AdmissionSpec(
-        "prompts", rules=(Deadline(), Budget(limit=100))))
+    """The reason `deleted=true` can never become: a property of the page."""
+    deduped = Admission(db, AdmissionSpec(
+        "prompts", rules=(Deadline(), Distinct(on="chunk"))))
 
     await db.prompts.insert_many(
-        [{"name": f"chunk-{i}", "tokens": 40} for i in range(4)])
+        [{"_id": i, "chunk": h} for i, h in enumerate("aaba")])
 
     print("\n  Part B -- the one with no query half, by nature")
-    assert Budget(limit=100).clause() is None
-    print("    Budget(limit=100).clause() is None -- a budget is not a field on")
-    print("    a document, it is a total across the read, so there is nothing to")
-    print("    push into a query. It lives entirely on the egress check.")
+    assert Distinct(on="chunk").clause() is None
+    print("    Distinct(on='chunk').clause() is None -- redundancy is not a")
+    print("    field on a document, it is a relation to the rest of the read,")
+    print("    so there is nothing to push into a query. It lives entirely on")
+    print("    the egress check.")
 
     # A cumulative rule needs a deterministic order, and the handle refuses
-    # the read without one: "the first 100 tokens" is only a fact about an
-    # *ordered* page, so an unordered one would charge the budget against
-    # whichever documents the server happened to return first.
-    page = await budgeted.find({}, sort=[("_id", 1)])
-    print("    four chunks at 40 tokens each, budget 100:")
-    print(f"      admitted {len(page)}, spent {page.spent}, "
-          f"refused {dict(page.refused)}")
-    assert len(page) == 2, "two 40-token chunks fit in 100"
-    assert page.spent == 80
-    assert "over_budget" in page.refused
-    print("    -> the page stopped at the token ceiling. No boolean field, no")
+    # the read without one: "the first copy" is only a fact about an
+    # *ordered* page, so an unordered one would keep whichever copy the
+    # server happened to return first.
+    page = await deduped.find({}, sort=[("_id", 1)])
+    print("    four chunks, two distinct passages:")
+    print(f"      admitted {len(page)}, refused {dict(page.refused)}")
+    assert [d["_id"] for d in page] == [0, 2], "the first copy of each"
+    assert page.refused.get("redundant") == 2
+    print("    -> each passage reached the page once. No boolean field, no")
     print("       deadline, no caller could express that -- and it is the same")
     print("       Rule protocol, refusing for a fifth kind of reason.")
 

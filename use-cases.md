@@ -28,7 +28,7 @@ rules for what belongs in a policy file are in [`ethos.md`](ethos.md).
 1. [An agent that is told to forget](#1-an-agent-that-is-told-to-forget)
 2. [Memory that belongs to one user, in a model that serves all of them](#2-memory-that-belongs-to-one-user-in-a-model-that-serves-all-of-them)
 3. [A fleet of agents with different clearances](#3-a-fleet-of-agents-with-different-clearances)
-4. [A context window that is a budget, not a bucket](#4-a-context-window-that-is-a-budget-not-a-bucket)
+4. [A context window full of the same passage](#4-a-context-window-full-of-the-same-passage)
 5. [A poisoned memory, quarantined before anyone is sure](#5-a-poisoned-memory-quarantined-before-anyone-is-sure)
 
 **Regulated data**
@@ -158,25 +158,30 @@ not it.
 
 ---
 
-### 4. A context window that is a budget, not a bucket
+### 4. A context window full of the same passage
 
-**The situation.** Context windows are huge and still finite, and they
-are billed. A retrieval step returns fifty chunks; the prompt has room
-for twelve.
+**The situation.** A retrieval step returns fifty chunks, and the same
+passage was indexed several times: once in the policy PDF, once in the
+wiki page quoting it, once more after a re-chunking job.
 
-**What goes wrong today.** Truncation happens in the application, after
-retrieval, usually by position. The twelve that survive are the twelve
-that ranked highest, which on a real corpus are twelve near-duplicates.
+**What goes wrong today.** De-duplication happens in the application,
+after retrieval, if it happens at all. The chunks that ranked highest are
+near-duplicates, and a claim repeated three times in a prompt reads to the
+model as three sources agreeing.
 
-**The voydfile.** `budget(n)` and `distinct()` are **set-relative**:
-they refuse a document because of the other documents on the page. The
-same chunk is admitted alone and refused in company. Pair them with
-`rerank("chunks", diversity=0.5)` and the budget is charged against the
-page that is *served*, after reranking, not the one that was proposed.
+**The voydfile.** `distinct()` is **set-relative**: it refuses a document
+because of the other documents on the page. The same chunk is admitted
+alone and refused in company. Pair it with `rerank("chunks",
+diversity=0.5)` and the copy kept is the first one on the page that is
+*served*, after reranking, not on the one that was proposed.
 
 **The edge.** `voyd-plan` cannot evaluate set-relative rules against a
 sample, because a sample is not a page. It says so by name rather than
-folding a guess into a total.
+folding a guess into a total. On the wire, `distinct()` compares within
+one reply; a copy in a later `getMore` batch of the same cursor is not
+compared with what was already served. Fitting a page to a size is not a
+rule at all: it shapes what a caller may already see, which is a stage's
+job (`$contextPack`), not the boundary's.
 
 ---
 

@@ -18,8 +18,8 @@ import textwrap
 
 import pytest
 
-from voyd import (budget, clearance, deadline, distinct, embedded_with, guard,
-                  holdable, restricted_to, revocable, sealed, subjects, tenant)
+from voyd import (clearance, deadline, distinct, embedded_with, guard, holdable,
+                  restricted_to, revocable, sealed, subjects, tenant)
 from voyd.declare import OPTIONS, REGISTRY, load
 from voyd.engine import Clearance, Deadline
 from voyd.engine.admission import REVOKED
@@ -67,7 +67,6 @@ def test_the_field_name_on_the_left_is_the_field_the_rule_reads():
         retracted = revocable()
         held = holdable()
         audience = restricted_to("groups")
-        tokens = budget(8000)
         chunk = distinct()
         vector_model = embedded_with("v2")
 
@@ -77,7 +76,6 @@ def test_the_field_name_on_the_left_is_the_field_the_rule_reads():
     assert by_reason["quarantined"].field == "held"
     assert by_reason["quarantined"].reversible is True
     assert by_reason["not_cleared"].field == "audience"
-    assert by_reason["over_budget"].cost_field == "tokens"
     assert by_reason["redundant"].on == "chunk"
     assert by_reason["wrong_model"].field == "vector_model"
 
@@ -338,14 +336,6 @@ def test_a_clearance_that_cannot_be_an_ordering_is_refused():
     # nothing, silently -- so it is not silent.
     with pytest.raises(ValueError, match="not in order"):
         clearance(order=("public", "secret"), roles={"analyst": "internal"})
-
-
-def test_a_budget_with_no_arithmetic_is_refused_where_it_is_written():
-    with pytest.raises(TypeError):
-        @guard("notes")
-        class Notes:
-            expire_at = deadline()
-            tokens = budget(8000.5)      # type: ignore[arg-type]
 
 
 # ---- loading the file --------------------------------------------------

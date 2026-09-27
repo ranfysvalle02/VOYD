@@ -26,12 +26,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 
-from voyd.engine import Budget, Clearance, Deadline, Distinct, revoked
+from voyd.engine import Clearance, Deadline, Distinct, revoked
 from voyd.engine.admission import AdmissionSpec
 from voyd.wire.codec import (decode_op_msg, decode_sections,
                              encode_op_msg, encode_sections)
 from voyd.wire.policy import (DERIVED_COMMANDS, EXFILTRATING_STAGES,
-                              SUPPLIABLE_CLAIMS, UNREWRITABLE, Budgets, Guard,
+                              SUPPLIABLE_CLAIMS, UNREWRITABLE, Guard,
                               blinded_find, blinds_a_subject,
                               client_vector_on_server_index, deciding_fields,
                               delete_reply, expressible_clauses, guard_for,
@@ -111,12 +111,9 @@ def test_an_unknown_caller_is_refused_by_the_rules_not_waved_past():
                               caller=None) == []
 
 
-def test_a_guard_says_whether_it_needs_a_caller_or_a_running_total():
+def test_a_guard_says_whether_it_needs_a_caller():
     assert notes().needs_caller is False
-    assert notes().cumulative is False
     assert notes(Clearance(order=("a",))).needs_caller is True
-    assert notes(Budget(limit=10)).cumulative is True
-    assert notes(Distinct(on="chunk")).cumulative is True
 
 
 def test_the_default_guard_is_still_a_complete_thing_to_type():
@@ -125,26 +122,6 @@ def test_the_default_guard_is_still_a_complete_thing_to_type():
     assert [d["_id"] for d in guard.filter([
         {"_id": "a"}, {"_id": "b", "ttl": PAST},
         {"_id": "c", "gone": {"at": PAST}}])] == ["a"]
-
-
-# ---- carry state a rule needs across messages --------------------------
-
-def test_a_budget_spans_the_cursor_rather_than_restarting_per_batch():
-    # The client picks how many batches a read arrives in, so a fresh tab
-    # per batch is a hole, not an inefficiency: `batchSize=1` would admit
-    # the whole collection one document at a time.
-    guard = notes(Budget(limit=10, cost_field="tokens"))
-    budgets = Budgets()
-    tab = budgets.tab_for(guard, cursor_id=42)
-    first = guard.filter([{"_id": "a", "tokens": 6}], tab=tab)
-    second = guard.filter([{"_id": "b", "tokens": 6}], tab=tab)
-    assert [d["_id"] for d in first] == ["a"]
-    assert second == [], "the budget restarted on the second batch"
-
-
-def test_a_page_is_only_cumulative_where_a_rule_asked_for_it():
-    # A guard with no cumulative rule must not pay for per-read state.
-    assert notes().cumulative is False
 
 
 # ---- rewrite a command -------------------------------------------------
@@ -310,8 +287,7 @@ def test_a_rule_that_cannot_be_a_query_makes_the_whole_pushdown_none():
     # the original bug with an extra step.
     assert expressible_clauses(notes()) is not None
     assert expressible_clauses(notes(Deadline("expire_at"),
-                                     Budget(limit=10))) is None
-    assert expressible_clauses(notes(Distinct(on="chunk"))) is None
+                                     Distinct(on="chunk"))) is None
 
 
 def test_a_caller_aware_rule_is_expressible_only_once_the_caller_is_known():
@@ -443,7 +419,7 @@ def test_every_decision_is_still_reachable_from_one_import():
     # to be; what may not change is that the answer lives behind one name.
     import voyd.wire.policy as policy
 
-    for decision in ("Guard", "Budgets", "judge", "enforce",
+    for decision in ("Guard", "judge", "enforce",
                      "revoke_instead_of_delete",
                      "revoke_instead_of_find_and_delete",
                      "rewrite_derived_read", "refuse_unrewritable",
