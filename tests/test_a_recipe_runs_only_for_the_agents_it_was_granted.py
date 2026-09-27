@@ -181,7 +181,8 @@ def test_a_malformed_grant_fails_at_load(tmp_path, body, match):
 
 
 def test_a_grant_with_no_issuer_or_on_a_forbidden_collection_fails(tmp_path):
-    path = tmp_path / "noissuer.py"
+    path = tmp_path / "noissuer" / "voydfile.py"
+    path.parent.mkdir()
     path.write_text(textwrap.dedent('''
         from voyd import guard, deadline, recipe
         @guard("t")
