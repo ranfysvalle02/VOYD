@@ -72,6 +72,11 @@ class AdmissionCore:
         self.spec = spec.with_defaults()
         spec = self.spec
         self.rules: tuple[Rule, ...] = spec.rules
+        # The rules that also rewrite what they admit -- ``sanitized()``.
+        # Found once, so a collection declaring none pays one empty-tuple
+        # check per document and nothing else.
+        self._neutralisers: tuple[Any, ...] = tuple(
+            r for r in spec.rules if callable(getattr(r, "neutralise", None)))
         self.collection = spec.collection
         self.tenant = spec.tenant
         self.receipts_log = Receipts()
@@ -505,7 +510,13 @@ class AdmissionCore:
                              only_unbypassable=self._include,
                              pure_only=pure_only)
         if reason is None:
-            return self._redact(doc, when=when, tally=tally)
+            admitted = self._redact(doc, when=when, tally=tally)
+            # Terminal only. The first pass of the egress sandwich shows a
+            # transform the stored text; what the transform returns comes
+            # back through here, is neutralised, and is counted once.
+            if self._neutralisers and not pure_only:
+                admitted = self._neutralise(admitted)
+            return admitted
         if tally is None:
             self.receipts_log.record(reason)
         else:
@@ -608,6 +619,21 @@ class AdmissionCore:
         # is handed documents from somewhere else -- and mutating it would
         # make refusal a side effect on somebody else's data.
         return {**doc, path: kept, _REDACTED: removed}
+
+    def _neutralise(self, doc):
+        """Apply every ``sanitized()`` field's rewrite to an admitted doc.
+
+        After the rules, never instead of them: the refusal half of the
+        same declaration has already been asked by ``why_refused``, and it
+        refuses exactly the documents this could not make clean. Returns
+        the object it was handed when nothing changed, which is what lets
+        the proxy forward the original bytes.
+        """
+        for rule in self._neutralisers:
+            doc, done = rule.neutralise(doc)
+            if done:
+                self.receipts_log.record_neutralised(done)
+        return doc
 
     def _unnamed(self, element: dict) -> str | None:
         """Refuse an embedded subject that cannot be addressed.

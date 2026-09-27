@@ -79,6 +79,13 @@ KEY_UNAVAILABLE = "key_unavailable"
 # forgetting things".
 UNNAMED = "unnamed"
 
+# A declared text field matched an instruction-shaped signature -- see
+# ``sanitize.py``. Named for what was observed, not for what it proves: a
+# signature is a pattern, and a document quoting an injection matches it as
+# surely as one carrying it. A climbing ``injection_signature`` is a corpus
+# worth reading, not a count of attacks.
+INJECTION_SIGNATURE = "injection_signature"
+
 REACHABLE = "reachable"
 REFUSED = "refused"
 UNKNOWN = "unknown"

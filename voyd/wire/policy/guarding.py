@@ -146,6 +146,16 @@ class Guard:
         self.admitted += len(kept)
         return kept
 
+    @property
+    def neutralised(self) -> int:
+        """Admitted documents whose ``sanitized()`` text was rewritten.
+
+        Read from the handle's receipts, which every per-caller clone
+        shares, so one collection has one number however many identities
+        read it.
+        """
+        return sum(self.handle.receipts_log.neutralised.values())
+
     def note_sealed(self, tally: dict[str, int]) -> None:
         for reason, count in tally.items():
             self.sealed_refused[reason] = self.sealed_refused.get(reason, 0) + count

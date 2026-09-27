@@ -313,6 +313,56 @@ def sealed() -> _Field:
     return _Field("sealed", lambda f: Unrecoverable(field=f))
 
 
+def sanitized(*, on_match: str = "refuse", patterns: tuple | list = (),
+              without: tuple | list = ()) -> _Field:
+    """This field is text for a model; check it for instructions aimed at one.
+
+        @guard("notes")
+        class Notes:
+            text = sanitized()
+            body = sanitized(on_match="neutralise",
+                             patterns=[("wire_money", r"wire \\$\\d+ to")])
+
+    Two things happen to it on every document that leaves, and only the
+    first is exact:
+
+    - **invisible characters are removed** -- zero-width, bidi overrides,
+      the Unicode tag block. Whether a string contains U+200B is a fact
+      about its bytes, so this is a guarantee: nothing in ``INVISIBLE``
+      reaches a prompt from a declared field.
+    - **signatures are looked for** -- "ignore previous instructions",
+      chat-template tokens, HTML comments, markdown images whose URL
+      carries a query string. This is a **tripwire, not a guarantee**:
+      a paraphrase, another language, or text split across two chunks
+      goes straight past it, and a document that *quotes* an injection
+      to discuss it is matched exactly like one that carries it.
+
+    ``on_match="refuse"`` withholds a matching document, counted as
+    ``injection_signature``. ``"neutralise"`` replaces the matched span
+    with a marker and serves the rest -- unless the match was only found
+    after folding (full-width letters, say) and has no exact span to cut,
+    in which case the document is refused rather than served uncut.
+
+    ``patterns`` adds ``(name, regex)`` or ``(name, regex, replacement)``
+    signatures; ``without`` drops built-ins by name. Both are checked at
+    load, including for a regex that matches the empty string.
+
+    It runs in the terminal pass, after any ``@transform``, and a
+    ``distinct``, ``count`` or reducing ``aggregate`` on the collection is
+    refused: those return the text without the document it came from, so
+    there would be nothing to neutralise it on. The list itself is in
+    ``voyd/engine/admission/sanitize.py``.
+    """
+    from .engine.admission.sanitize import sanitizer
+
+    # Validated now, against a placeholder path, so a bad regex fails the
+    # line it was written on rather than the first `@guard` that uses it.
+    sanitizer("_", on_match=on_match, patterns=patterns, without=without)
+    return _Field("rule", lambda f: sanitizer(
+        f, on_match=on_match, patterns=patterns, without=without,
+        where=f"{f}: "))
+
+
 # Every collection declared in a loaded policy file, by name, with the
 # policy choices that are not rules: what a `delete` on the wire should
 # mean, and which fields are ciphertext at rest under whose key.

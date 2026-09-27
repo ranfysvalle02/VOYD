@@ -178,6 +178,7 @@ since there would be nowhere to record that the fact was forgotten.
 | `distinct()` | refuse a repeat of content already on the page |
 | `sealed()` | ciphertext at rest, under a key scoped to the tenant |
 | `auto_embed(model)` | the *server* embeds this text; refuse a client's own vector |
+| `sanitized(on_match=...)` | text for a model: invisible characters removed (exact), instruction-shaped signatures refused or cut (a tripwire, not a guarantee) |
 
 Beside them, and deliberately not one of them:
 
@@ -216,6 +217,47 @@ the rule was written to stop.
 
 A policy file that is wrong fails when it is **loaded**, not when somebody's
 query returns the wrong rows.
+
+### Text that talks to the model
+
+A stored chunk can carry instructions aimed at whatever reads it:
+"ignore previous instructions" on a scraped page, a zero-width or
+tag-block payload a reviewer cannot see, an HTML comment that vanishes
+when rendered, a markdown image whose URL sends the conversation to
+somebody else's server. `sanitized()` marks a field as text for a model:
+
+```python
+@guard("notes")
+class Notes:
+    text = sanitized()                                   # refuse on a match
+    body = sanitized(on_match="neutralise",              # cut the match
+                     patterns=[("wire_money", r"wire \$\d+ to")],
+                     without=["html_comment"])
+```
+
+It makes two claims, and they are not equally strong.
+
+**Invisible characters are removed, exactly.** Zero-width characters,
+bidi overrides and the Unicode tag block are code points in known ranges,
+so this is a fact about bytes. None of them leaves a declared field. The
+cost is typographic: emoji joined with ZWJ come apart into their members,
+and ZWNJ-shaped scripts render differently.
+
+**Signatures are a tripwire, not a guarantee.** Five built-in patterns
+catch the copy-pasted shapes, and your own are added in the voydfile. The
+invariant is exact *about the list*: no text that leaves matches a declared
+signature once invisibles are removed and the text is NFKC- and
+case-folded. A paraphrase, another language, or an instruction split
+across two chunks is not on the list and goes through. A document that
+*quotes* an injection to discuss it is matched like one that carries it,
+because a pattern cannot tell quotation from use.
+
+Under `neutralise`, a match found only by folding (full-width letters) has
+no exact span to cut, so that document is refused instead. It runs in the
+terminal pass, after every transform. `distinct`, `count` and reducing
+pipelines on the collection are refused, because they return the text
+without the document it came from. Refusals count under
+`injection_signature`; rewrites count in `neutralised_total`.
 
 ---
 
@@ -728,6 +770,10 @@ the second language.
   a stage after the search, a `$search`, or a `$rankFusion` still comes
   back short by whatever was refused, and a widened page that is mostly
   refused is short too.
+- `sanitized()` catches the injections its signatures describe and no
+  others. It reads strings and lists of strings; text nested deeper in a
+  field is not examined. A collection declaring it cannot answer
+  `distinct`, `count` or a reducing `aggregate`.
 - There is **no observe-only mode**. `voyd-wire` enforces or it is not
   in the path; it cannot yet run alongside a read logging what it *would*
   have refused. `voyd-plan --audit` answers most of that question without

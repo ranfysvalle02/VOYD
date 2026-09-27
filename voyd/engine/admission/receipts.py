@@ -58,6 +58,14 @@ class Receipts:
     # candidate pool -- see ``over_fetch()``.
     examined: int = 0
     admitted: int = 0
+    # Admitted documents whose ``sanitized()`` text was changed on the way
+    # out, by what was done: ``invisible`` or a signature's name. Apart from
+    # ``refused`` because the document *was* served -- a chunk with a
+    # zero-width space in it is not a refusal, and adding it to one would
+    # make ``refused_at_boundary`` a number about typography. Exact on a
+    # batch handed to ``reachable()``, which is the wire's only path; the
+    # search path's refill re-admits a superset, so there it can overcount.
+    neutralised: dict[str, int] = field(default_factory=dict)
     last_bypass_actor: str | None = None
     last_bypass_at: datetime | None = None
     last_reason: str | None = None
@@ -67,6 +75,10 @@ class Receipts:
         self.refused[reason] = self.refused.get(reason, 0) + 1
         self.last_reason = reason
         self.last_at = now()
+
+    def record_neutralised(self, what: list[str]) -> None:
+        for name in what:
+            self.neutralised[name] = self.neutralised.get(name, 0) + 1
 
     def record_many(self, tally: dict[str, int]) -> None:
         """Commit one page's refusals.
@@ -178,6 +190,7 @@ class Receipts:
             # candidate pool. Exposed because a caller who sees a climbing
             # over-fetch is looking at the cost of their own refusal rate,
             # which is a tuning conversation rather than a bug.
+            "neutralised_by_kind": dict(self.neutralised),
             "search_examined": self.examined,
             "search_admitted": self.admitted,
             "over_fetch": round(self.over_fetch(), 2),

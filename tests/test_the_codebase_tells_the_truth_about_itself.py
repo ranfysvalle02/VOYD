@@ -138,7 +138,7 @@ def test_the_public_surface_is_deliberate():
     assert set(voyd.__all__) == {
         "guard", "deadline", "revocable", "holdable", "tenant",
         "restricted_to", "clearance", "embedded_with", "budget", "distinct",
-        "sealed", "auto_embed", "subjects",
+        "sealed", "auto_embed", "subjects", "sanitized",
         # Not a rule, and exported beside them deliberately: a transform
         # is declared in the same file, and a vocabulary split across two
         # imports is one people get wrong. What it is *not* is an
@@ -249,7 +249,7 @@ def test_every_module_a_reader_is_pointed_at_imports(module):
 @pytest.mark.parametrize("module", [
     "voyd.engine.plan", "voyd.engine.attest",
     "voyd.engine.admission.transforms", "voyd.engine.admission.rerank",
-    "voyd.wire.plan_report",
+    "voyd.engine.admission.sanitize", "voyd.wire.plan_report",
 ])
 def test_the_modules_that_claim_to_be_pure_reach_no_database(module):
     """Each of these says "pure" in its own docstring. Checked, not trusted.

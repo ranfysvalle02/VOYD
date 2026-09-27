@@ -71,6 +71,7 @@ REASONS: tuple[str, ...] = (
     R.DEADLINE, R.REVOKED, R.UNREADABLE, R.QUARANTINED, R.WRONG_MODEL,
     R.NOT_CLEARED, R.UNRECOVERABLE, R.OFF_SCOPE, R.OVER_BUDGET,
     R.UNCOSTED, R.REDUNDANT, R.KEY_UNAVAILABLE, R.UNNAMED,
+    R.INJECTION_SIGNATURE,
 )
 # Anything the engine reports that is not above. It exists so a new reason
 # is undercounted in its own series rather than dropped from the totals --
@@ -122,7 +123,7 @@ class Layout:
             self.names.append((field, None, None))
         for collection in self.collections:
             for field in ("admitted_total", "refused_total", "revoked_total",
-                          "cascaded_total"):
+                          "cascaded_total", "neutralised_total"):
                 self.names.append((field, collection, None))
             for reason in (*REASONS, OTHER):
                 self.names.append(("refused_by_reason_total", collection,
@@ -315,6 +316,8 @@ class Meter:
             values[self.layout.index("refused_total", name)] = guard.refused
             values[self.layout.index("revoked_total", name)] = guard.revoked
             values[self.layout.index("cascaded_total", name)] = guard.cascaded
+            values[self.layout.index("neutralised_total", name)] = (
+                guard.neutralised)
             spare = 0
             for reason, count in guard.reasons().items():
                 if reason in REASONS:
@@ -363,6 +366,12 @@ HELP = {
         "revocations climbing while this stays flat means the cascade "
         "stopped and an erasure is reaching the source and nothing "
         "built on it."),
+    "neutralised_total": (
+        "counter",
+        "Admitted documents whose sanitized() text was changed on the way "
+        "out: invisible characters removed, or a signature cut. Not a "
+        "refusal -- the document was served -- and not a count of attacks: "
+        "a signature is a pattern, and a page quoting one matches it."),
     "sealed_writes_total": (
         "counter",
         "Documents whose sealed fields this boundary encrypted on the way "
