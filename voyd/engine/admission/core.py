@@ -28,6 +28,7 @@ from ..errors import (CallerRequired, ScopeInvalid, ScopeRequired,
                       require_tenant)
 from ..authority import AUDIT, AuthorityRequired, NotAuthorised
 from .reasons import OFF_SCOPE, UNNAMED
+from .masks import apply as apply_masks
 from .receipts import Receipts
 from .rules import Rule, Tabs
 from .spec import AdmissionSpec, why_refused
@@ -45,6 +46,10 @@ log = logging.getLogger("engine.admission")
 # can count redactions without re-walking every array it just walked. Read
 # and removed by the read path; never persisted, never returned to a caller.
 _REDACTED = "__redacted__"
+# The same arrangement for ``mask()``: how many values were taken out of
+# this document, carried from the pass that masked it to the one place the
+# count is committed, and stripped there.
+_MASKED = "__masked__"
 
 
 class AdmissionCore:
@@ -516,7 +521,7 @@ class AdmissionCore:
             # back through here, is neutralised, and is counted once.
             if self._neutralisers and not pure_only:
                 admitted = self._neutralise(admitted)
-            return admitted
+            return self._mask(admitted)
         if tally is None:
             self.receipts_log.record(reason)
         else:
@@ -634,6 +639,25 @@ class AdmissionCore:
             if done:
                 self.receipts_log.record_neutralised(done)
         return doc
+    def _mask(self, doc: dict) -> dict:
+        """Take the declared masks out of an admitted document.
+
+        On every pass, not only the terminal one: a transform is shown the
+        masked document, and whatever it returns is masked again on the way
+        out -- so a transform that restores a value from a cache has it
+        removed a second time. See ``masks.py`` for why this is the place.
+
+        Not bypassed by ``including_refused()``. Break-glass exists to see
+        what was *forgotten*; a mask is not a forgetting reason, and the
+        audience entitled to the value is named on the mask itself.
+        """
+        masks = self.spec.masks
+        if not masks:
+            return doc
+        out, n = apply_masks(doc, masks, self._caller)
+        if not n:
+            return out
+        return {**out, _MASKED: out.get(_MASKED, 0) + n}
 
     def _unnamed(self, element: dict) -> str | None:
         """Refuse an embedded subject that cannot be addressed.
@@ -663,8 +687,7 @@ class AdmissionCore:
             return UNNAMED
         return None
 
-    @staticmethod
-    def _harvest(docs: list[dict]) -> tuple[list[dict], int]:
+    def _harvest(self, docs: list[dict]) -> tuple[list[dict], int]:
         """Take the redaction marks off, and total them. The only place.
 
         ``_redact`` has to return one value and has to say two things -- the
@@ -675,15 +698,22 @@ class AdmissionCore:
         ``tests/test_the_codebase_tells_the_truth_about_itself.py`` fails
         the build if the key is ever known outside this module.
         """
-        total = 0
+        total = masked = 0
         out: list[dict] = []
         for doc in docs:
             n = doc.get(_REDACTED)
-            if n is None:
+            m = doc.get(_MASKED)
+            if n is None and m is None:
                 out.append(doc)
                 continue
-            total += n
-            out.append({k: v for k, v in doc.items() if k != _REDACTED})
+            total += n or 0
+            masked += m or 0
+            out.append({k: v for k, v in doc.items()
+                        if k != _REDACTED and k != _MASKED})
+        # Masks are committed here, once, for the documents actually
+        # served -- never per pass, so the pre-pass a transform is shown
+        # and the terminal pass after it do not count one value twice.
+        self.receipts_log.masked += masked
         return out, total
 
     def _egress(self, candidates: list[dict], *,

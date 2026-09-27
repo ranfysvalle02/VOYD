@@ -87,6 +87,7 @@ from . import metrics
 from .policy import (Backfill, Budgets, Guard, _wants_a_caller, _was_reduced,
                      cascade_first, cascade_first_for_one, delete_reply,
                      derive_on_insert, erase_first, guard_for, judge,
+                     mask_reduced, refuse_masked_reference,
                      refuse_change_stream, refuse_client_vector,
                      refuse_unrewritable,
                      revoke_instead_of_delete,
@@ -288,6 +289,13 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     # ones those are is `refusals.py`'s to know.
                     refusal = refuse_change_stream(raw, req_id, req_id,
                                                    guards)
+                if refusal is None:
+                    # A masked field named in a filter, a sort, a group key
+                    # or a copy leaves as something the mask never sees, so
+                    # the command is answered here. See `reads.py`.
+                    refusal = refuse_masked_reference(
+                        raw, req_id, guards, verbose,
+                        who.claims if who else None)
                 if refusal is None and embeds:
                     refusal = refuse_client_vector(raw, req_id, req_id, embeds)
                 if refusal is None:
@@ -470,7 +478,11 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                                        reduced_cursors)
                 if was_delete:
                     raw = delete_reply(raw, req_id, resp_to)
-                elif not already:
+                elif already:
+                    # The rules ran in the query; the masks cannot have.
+                    raw = mask_reduced(raw, req_id, resp_to, guards,
+                                       who.claims if who else None)
+                else:
                     raw = await judge(raw, req_id, resp_to, guards,
                                       verbose, vault, meter,
                                       who.claims if who else None, budgets)

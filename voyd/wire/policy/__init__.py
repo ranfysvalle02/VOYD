@@ -20,7 +20,8 @@ trusting that a scroll was thorough.
     verbs       rewrite a command -- a `delete` becoming the revocation
                 it should have been, in both of its wire spellings
     reads       what a read may see -- the refusal pushed into a query,
-                and the projections that would leave no verdict to take
+                the projections that would leave no verdict to take, and
+                the commands that would carry a masked value out
     prefilter   the opt-in copy of the rules in `$vectorSearch.filter`,
                 which narrows ranking and is never the guarantee
     refusals    refuse a command outright -- the verbs no rewrite is
@@ -46,13 +47,14 @@ from __future__ import annotations
 from .erasure import cascade_first, cascade_first_for_one, erase_first
 from .guarding import SUPPLIABLE_CLAIMS, Budgets, Guard, enforce
 from .guarding import _wants_a_caller as _wants_a_caller
-from .guarding import guard_for, judge, unsuppliable_claims
+from .guarding import guard_for, judge, mask_reduced, unsuppliable_claims
 from .backfill import Backfill
 from .handshake import TOPOLOGY_FIELDS, rewrite_topology, strip_compression
 from .reads import (DERIVED_COMMANDS, FOREIGN_STAGES, LEADING_STAGES,
                     PRESERVING_STAGES, blinded_find, blinds_a_subject,
-                    deciding_fields, expressible_clauses, pins_the_tenant,
-                    projection_blinds, reducing_stage, rewrite_derived_read)
+                    deciding_fields, expressible_clauses, masked_fields,
+                    pins_the_tenant, projection_blinds, reducing_stage,
+                    refuse_masked_reference, rewrite_derived_read)
 from .reads import _was_reduced as _was_reduced
 from .prefilter import (VECTOR_FILTER_OPERATORS, clause_paths, index_declares,
                         prefilter_clauses, prefilter_fields,
@@ -68,7 +70,7 @@ from .verbs import (delete_reply, derive_on_insert,
 __all__ = [
     # ---- refuse a document ----
     "Guard", "Budgets", "Backfill", "enforce", "judge", "guard_for",
-    "unsuppliable_claims", "SUPPLIABLE_CLAIMS",
+    "unsuppliable_claims", "SUPPLIABLE_CLAIMS", "mask_reduced",
 
     # ---- rewrite a command ----
     "revoke_instead_of_delete", "revoke_instead_of_find_and_delete",
@@ -81,6 +83,7 @@ __all__ = [
     "PRESERVING_STAGES", "LEADING_STAGES", "FOREIGN_STAGES",
     "rewrite_vector_search", "prefilter_clauses", "prefilter_fields",
     "clause_paths", "index_declares", "VECTOR_FILTER_OPERATORS",
+    "refuse_masked_reference", "masked_fields",
 
     # ---- refuse a command outright ----
     "refuse_unrewritable", "refuse_client_vector", "seal_refusal",

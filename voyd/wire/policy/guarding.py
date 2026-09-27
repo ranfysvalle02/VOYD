@@ -26,6 +26,7 @@ from typing import Any, Mapping
 
 from voyd.engine import Deadline, revoked
 from voyd.engine.admission import Admission, AdmissionSpec
+from voyd.engine.admission.masks import apply as apply_masks
 
 from .. import cascade, metrics, seal
 from ..codec import LAZY, decode_op_msg, encode_op_msg
@@ -102,7 +103,40 @@ class Guard:
         rules, and a boundary that memoised it would have one more piece of
         state to get stale when a policy is reloaded.
         """
-        return any(getattr(r, "needs_caller", False) for r in self.spec.rules)
+        return (any(getattr(r, "needs_caller", False) for r in self.spec.rules)
+                or any(m.needs_caller for m in self.spec.masks))
+
+    @property
+    def masked(self) -> int:
+        """Values a declared `mask()` took out of served documents.
+
+        Read off the handle's receipts, which every per-caller clone
+        shares, so one collection has one number whichever connection
+        served the document.
+        """
+        return self.handle.receipts_log.masked
+
+    def mask(self, docs: list, caller: dict | None) -> list:
+        """The masks alone, for a reply the rules already ran on server-side.
+
+        A pushed-down read -- a projection that hid the marks, a
+        `$group` -- is not judged per document on the way back, because
+        the refusal went into the query. The masks did not: nothing in a
+        query can null a field in its own result. So a reduced reply
+        still has the masks applied here, to whatever top-level fields it
+        carries, and the references that would carry a masked value
+        under another name are refused before the command is sent.
+        """
+        if not self.spec.masks:
+            return docs
+        out, total = [], 0
+        for doc in docs:
+            if isinstance(doc, Mapping):
+                doc, n = apply_masks(doc, self.spec.masks, caller)
+                total += n
+            out.append(doc)
+        self.handle.receipts_log.masked += total
+        return out
 
     @property
     def cumulative(self) -> bool:
@@ -207,7 +241,8 @@ def unsuppliable_claims(guard: Guard) -> list[str]:
     question about roles, which the server does answer. A `clearance()`
     with no mapping lands here.
     """
-    wanted = []
+    wanted = [m.via for m in guard.spec.masks
+              if m.needs_caller and m.via not in SUPPLIABLE_CLAIMS]
     for rule in guard.spec.rules:
         if not getattr(rule, "needs_caller", False):
             continue
@@ -398,6 +433,40 @@ def enforce(raw: bytes, req_id: int, resp_to: int, guards: dict[str, Guard],
     if verbose:
         print(f"  voyd: {collection}: refused {len(batch) - len(kept)} of "
               f"{len(batch)}  {guard.reasons()}", flush=True)
+    return encode_op_msg(req_id, resp_to, flags, reply)
+
+
+def mask_reduced(raw: bytes, req_id: int, resp_to: int,
+                 guards: dict[str, Guard],
+                 caller: dict | None = None) -> bytes:
+    """Apply masks to a cursor batch whose rules already ran in the query.
+
+    The companion to `enforce` for replies `_was_reduced` recognised. The
+    same lazy, cheapest-first shape, and byte for byte forwarding unless a
+    mask actually changed a value.
+    """
+    decoded = decode_op_msg(raw, LAZY)
+    if decoded is None:
+        return raw
+    flags, reply = decoded
+    cursor = reply.get("cursor")
+    if not isinstance(cursor, Mapping):
+        return raw
+    key = "firstBatch" if "firstBatch" in cursor else (
+        "nextBatch" if "nextBatch" in cursor else None)
+    collection = _collection_of(reply)
+    guard = guards.get(collection) if collection else None
+    if key is None or guard is None or not guard.spec.masks:
+        return raw
+    batch = cursor[key]
+    if not isinstance(batch, list) or not batch:
+        return raw
+    kept = guard.mask(list(batch), caller)
+    if all(a is b for a, b in zip(kept, batch)):
+        return raw
+    reply = dict(reply)
+    reply["cursor"] = dict(cursor)
+    reply["cursor"][key] = kept
     return encode_op_msg(req_id, resp_to, flags, reply)
 
 

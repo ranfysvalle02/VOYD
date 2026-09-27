@@ -179,6 +179,7 @@ since there would be nowhere to record that the fact was forgotten.
 | `sealed()` | ciphertext at rest, under a key scoped to the tenant |
 | `auto_embed(model)` | the *server* embeds this text; refuse a client's own vector |
 | `sanitized(on_match=...)` | text for a model: invisible characters removed (exact), instruction-shaped signatures refused or cut (a tripwire, not a guarantee) |
+| `mask(strip=, visible_to=)` | admit the document, serve this field as null (or not at all) |
 
 Beside them, and deliberately not one of them:
 
@@ -190,6 +191,36 @@ Beside them, and deliberately not one of them:
 Neither is an enforcement point. A rule is what the terminal pass
 re-asks and what `voyd-plan` can reason about; a transform gets no
 credit for filtering and no attestation. See [`ethos.md`](ethos.md).
+
+**`mask()` rewrites a value instead of refusing a document.** A contract
+is readable and its counterparty's tax id is not:
+
+```python
+@guard("contracts")
+class Contracts:
+    expire_at = deadline()
+    tenant_id = tenant()
+    ssn       = mask()                      # served as null
+    internal  = mask(strip=True)            # the key is removed
+    salary    = mask(visible_to=("hr",))    # null unless the caller's roles hold hr
+```
+
+The field is rewritten in the reply bytes after every rule and after every
+transform, so a transform cannot put a masked value back — whatever it
+returns is masked again on the way out. A command that names a masked
+field where a value can come from is refused before it is sent: a filter
+(`{ssn: "..."}` is a yes/no about the value), a sort, `distinct("ssn")`, a
+`$group` or `$project` that reads `"$ssn"`, `$$ROOT`, `$getField`, `$text`,
+a server-side update that copies it, and an `explain` of any of those.
+Excluding it — `{ssn: 0}`, `$unset` — is always allowed, and so is writing
+it. `findAndModify` is allowed only with a `fields` projection that removes
+it, because its reply is not a cursor. Masked values are counted as
+`masked_total` in `/metrics` and in a handle's `receipts()`, apart from
+refusals: nothing was refused. `visible_to` reads the caller's roles from
+the server, never from the client, and an unidentified caller sees the mask.
+
+Top-level fields only — the attribute name is the path. Mask the parent of
+a nested value; elements of a `subjects()` array are not masked one by one.
 
 `budget(n)` and `distinct()` are **set-relative**: they refuse a document
 because of the *other* documents on the page, so the same document is
@@ -445,7 +476,9 @@ and a read path that got shorter is visible to whoever it refused.
 
 Without `--target` it reports the structural half only, which needs no
 cluster and no credentials: a `@guard` deleted, a `tenant()` dropped, a
-`subjects()` array that stops being subjects. Those are facts about the
+`subjects()` array that stops being subjects, a `mask()` removed or
+loosened — `strip=True` becoming a null, or `visible_to` gaining a
+member. Those are facts about the
 policy, so they are not weakened by a sample and do not disappear against
 an empty collection.
 
@@ -774,6 +807,13 @@ the second language.
   others. It reads strings and lists of strings; text nested deeper in a
   field is not examined. A collection declaring it cannot answer
   `distinct`, `count` or a reducing `aggregate`.
+- A `mask()` closes the read paths this boundary can see. A write whose
+  *count* depends on the value — `update({ssn: X}, ...)` answering
+  `nModified: 1` — is refused like a read, but an index built on the field
+  still exists on the server, and a caller with a direct connection is
+  outside every guarantee here. A refused filter is strict on purpose: a
+  bare key named `field`, `path` or `key` whose value is a masked field's
+  name is refused as if it were a stage argument.
 - There is **no observe-only mode**. `voyd-wire` enforces or it is not
   in the path; it cannot yet run alongside a read logging what it *would*
   have refused. `voyd-plan --audit` answers most of that question without

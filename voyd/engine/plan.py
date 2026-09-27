@@ -65,6 +65,10 @@ TENANT_ADDED = "tenant_added"
 TENANT_CHANGED = "tenant_changed"
 SUBJECTS_REMOVED = "subjects_removed"
 SUBJECTS_ADDED = "subjects_added"
+MASK_REMOVED = "mask_removed"
+MASK_LOOSENED = "mask_loosened"
+MASK_ADDED = "mask_added"
+MASK_TIGHTENED = "mask_tightened"
 
 
 @dataclass(frozen=True)
@@ -416,6 +420,54 @@ def structural(current: Mapping[str, AdmissionSpec],
                 name, SUBJECTS_ADDED,
                 f"{now.subjects}[] elements become subjects in their own "
                 f"right", False))
+        found.extend(_masks(name, was, now))
+    return found
+
+
+def _masks(name: str, was: AdmissionSpec,
+           now: AdmissionSpec) -> list[Structural]:
+    """What a change does to the values a mask keeps from leaving.
+
+    Structural rather than per-document, because a mask does not refuse a
+    document -- every sampled document is admitted under both policies and
+    the counts would say nothing changed. What changed is which *values*
+    leave, and that is a fact about the two files.
+
+    Three ways to widen, each fail-open: the mask goes; ``strip=True``
+    becomes a null, which reveals which documents carry the field; the
+    audience gains a member, who now reads the value.
+    """
+    before = {m.field: m for m in getattr(was, "masks", ())}
+    after = {m.field: m for m in getattr(now, "masks", ())}
+    found: list[Structural] = []
+    for path in sorted(set(before) | set(after)):
+        old, new = before.get(path), after.get(path)
+        if old is not None and new is None:
+            found.append(Structural(
+                name, MASK_REMOVED,
+                f"{path!r} is no longer masked: its value leaves in every "
+                f"document the boundary admits", True))
+            continue
+        if old is None and new is not None:
+            found.append(Structural(
+                name, MASK_ADDED, f"{path!r} becomes masked", False))
+            continue
+        assert old is not None and new is not None
+        widened: list[str] = []
+        if old.strip and not new.strip:
+            widened.append("the key is kept as null, so which documents "
+                           "carry it becomes visible")
+        gained = sorted(set(new.visible_to) - set(old.visible_to))
+        if gained or (old.visible_to and new.via != old.via):
+            who = ", ".join(gained) if gained else f"claim {new.via!r}"
+            widened.append(f"callers holding {who} now read the value")
+        if widened:
+            found.append(Structural(
+                name, MASK_LOOSENED, f"{path!r}: " + "; ".join(widened),
+                True))
+        elif old != new:
+            found.append(Structural(
+                name, MASK_TIGHTENED, f"{path!r} is masked from more", False))
     return found
 
 

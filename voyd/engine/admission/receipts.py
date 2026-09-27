@@ -66,6 +66,11 @@ class Receipts:
     # batch handed to ``reachable()``, which is the wire's only path; the
     # search path's refill re-admits a superset, so there it can overcount.
     neutralised: dict[str, int] = field(default_factory=dict)
+    # Values taken out of admitted documents by a declared ``mask()``.
+    # Exact for the documents this handle served, and counted apart from
+    # ``refused`` because nothing was refused: the document arrived, one
+    # of its values did not.
+    masked: int = 0
     last_bypass_actor: str | None = None
     last_bypass_at: datetime | None = None
     last_reason: str | None = None
@@ -191,6 +196,7 @@ class Receipts:
             # over-fetch is looking at the cost of their own refusal rate,
             # which is a tuning conversation rather than a bug.
             "neutralised_by_kind": dict(self.neutralised),
+            "masked_total": self.masked,
             "search_examined": self.examined,
             "search_admitted": self.admitted,
             "over_fetch": round(self.over_fetch(), 2),

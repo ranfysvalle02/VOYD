@@ -123,7 +123,8 @@ class Layout:
             self.names.append((field, None, None))
         for collection in self.collections:
             for field in ("admitted_total", "refused_total", "revoked_total",
-                          "cascaded_total", "neutralised_total"):
+                          "cascaded_total", "neutralised_total",
+                          "masked_total"):
                 self.names.append((field, collection, None))
             for reason in (*REASONS, OTHER):
                 self.names.append(("refused_by_reason_total", collection,
@@ -318,6 +319,7 @@ class Meter:
             values[self.layout.index("cascaded_total", name)] = guard.cascaded
             values[self.layout.index("neutralised_total", name)] = (
                 guard.neutralised)
+            values[self.layout.index("masked_total", name)] = guard.masked
             spare = 0
             for reason, count in guard.reasons().items():
                 if reason in REASONS:
@@ -358,6 +360,12 @@ HELP = {
     "admitted_total": ("counter", "Documents a prompt was allowed to see."),
     "refused_total": ("counter", "Documents refused on the read path."),
     "revoked_total": ("counter", "Deletes rewritten as revocations."),
+    "masked_total": (
+        "counter",
+        "Values a declared mask() took out of documents that were "
+        "admitted. Not refusals: the document was served, one field of it "
+        "was not. Flat at zero on a collection whose masked field is "
+        "populated means reads are not reaching this boundary."),
     "cascaded_total": (
         "counter",
         "Documents marked because they were *derived from* something a "

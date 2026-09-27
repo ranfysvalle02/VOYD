@@ -87,7 +87,7 @@ no mock tier, on purpose, because these properties are only true if the
 from __future__ import annotations
 
 from .declare import (auto_embed, budget, clearance, deadline, distinct,
-                      embedded_with, guard, holdable, restricted_to,
+                      embedded_with, guard, holdable, mask, restricted_to,
                       rerank, revocable, sanitized, sealed, subjects,
                       tenant, transform)
 
@@ -97,7 +97,7 @@ __all__ = [
     # The declarative policy surface -- everything `voydfile.py` needs.
     "guard", "deadline", "revocable", "holdable", "tenant",
     "restricted_to", "clearance", "embedded_with", "budget", "distinct",
-    "sealed", "auto_embed", "subjects", "sanitized",
+    "sealed", "auto_embed", "subjects", "sanitized", "mask",
     # Page-shaping, which is not a rule and is exported beside them
     # anyway: it is declared in the same file, and a vocabulary split
     # across two imports is a vocabulary people get wrong.

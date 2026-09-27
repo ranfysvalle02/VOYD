@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from ..codec import LAZY, decode_op_msg, encode_op_msg
+from ..codec import LAZY, decode_op_msg, decode_sections, encode_op_msg
 from .guarding import Guard, guard_for
 from .refusals import EXFILTRATING_STAGES, _refuse
 
@@ -521,6 +521,237 @@ def _was_reduced(raw: bytes, resp_to: int, reduced: set[int] | None,
     return True
 
 
-# What `claims_from` puts in front of a rule. A rule asking for anything
-# else cannot be answered: there is nowhere else for a claim to come from,
-# because the boundary will not believe one the caller asserts. See
+# ---------------------------------------------------------------------------
+# Reads that would carry a masked value out under another name.
+#
+# A `mask()` rewrites a field in the documents a reply carries. It cannot
+# rewrite anything else, and there are several other ways out:
+#
+#     find({ssn: "123-45-6789"})                  a yes/no about the value
+#     find({}).sort({ssn: 1})                     the order of the values
+#     distinct("ssn")                             the values, as a list
+#     aggregate([{$group: {_id: "$ssn"}}])        the values, as group keys
+#     aggregate([{$project: {x: "$ssn"}}])        the value, renamed
+#     aggregate([{$replaceWith: {d: "$$ROOT"}}])  the value, one level down
+#     update({}, [{$set: {x: "$ssn"}}])           the value, copied server-side
+#
+# The mask sees none of those, because none of them leaves the value in a
+# field called `ssn` at the top of a document. So a command that *names* a
+# masked field anywhere a value can come from is refused before it is sent.
+# Taking it away is always allowed: `{ssn: 0}` and `$unset`.
+#
+# Refused rather than rewritten because no rewrite is honest here. Dropping
+# the offending clause answers a different question than the one asked,
+# and nulling a group key merges every group into one -- a plausible wrong
+# number, which this boundary answers with an error everywhere else too.
+
+# Operators that reach a field's value without naming it as a path: by a
+# string (`$getField: "ssn"`), by code (`$where`, `$function`), or through
+# an index whose fields the command does not state (`$text`).
+MASK_OPAQUE = frozenset({"$where", "$function", "$accumulator", "$getField",
+                         "$setField", "$objectToArray", "$text"})
+
+# Stages whose keys name *outputs*, not inputs. Only their values are read
+# for references -- `$project: {ssn: 1}` leaves the value where the mask
+# finds it on the way out. Every other stage has its keys read too, which
+# is the conservative default for a stage this list does not know.
+_OUTPUT_KEYED = frozenset({"$project", "$addFields", "$set", "$group",
+                           "$replaceRoot", "$replaceWith", "$bucket",
+                           "$bucketAuto", "$count", "$limit", "$skip",
+                           "$sample", "$sortByCount"})
+
+# Arguments that hold a field name as a bare string rather than `"$field"`:
+# `$densify: {field: "ssn"}`, `$search: {text: {path: "ssn"}}`.
+_NAMING_ARGS = frozenset({"field", "path", "key"})
+
+
+def masked_fields(guard: Guard, caller: dict | None) -> tuple[str, ...]:
+    """The fields this guard masks from this caller."""
+    return tuple(m.field for m in guard.spec.masks if m.applies(caller))
+
+
+def _names(path: str, fields: tuple[str, ...]) -> bool:
+    return any(path == f or path.startswith(f"{f}.") for f in fields)
+
+
+def _mentions(node: Any, fields: tuple[str, ...], *,
+              keys: bool = True) -> str | None:
+    """The first reference to a masked value in ``node``, or `None`."""
+    if isinstance(node, Mapping):
+        for k, v in node.items():
+            if not isinstance(k, str):
+                continue
+            if k in MASK_OPAQUE:
+                return f"`{k}`"
+            if keys and _names(k, fields):
+                return f"`{k}`"
+            if k in _NAMING_ARGS:
+                for one in (v if isinstance(v, list) else [v]):
+                    if isinstance(one, str) and _names(one, fields):
+                        return f"`{k}: {one!r}`"
+                    if isinstance(one, Mapping) and "wildcard" in one:
+                        return f"`{k}: {{wildcard: ...}}`"
+            found = _mentions(v, fields, keys=keys)
+            if found:
+                return found
+        return None
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            found = _mentions(item, fields, keys=keys)
+            if found:
+                return found
+        return None
+    if isinstance(node, str) and node.startswith("$"):
+        if node.startswith("$$"):
+            root = node[2:].split(".", 1)[0]
+            return f"`{node}`" if root in ("ROOT", "CURRENT") else None
+        return f"`{node}`" if _names(node[1:], fields) else None
+    return None
+
+
+def _in_pipeline(pipeline: Any, fields: tuple[str, ...]) -> str | None:
+    if not isinstance(pipeline, list):
+        return None
+    for stage in pipeline:
+        if not isinstance(stage, Mapping) or len(stage) != 1:
+            continue                    # `reducing_stage` refuses these
+        name, arg = next(iter(stage.items()))
+        if name == "$unset":
+            continue                    # removing it is always allowed
+        if name == "$facet" and isinstance(arg, Mapping):
+            for sub in arg.values():
+                found = _in_pipeline(sub, fields)
+                if found:
+                    return found
+            continue
+        found = _mentions(arg, fields, keys=name not in _OUTPUT_KEYED)
+        if found:
+            return f"{found} in `{name}`"
+    return None
+
+
+def _in_update(u: Any, fields: tuple[str, ...]) -> str | None:
+    """A reference that would copy a masked value into another field.
+
+    Writing the masked field itself is fine -- the next read masks it --
+    so update keys are not read, except `$rename`'s, which are the source.
+    """
+    if isinstance(u, list):
+        return _in_pipeline(u, fields)
+    if isinstance(u, Mapping):
+        renamed = u.get("$rename")
+        if isinstance(renamed, Mapping):
+            for k, v in renamed.items():
+                if (isinstance(k, str) and _names(k, fields)) or (
+                        isinstance(v, str) and _names(v, fields)):
+                    return f"`$rename: {{{k}: {v}}}`"
+        return _mentions(u, fields, keys=False)
+    return None
+
+
+def _fam_keeps(proj: Any, fields: tuple[str, ...]) -> bool:
+    """Would a `findAndModify` reply still carry a masked field?"""
+    if not isinstance(proj, Mapping) or not proj:
+        return True
+    keys = {k for k in proj if isinstance(k, str)}
+    kinds = {bool(v) for k, v in proj.items() if k != "_id"}
+    including = bool(kinds) and kinds != {False}
+    return any(_survives(f, keys, including) for f in fields)
+
+
+def _masked_reference(body: Mapping, seq: list, guards: dict[str, Guard],
+                      caller: dict | None) -> tuple[Guard, str] | None:
+    """``(guard, what)`` for the first masked value this command reaches."""
+    for verb in ("find", "aggregate", "count", "distinct", "findAndModify",
+                 "update", "delete"):
+        guard = guard_for(guards, body, verb)
+        if guard is None or not guard.spec.masks:
+            continue
+        fields = masked_fields(guard, caller)
+        if not fields:
+            return None
+        checks: list[tuple[Any, bool]] = []
+        found: str | None = None
+        if verb == "find":
+            checks = [(body.get("filter"), True), (body.get("sort"), True),
+                      (body.get("min"), True), (body.get("max"), True),
+                      (body.get("projection"), False),
+                      (body.get("let"), False)]
+        elif verb in ("count", "distinct"):
+            checks = [(body.get("query"), True)]
+            key = body.get("key")
+            if verb == "distinct" and isinstance(key, str) and _names(
+                    key, fields):
+                found = f"`distinct: {key!r}`"
+        elif verb == "aggregate":
+            found = _in_pipeline(body.get("pipeline"), fields)
+            checks = [(body.get("let"), False)]
+        elif verb == "findAndModify":
+            checks = [(body.get("query"), True), (body.get("sort"), True),
+                      (body.get("fields"), False)]
+            found = _in_update(body.get("update"), fields)
+            # The reply carries the document in `value`, which is not a
+            # cursor batch and is never rewritten -- so it is allowed only
+            # when its own projection already takes every masked field out.
+            if found is None and _fam_keeps(body.get("fields"), fields):
+                found = ("`findAndModify` without a `fields` projection "
+                         "removing it -- its reply is not a cursor, and no "
+                         "mask is applied to it --")
+        else:
+            listed = body.get(f"{verb}s")
+            statements = [*(listed if isinstance(listed, list) else []),
+                          *seq]
+            for one in statements:
+                if not isinstance(one, Mapping):
+                    continue
+                found = _mentions(one.get("q"), fields) or (
+                    _in_update(one.get("u"), fields) if verb == "update"
+                    else None)
+                if found:
+                    break
+        for node, keyed in checks:
+            if found:
+                break
+            found = _mentions(node, fields, keys=keyed)
+        return (guard, found) if found else None
+    return None
+
+
+def refuse_masked_reference(raw: bytes, req_id: int,
+                            guards: dict[str, Guard], verbose: bool,
+                            caller: dict | None = None) -> bytes | None:
+    """An error for a command that would carry a masked value out, or `None`.
+
+    One scan of the guards when none declares a mask, which is the
+    ordinary case. `explain` is judged by the command it carries, because
+    its plan quotes the query.
+    """
+    if not any(g.spec.masks for g in guards.values()):
+        return None
+    head = decode_sections(raw)
+    if head is None:
+        return None
+    body: Mapping = head[1]
+    seq: list = head[3]
+    inner = body.get("explain")
+    if isinstance(inner, Mapping):
+        body, seq = inner, []
+    hit = _masked_reference(body, seq, guards, caller)
+    if hit is None:
+        return None
+    guard, what = hit
+    fields = ", ".join(repr(f) for f in masked_fields(guard, caller))
+    if verbose:
+        print(f"  voyd: REFUSED a command on {guard.collection} that "
+              f"reaches a masked value: {what}", flush=True)
+    return encode_op_msg(req_id, req_id, 0, {
+        "ok": 0.0, "code": 8000, "codeName": "AtlasError",
+        "errmsg": (
+            f"voyd-wire refuses this command on {guard.collection!r}: "
+            f"{what} reaches a masked field ({fields}). A mask rewrites the "
+            f"field in the documents a reply carries; a filter, a sort, a "
+            f"distinct, a group key or a copy under another name carries "
+            f"the value out as something the mask never sees. Leave the "
+            f"field out of the command, or exclude it with a projection "
+            f"or $unset."),
+    })

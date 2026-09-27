@@ -52,6 +52,7 @@ from .engine import (Budget, Clearance, Deadline, Distinct, EmbeddedWith,
                      Marked, Restricted, revoked)
 from .engine.admission.rules import Unrecoverable
 from .engine.admission import AdmissionSpec
+from .engine.admission.masks import Mask
 
 
 @dataclass(frozen=True)
@@ -361,6 +362,56 @@ def sanitized(*, on_match: str = "refuse", patterns: tuple | list = (),
     return _Field("rule", lambda f: sanitizer(
         f, on_match=on_match, patterns=patterns, without=without,
         where=f"{f}: "))
+def mask(*, strip: bool = False,
+         visible_to: str | tuple[str, ...] | list[str] | None = None,
+         via: str = "roles") -> _Field:
+    """This field's value does not leave, even when its document does.
+
+        @guard("contracts")
+        class Contracts:
+            expire_at = deadline()
+            tenant_id = tenant()
+            ssn       = mask()                       # served as null
+            internal  = mask(strip=True)             # the key is removed
+            salary    = mask(visible_to=("hr",))     # null unless roles has hr
+
+    The document is admitted and the value is rewritten in the reply bytes
+    before a driver sees them. It runs after every rule and after every
+    transform, so a transform cannot put a masked value back: whatever it
+    returns is masked again on the way out.
+
+    **A masked field cannot be asked about either.** A filter, a sort, a
+    ``distinct``, a ``$group`` or a ``$project`` that names it is refused,
+    because each one turns the value into something else -- a yes/no, an
+    order, a list, a renamed copy -- that the mask never sees. Excluding it
+    (``{"ssn": 0}``, ``$unset``) is always allowed. Writing it is allowed;
+    copying it into another field inside the server is not.
+
+    ``visible_to`` names the values of the caller's ``via`` claim that see
+    the field. The claim is the one the *server* reports for the
+    connection, never one the client asserts, and a caller the boundary
+    cannot identify sees the mask.
+
+    Top-level fields only, by construction: the attribute name is the
+    path. Mask the parent of a nested value, and note that elements of a
+    ``subjects()`` array are not masked individually.
+    """
+    if isinstance(visible_to, str):
+        visible_to = (visible_to,)
+    audience = tuple(visible_to or ())
+    if visible_to is not None and not audience:
+        raise ValueError(
+            "mask(visible_to=()) names an empty audience. Omit it to hide "
+            "the value from everyone; an empty list reads as a whitelist "
+            "somebody forgot to fill in")
+    if not all(isinstance(a, str) and a.strip() for a in audience):
+        raise ValueError(
+            f"mask(visible_to={audience!r}): every entry must be a "
+            f"non-empty string -- a role or group the server reports")
+    if not isinstance(via, str) or not via.strip():
+        raise ValueError("mask(via=...) must name a claim, e.g. 'roles'")
+    return _Field("mask", lambda f: Mask(field=f, strip=bool(strip),
+                                         visible_to=audience, via=via))
 
 
 # Every collection declared in a loaded policy file, by name, with the
@@ -586,6 +637,7 @@ def guard(collection: str, *, lineage_field: str | None = None,
         subject_key: str | None = None
         sealed_fields: list[str] = []
         embedded: dict[str, str] = {}
+        masks: list[Mask] = []
         for name, value in vars(cls).items():
             if name.startswith("__"):
                 continue
@@ -610,6 +662,17 @@ def guard(collection: str, *, lineage_field: str | None = None,
             if value.kind == "auto_embed":
                 embedded[name] = value.args[0]
                 continue        # a declaration about the index, not a rule
+            if value.kind == "mask":
+                if name == "_id":
+                    raise ValueError(
+                        f"{collection}: mask() on _id. It is how a document "
+                        f"is addressed by every update and delete the "
+                        f"application makes, and a boundary that nulled it "
+                        f"would break the application rather than protect "
+                        f"anything")
+                assert value.build is not None
+                masks.append(value.build(name))
+                continue        # a rewrite of what is served, not a rule
             if value.kind == "subjects":
                 if subject_path is not None:
                     raise ValueError(
@@ -664,7 +727,7 @@ def guard(collection: str, *, lineage_field: str | None = None,
                 f"Declare tenant(), or encrypt with a literal keyId outside "
                 f"this boundary and accept that erasure is all-or-nothing")
 
-        if not rules and tenant_field is None:
+        if not rules and tenant_field is None and not masks:
             raise ValueError(
                 f"{collection}: declared with no rules. A guard that refuses "
                 f"nothing is a slower read, and naming it a guard is worse "
@@ -705,6 +768,7 @@ def guard(collection: str, *, lineage_field: str | None = None,
             collection, rules=tuple(rules), tenant=tenant_field,
             lineage_field=lineage_field, subjects=subject_path,
             subject_key=subject_key,
+            masks=tuple(masks),
             # A `@transform` declared *above* the `@guard` is already
             # registered by the time this runs; one declared below reaches
             # back. Either order works and neither is the documented one,

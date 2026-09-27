@@ -139,6 +139,9 @@ def test_the_public_surface_is_deliberate():
         "guard", "deadline", "revocable", "holdable", "tenant",
         "restricted_to", "clearance", "embedded_with", "budget", "distinct",
         "sealed", "auto_embed", "subjects", "sanitized",
+        # Not a rule either: a rewrite of an admitted document, run after
+        # every rule and every transform. See `masks.py`.
+        "mask",
         # Not a rule, and exported beside them deliberately: a transform
         # is declared in the same file, and a vocabulary split across two
         # imports is one people get wrong. What it is *not* is an

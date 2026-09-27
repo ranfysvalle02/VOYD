@@ -101,6 +101,11 @@ class AdmissionSpec:
     # the page must collide loudly rather than resolve to whichever was
     # imported first.
     transforms: tuple = ()
+    # Fields rewritten on the way out of a document that was admitted --
+    # ``masks.Mask``. Empty is the ordinary case and costs one attribute
+    # read. Part of identity for the reason ``transforms`` is: two
+    # declarations disagreeing about which values leave must collide.
+    masks: tuple = ()
     # A stable label for *this* configuration of rules, carried into a stored
     # ``record_use`` so a consequence can be tied to the policy that produced
     # it. Part of identity on purpose: ``Budget(100)`` and ``Budget(10000)``
@@ -163,7 +168,10 @@ class AdmissionSpec:
         within = (f", per {self.subjects}[] keyed by {self.subject_key}"
                   if self.subjects and self.subject_key
                   else f", per {self.subjects}[]" if self.subjects else "")
-        return f"{self.collection}: refuses on [{reasons}]{scope}{within}"
+        hides = (f", masks [{', '.join(m.describe() for m in self.masks)}]"
+                 if self.masks else "")
+        return (f"{self.collection}: refuses on [{reasons}]{scope}{within}"
+                f"{hides}")
 
 
 def _ask(rule, doc: dict, *, when: datetime | None,
