@@ -130,8 +130,9 @@ def _clean_registry():
         table.clear()
 
 
-def _load(tmp_path, text=POLICY, name="voydfile.py"):
-    path = tmp_path / name
+def _load(tmp_path, text=POLICY, name="voydfile"):
+    # A stem, not a filename, so the call sites do not read as citations.
+    path = tmp_path / f"{name}.py"
     path.write_text(textwrap.dedent(text))
     return load(str(path))
 
@@ -436,8 +437,8 @@ def late(): return []
 # ---- the plan, and the version -------------------------------------------
 
 def _two(tmp_path, before, after):
-    was = _load(tmp_path, before, "current.py")
-    now = _load(tmp_path, after, "proposed.py")
+    was = _load(tmp_path, before, "current")
+    now = _load(tmp_path, after, "proposed")
     return {(s.kind, s.fails_open) for s in structural(was, now)}, was, now
 
 
@@ -469,10 +470,10 @@ def test_lifting_recipes_only_fails_open(tmp_path):
 def test_the_version_is_stable_and_is_what_the_metrics_report(tmp_path):
     from voyd.wire.metrics import Layout, Meter, Slab, render
 
-    one = _load(tmp_path, BASE, "a.py")["t"].recipes[0].version
-    two = _load(tmp_path, BASE, "b.py")["t"].recipes[0].version
+    one = _load(tmp_path, BASE, "a")["t"].recipes[0].version
+    two = _load(tmp_path, BASE, "b")["t"].recipes[0].version
     assert one == two and len(one) == 12
-    guard = Guard(_load(tmp_path, BASE, "c.py")["t"])
+    guard = Guard(_load(tmp_path, BASE, "c")["t"])
     out, _ = expand_recipe(wire(call("t", "a")), 7, 0, {"t": guard}, False)
     assert out is not None
     layout = Layout(("t",), recipes=(("t", "a", one),))

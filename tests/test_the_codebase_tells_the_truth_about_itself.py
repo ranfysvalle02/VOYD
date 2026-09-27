@@ -87,7 +87,8 @@ def resolve(ref: str, source: pathlib.Path) -> bool:
     # A reference with a directory in it is still relative to somewhere:
     # `admission/core.py` is written inside `voyd/wire` and means the one
     # in `voyd/engine`, because there is only one.
-    candidates += list(ROOT.glob(f"**/{ref}"))
+    candidates += [c for c in ROOT.glob(f"**/{ref}")
+                   if ".claude" not in c.relative_to(ROOT).parts]
     # A bare module name is read against the package that names it, which
     # is how `core.py` means `voyd/engine/admission/core.py` inside that
     # package and nothing at all outside it.

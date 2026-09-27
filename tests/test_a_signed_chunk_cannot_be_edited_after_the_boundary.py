@@ -2,8 +2,8 @@
 
 Pure: no cluster, no proxy process. The stamper is driven with the same
 OP_MSG bytes the transport hands it, and the verifier is handed documents
-exactly as a driver would have decoded them. `test_a_stamp_survives_a_real_
-driver.py` is the live half.
+exactly as a driver would have decoded them.
+`test_a_stamp_survives_a_real_driver.py` is the live half.
 """
 
 from __future__ import annotations
