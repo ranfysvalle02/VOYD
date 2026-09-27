@@ -331,7 +331,8 @@ def main(argv: list[str] | None = None) -> int:
                 guards[collection] = Guard(
                     spec,
                     on_delete=OPTIONS.get(collection, {}).get(
-                        "on_delete", "forward"))
+                        "on_delete", "forward"),
+                    backfill=OPTIONS.get(collection, {}).get("backfill", 4))
         except Exception as exc:
             # A policy file that is wrong must fail here, loudly, rather than
             # at the first query. Starting a boundary from a broken

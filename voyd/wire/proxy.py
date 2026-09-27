@@ -84,7 +84,7 @@ from typing import Mapping, TypedDict
 from . import cascade
 from . import seal
 from . import metrics
-from .policy import (Budgets, Guard, _wants_a_caller, _was_reduced,
+from .policy import (Backfill, Budgets, Guard, _wants_a_caller, _was_reduced,
                      cascade_first, cascade_first_for_one, delete_reply,
                      derive_on_insert, erase_first, guard_for, judge,
                      refuse_change_stream, refuse_client_vector,
@@ -176,6 +176,7 @@ class _Pump(TypedDict):
     reduced: set[int]
     reduced_cursors: set[int]
     budgets: Budgets
+    backfill: Backfill
     draining: "asyncio.Event | None"
 
 
@@ -193,6 +194,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                reduced: set[int] | None = None,
                reduced_cursors: set[int] | None = None,
                budgets: "Budgets | None" = None,
+               backfill: "Backfill | None" = None,
                draining: "asyncio.Event | None" = None) -> str:
     """One direction of one connection.
 
@@ -313,6 +315,19 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         # caller could `find()` two rows in.
                         if reduced is not None:
                             reduced.add(req_id)
+                    elif refusal is None and backfill is not None:
+                        # Ordinary retrieval. A lone `$vectorSearch` asks
+                        # for more than the client did, so the rows the
+                        # egress check refuses can be replaced; the reply
+                        # is cut back after judging. See `backfill.py`.
+                        widened = backfill.widen(body, guards, req_id)
+                        if widened is not None:
+                            # An `aggregate` carries no document sequence,
+                            # so the body is the whole message.
+                            raw = encode_sections(req_id, resp_to,
+                                                  head[0] if head else 0,
+                                                  widened)
+                            body = widened
 
                 # A `getMore` continuing a reduced read is the same read.
                 # Matched on the request, where the cursor id is still in
@@ -327,11 +342,15 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     # other way this entry stops being needed.
                     if body.get("batchSize") == 0:
                         reduced_cursors.discard(more)
+                if backfill is not None and isinstance(more, int):
+                    backfill.continuing(more, req_id)
                 # A cursor the client gives up on will never report `id: 0`,
                 # so its running total would sit in `Budgets` for the life
                 # of the connection. This is the other end of that lifecycle.
                 if budgets is not None and "killCursors" in body:
                     budgets.forget(body.get("cursors"))
+                if backfill is not None and "killCursors" in body:
+                    backfill.forget(body.get("cursors"))
                 if refusal is not None:
                     await send(back, refusal)
                     continue
@@ -441,6 +460,10 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     raw = await judge(raw, req_id, resp_to, guards,
                                       verbose, vault, meter,
                                       who.claims if who else None, budgets)
+                if backfill is not None:
+                    # After `judge`, never before: the cut may only remove
+                    # what the per-document check already let through.
+                    raw = backfill.settle(raw, req_id, resp_to)
             await send(writer, raw)
     except Hangup:
         # Not an error, and the one disconnect the caller may still be
@@ -580,7 +603,8 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                          "back_channel": channel,
                          "who": CallerIdentity(channel),
                          "reduced": set(), "reduced_cursors": set(),
-                         "budgets": Budgets(), "draining": draining}
+                         "budgets": Budgets(), "backfill": Backfill(),
+                         "draining": draining}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
         back = asyncio.ensure_future(pump(up_r, client_w, up_w,

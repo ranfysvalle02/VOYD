@@ -43,10 +43,15 @@ class Guard:
     that makes it movable to a wire in the first place.
     """
 
-    def __init__(self, spec: AdmissionSpec, *, on_delete: str = "forward"):
+    def __init__(self, spec: AdmissionSpec, *, on_delete: str = "forward",
+                 backfill: int = 4):
         self.collection = spec.collection
         self.spec = spec
         self.on_delete = on_delete
+        # How many times a lone `$vectorSearch` page is over-fetched so the
+        # refused rows can be replaced from further down the ranking. `1`
+        # is off. See `backfill.py`, which owns what the number means.
+        self.backfill = backfill
         self.handle = Admission(None, spec)
         self.refused = 0
         self.admitted = 0

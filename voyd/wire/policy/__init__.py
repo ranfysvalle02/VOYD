@@ -45,6 +45,7 @@ from .erasure import cascade_first, cascade_first_for_one, erase_first
 from .guarding import SUPPLIABLE_CLAIMS, Budgets, Guard, enforce
 from .guarding import _wants_a_caller as _wants_a_caller
 from .guarding import guard_for, judge, unsuppliable_claims
+from .backfill import Backfill
 from .handshake import TOPOLOGY_FIELDS, rewrite_topology, strip_compression
 from .reads import (DERIVED_COMMANDS, FOREIGN_STAGES, LEADING_STAGES,
                     PRESERVING_STAGES, blinded_find, blinds_a_subject,
@@ -61,7 +62,7 @@ from .verbs import (delete_reply, derive_on_insert,
 
 __all__ = [
     # ---- refuse a document ----
-    "Guard", "Budgets", "enforce", "judge", "guard_for",
+    "Guard", "Budgets", "Backfill", "enforce", "judge", "guard_for",
     "unsuppliable_claims", "SUPPLIABLE_CLAIMS",
 
     # ---- rewrite a command ----

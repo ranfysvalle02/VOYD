@@ -235,6 +235,44 @@ proxy at all.
 The asymmetry only runs one way. A rule with no query half is slower. A rule
 with *only* a query half would be a hole.
 
+### A short page is filled from further down the ranking
+
+Refusing on the way out has a cost the client can see: `limit: 10` over a
+collection whose nearest rows are mostly expired comes back with two.
+Deadlines are deliberately not pushed into the vector index (see
+[`voyd/engine/search.py`](voyd/engine/search.py)), so the index cannot skip
+them itself.
+
+So a lone `$vectorSearch` on a guarded collection is over-fetched. The proxy
+multiplies `limit` and `numCandidates` by the collection's `backfill`
+factor, judges the wider page exactly as it judges any batch, and only then
+cuts it back to the `limit` the client sent:
+
+```
+limit: 10, 8 of the 10 nearest expired
+backfill=1          2 documents
+backfill=4          10 documents, in the index's score order
+```
+
+```python
+@guard("notes", backfill=4)     # the default; 1 is off, 20 is the ceiling
+```
+
+The cut runs after the terminal pass and only removes, so it cannot put a
+refused document on the wire and no page is longer than the client asked
+for. It spans `getMore`, so a small `batchSize` gets the same page. A
+transform sees the wider page — a reranker choosing from forty candidates
+rather than ten — and the cut keeps the first `limit` of its order.
+
+Only the **lone** stage is widened. `$match`, `$sort`, `$skip`, `$limit`,
+`$sample` or anything else after the search means something different over
+forty candidates than over ten, so those pipelines go out as sent, and a
+reduction (`$group`, `$project`, `$count`) has the refusal pushed into it
+instead. Both are capped at 10,000, the most Atlas accepts. If more than
+three quarters of a widened page is refused, the page is short, exactly as
+it is without backfill; the factor is paid on every lone vector search,
+refused rows or not.
+
 ---
 
 ## Shaping the page, inside the boundary
@@ -686,6 +724,10 @@ the second language.
 - A transform cannot widen a read, and that is the only promise made
   about one. It can still be slow, wrong, or expensive, and nothing here
   bounds how long somebody's reranker runs inside the egress path.
+- Backfill fills a lone `$vectorSearch` and nothing else. A pipeline with
+  a stage after the search, a `$search`, or a `$rankFusion` still comes
+  back short by whatever was refused, and a widened page that is mostly
+  refused is short too.
 - There is **no observe-only mode**. `voyd-wire` enforces or it is not
   in the path; it cannot yet run alongside a read logging what it *would*
   have refused. `voyd-plan --audit` answers most of that question without

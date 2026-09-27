@@ -488,7 +488,7 @@ def rerank(collection: str, *, diversity: float = 0.3,
 
 
 def guard(collection: str, *, lineage_field: str | None = None,
-          on_delete: str = "forward"):
+          on_delete: str = "forward", backfill: int = 4):
     """Declare the rules for one collection. Returns the class unchanged.
 
     ``on_delete="revoke"`` gives a client's ``delete`` the better meaning:
@@ -498,6 +498,11 @@ def guard(collection: str, *, lineage_field: str | None = None,
     surprise this project exists to remove -- and because somebody, somewhere,
     means it.
 
+    ``backfill`` is how many times a lone ``$vectorSearch`` page is
+    over-fetched so the refused rows can be replaced from further down the
+    ranking; the proxy cuts the reply back to the client's ``limit`` after
+    the per-document check. ``1`` turns it off. Bounded at 20.
+
     Raises at *load* time for a body it cannot compile -- an unknown value, a
     second deadline, no rule at all. A policy file is the one place an error
     must not wait for a query to surface it.
@@ -506,6 +511,13 @@ def guard(collection: str, *, lineage_field: str | None = None,
         raise ValueError(
             f"{collection}: on_delete={on_delete!r}; expected one of "
             f"{ON_DELETE}. 'forward' lets a delete really delete")
+    if (isinstance(backfill, bool) or not isinstance(backfill, int)
+            or not 1 <= backfill <= 20):
+        raise ValueError(
+            f"{collection}: backfill={backfill!r}; expected a whole number "
+            f"from 1 (off) to 20. It multiplies every vector search's "
+            f"candidate set, so past 20 it is a different workload")
+
     def decorate(cls):
         rules, tenant_field, seen = [], None, set()
         subject_path: str | None = None
@@ -623,6 +635,7 @@ def guard(collection: str, *, lineage_field: str | None = None,
             # loader exists to refuse.
             transforms=tuple(TRANSFORMS.get(collection, ())))
         OPTIONS[collection] = {"on_delete": on_delete,
+                               "backfill": backfill,
                                "sealed": tuple(sealed_fields),
                                "scope_field": tenant_field,
                                "auto_embed": dict(embedded)}

@@ -82,7 +82,7 @@ class AdmissionCore:
         self._break_glass = False
         # Which consequences were made out of these facts. ``None`` means
         # nothing is recording them, and ``record_use`` says so rather than
-        # succeeding quietly -- see context.py.
+        # succeeding quietly.
         # Who may *do* things here. ``None`` means this handle is not
         # serving anybody but its own application; see ``authorised_by``.
         self.authority = None
