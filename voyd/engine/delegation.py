@@ -8,7 +8,7 @@ what it says.
 
 ``verify(token, keys, now, expected)`` is a function of its arguments:
 no network, no clock of its own, no cache, no log. The keys are handed
-in -- fetched off the request path by ``voyd/wire/delegated.py`` -- so a
+in -- fetched off the request path by ``voyd/wire/jwks.py`` -- so a
 slow identity provider cannot stall a read and a test can hand in a
 dictionary. The answer is an ``Identity`` or a ``Refusal``, never an
 exception, because a boundary that raises on a hostile token has made

@@ -40,7 +40,7 @@ ISSUER = ('issuer("https://login.test", audience="voyd://t", '
 
 def policy(tmp_path, name, *, opts="", tenant="", via="", cvia="", mvia="",
            issuer=True, users='("svc",)', extra=""):
-    path = tmp_path / name
+    path = tmp_path / f"{name}.py"     # a stem, so call sites are not citations
     path.write_text(HEAD.format(
         issuer=ISSUER.format(users=users, extra=extra) if issuer else "",
         opts=opts, tenant=tenant, via=via, cvia=cvia, mvia=mvia))
@@ -62,17 +62,17 @@ def kinds(found) -> dict[str, bool]:
 ])
 def test_delegation_that_admits_a_kind_it_refused_fails_open(
         tmp_path, before, after, loosens):
-    was, _i, _ = policy(tmp_path, "a.py", opts=f', delegation="{before}"')
-    now, _i, _ = policy(tmp_path, "b.py", opts=f', delegation="{after}"')
+    was, _i, _ = policy(tmp_path, "a", opts=f', delegation="{before}"')
+    now, _i, _ = policy(tmp_path, "b", opts=f', delegation="{after}"')
     got = kinds(structural(was, now))
     kind = DELEGATION_LOOSENED if loosens else DELEGATION_TIGHTENED
     assert got == {kind: loosens}
 
 
 def test_a_scope_removed_or_changed_fails_open_and_added_does_not(tmp_path):
-    none, _i, _ = policy(tmp_path, "a.py")
-    read, _i, _ = policy(tmp_path, "b.py", opts=', scope="notes:read"')
-    all_, _i, _ = policy(tmp_path, "c.py", opts=', scope="notes:all"')
+    none, _i, _ = policy(tmp_path, "a")
+    read, _i, _ = policy(tmp_path, "b", opts=', scope="notes:read"')
+    all_, _i, _ = policy(tmp_path, "c", opts=', scope="notes:all"')
     assert kinds(structural(read, none)) == {SCOPE_REMOVED: True}
     assert kinds(structural(none, read)) == {SCOPE_ADDED: False}
     assert kinds(structural(read, all_)) == {SCOPE_CHANGED: True}
@@ -80,10 +80,10 @@ def test_a_scope_removed_or_changed_fails_open_and_added_does_not(tmp_path):
 
 @pytest.mark.parametrize("field", ["via", "cvia", "mvia", "tenant"])
 def test_a_rule_that_stops_asking_one_side_fails_open(tmp_path, field):
-    both, _i, _ = policy(tmp_path, "a.py")
+    both, _i, _ = policy(tmp_path, "a")
     one = {field: ('via="principal"' if field == "tenant"
                    else ', via="principal"')}
-    narrowed, _i, _ = policy(tmp_path, "b.py", **one)
+    narrowed, _i, _ = policy(tmp_path, "b", **one)
     found = structural(both, narrowed)
     assert [s.kind for s in found] == [VIA_NARROWED_TO_ONE_SIDE]
     assert found[0].fails_open and "actor" in found[0].detail
@@ -92,18 +92,18 @@ def test_a_rule_that_stops_asking_one_side_fails_open(tmp_path, field):
 
 
 def test_switching_sides_fails_open(tmp_path):
-    user, _i, _ = policy(tmp_path, "a.py", via=', via="principal"')
-    agent, _i, _ = policy(tmp_path, "b.py", via=', via="actor"')
+    user, _i, _ = policy(tmp_path, "a", via=', via="principal"')
+    agent, _i, _ = policy(tmp_path, "b", via=', via="actor"')
     assert kinds(structural(user, agent)) == {VIA_NARROWED_TO_ONE_SIDE: True}
 
 
 def test_issuers_added_removed_and_changed(tmp_path):
-    _s, none, _ = policy(tmp_path, "a.py", issuer=False)
-    _s, one, _ = policy(tmp_path, "b.py")
-    _s, anyone, _ = policy(tmp_path, "c.py", users='("*",)')
-    _s, fewer_algs, _ = policy(tmp_path, "d.py",
+    _s, none, _ = policy(tmp_path, "a", issuer=False)
+    _s, one, _ = policy(tmp_path, "b")
+    _s, anyone, _ = policy(tmp_path, "c", users='("*",)')
+    _s, fewer_algs, _ = policy(tmp_path, "d",
                                extra=', algorithms=("EdDSA",)')
-    _s, new_keys, _ = policy(tmp_path, "e.py", extra=', skew=10')
+    _s, new_keys, _ = policy(tmp_path, "e", extra=', skew=10')
     assert kinds(issuers(none, one)) == {ISSUER_ADDED: True}
     assert kinds(issuers(one, none)) == {ISSUER_REMOVED: False}
     assert kinds(issuers(one, anyone)) == {ISSUER_CHANGED: True}
@@ -113,8 +113,8 @@ def test_issuers_added_removed_and_changed(tmp_path):
 
 
 def test_the_plan_carries_the_issuer_findings_and_fails_open_on_them(tmp_path):
-    was, before, _ = policy(tmp_path, "a.py", issuer=False)
-    now, after, _ = policy(tmp_path, "b.py")
+    was, before, _ = policy(tmp_path, "a", issuer=False)
+    now, after, _ = policy(tmp_path, "b")
     result = plan(was, now, lambda _c: iter(()), trusted=(before, after),
                   collections=["other"])
     assert [s.kind for s in result.structural] == [ISSUER_ADDED]
@@ -122,8 +122,8 @@ def test_the_plan_carries_the_issuer_findings_and_fails_open_on_them(tmp_path):
 
 
 def test_voyd_plan_exits_one_on_a_loosened_delegation(tmp_path, capsys):
-    _s, _i, was = policy(tmp_path, "a.py", opts=', delegation="required"')
-    _s, _i, now = policy(tmp_path, "b.py")
+    _s, _i, was = policy(tmp_path, "a", opts=', delegation="required"')
+    _s, _i, now = policy(tmp_path, "b")
     assert main(["--current", was, "--proposed", now]) == 1
     assert DELEGATION_LOOSENED in capsys.readouterr().out
     assert main(["--current", now, "--proposed", now]) == 0
