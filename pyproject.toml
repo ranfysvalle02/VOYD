@@ -1,6 +1,6 @@
 [project]
 name = "voyd"
-version = "0.3.0"
+version = "0.3.1"
 description = "Ranking is not permission. A MongoDB wire proxy that cannot serve a fact it has forgotten -- admission control for what may reach a prompt, in one policy file and one connection string."
 readme = "README.md"
 license = { text = "MIT" }

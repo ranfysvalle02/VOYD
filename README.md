@@ -1205,6 +1205,9 @@ at different lengths — each answers a question this one does not:
 | [`use-cases.md`](use-cases.md) | twenty-two places a fact ranks well and must not reach the prompt, each with its voydfile and the edge where refusal stops |
 | [`ethos.md`](ethos.md) | what a policy file is for, and the four tests that keep logic out of it. Read this before writing rules |
 | [`blog.md`](blog.md) | the story: every failure in this domain is disguised as its own opposite, including one in this project's own CI |
+| [`blog2.md`](blog2.md) | the sequel: the verbs after *refuse* — backfill, prefilter, mask, sanitize, stages, recipes, attest — and the one property they share |
+| [`examples/operators/README.md`](examples/operators/README.md) | every `voyd.contrib` stage and operator, with a snippet you can paste into a pipeline today |
+| [`whats-next.md`](whats-next.md) | the spec for delegated agent identity at the wire, and `voyd-mcp` to deliver it |
 | [`docs/why-not-native.md`](docs/why-not-native.md) | change streams, `$where`, views, `$$USER_ROLES`, TTL, RBAC, Queryable Encryption — what each one gives you and where the line is |
 | [`docs/cosine.md`](docs/cosine.md) | the embedding-model failure, reproducible without an API key, with its provenance and its limits |
 | [`docs/ranking-is-not-permission.md`](docs/ranking-is-not-permission.md) | the long-form design argument for putting a boundary on the wire |
