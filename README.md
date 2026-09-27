@@ -568,6 +568,29 @@ served. [`examples/virtual_stages.py`](examples/virtual_stages.py) chains
 all of the above against a live, an expired, a revoked and another
 tenant's document, and then builds the prompt on the client side.
 
+### A library of them, installed in one line
+
+`voyd.contrib` ships ready-made operators and stages, all local,
+deterministic, standard-library Python:
+
+```python
+# voydfile.py
+from voyd import contrib
+contrib.install()          # or: from voyd.contrib import rank; rank.install("$bm25")
+```
+
+- `voyd.contrib.text` — `$redactPII` (emails, Luhn-checked cards, SSNs,
+  IPs, phones), `$chunk`, `$wordCount`, `$tokenEstimate`, `$truncate`,
+  `$highlight`, `$normalizeWhitespace`
+- `voyd.contrib.rank` — `$bm25`, `$mmr`, `$dedupe`, `$freshness`, `$rrf`
+- `voyd.contrib.context` — `$contextPack` (a token budget), `$cite`,
+  `$stats`
+
+`install` registers through `stage` and `operator`, so a duplicate name
+fails the load like any other. The catalogue, with a snippet for each,
+the limits, and runnable scripts, is
+[`examples/operators/README.md`](examples/operators/README.md).
+
 ---
 
 ## What a policy change would let through

@@ -46,6 +46,7 @@ SOURCES = sorted(
                           "quickstart.md", "use-cases.md",
                           "docs/ranking-is-not-permission.md",
                           "docs/cosine.md", "docs/why-not-native.md",
+                          "examples/operators/README.md",
                           "pyproject.toml",
                           "Dockerfile", "action.yml",
                           ".github/workflows/test.yml",
@@ -244,6 +245,8 @@ def test_both_doors_leave_the_same_row():
     "voyd.engine", "voyd.engine.admission", "voyd",
     "voyd.engine.plan", "voyd.engine.attest",
     "voyd.engine.admission.transforms", "voyd.engine.admission.rerank",
+    "voyd.contrib", "voyd.contrib.text", "voyd.contrib.rank",
+    "voyd.contrib.context",
 ])
 def test_every_module_a_reader_is_pointed_at_imports(module):
     # The package docstrings are a map. A map naming a module that does
@@ -256,6 +259,8 @@ def test_every_module_a_reader_is_pointed_at_imports(module):
     "voyd.engine.plan", "voyd.engine.attest",
     "voyd.engine.admission.transforms", "voyd.engine.admission.rerank",
     "voyd.engine.admission.sanitize", "voyd.wire.plan_report",
+    "voyd.contrib._common", "voyd.contrib.text", "voyd.contrib.rank",
+    "voyd.contrib.context",
 ])
 def test_the_modules_that_claim_to_be_pure_reach_no_database(module):
     """Each of these says "pure" in its own docstring. Checked, not trusted.
@@ -336,6 +341,7 @@ def test_no_module_level_definition_in_voyd_is_unreferenced():
         corpus += (ROOT / name).read_text()
     for path in (ROOT / "docs").glob("*.md"):
         corpus += path.read_text()
+    corpus += (ROOT / "examples" / "operators" / "README.md").read_text()
 
     orphans = {name: where for name, where in defined.items()
                if not name.startswith("__") and corpus.count(name) <= 1}

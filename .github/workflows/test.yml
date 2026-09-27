@@ -158,7 +158,7 @@ jobs:
         env:
           VOYD_MONGO_URI: mongodb://localhost:27018/?directConnection=true
         run: |
-          for f in examples/*.py; do
+          for f in examples/*.py examples/operators/*.py; do
             echo "--- $f"
             uv run --no-sync python "$f" > /dev/null || exit 1
           done
