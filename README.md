@@ -82,9 +82,10 @@ pip install voyd        # or: uv add voyd
 Read [`Known gaps`](#known-gaps) before you rely on it — being
 installable is not the same as being proven.
 
-You get three commands — `voyd-wire`, `voyd-plan`, `voyd-wire-health` —
-and the vocabulary to write the file they read. There is nothing here
-for an application to import.
+You get four commands — `voyd-wire`, `voyd-plan`, `voyd-wire-health`,
+`voyd-verify` — and the vocabulary to write the file they read. There is
+nothing here for an application to import; `voyd.attest` is for whoever
+*checks* what an application was served.
 
 New here? [`quickstart.md`](quickstart.md) is twenty minutes, and the
 first step costs nothing at all.
@@ -941,6 +942,100 @@ would take every other tenant's rows with it.
 
 ---
 
+## A prompt that can prove where its chunks came from
+
+A refusal leaves nothing behind, so "this prompt was built only from what
+the boundary admitted" is a claim about a deployment rather than a
+property of the prompt. `attest=True` makes it a property of each chunk:
+
+```python
+@guard("notes", attest=True)
+class Notes:
+    expire_at = deadline()
+    ssn       = mask()
+```
+
+```
+voyd-wire --attest-keygen attest.pem          # writes attest.pem, attest.pem.pub
+voyd-wire --config voydfile.py --attest-key attest.pem   # or env:NAME
+```
+
+Every document served from `notes` carries a `_voyd` stamp, signed last —
+after every rule, mask, sanitiser, transform, backfill cut and virtual
+stage — over the document exactly as the client receives it:
+
+    kid      first 16 hex of SHA-256 over the Ed25519 public key
+    policy   SHA-256 of the policy file the boundary loaded
+    ns, id   the namespace and _id
+    digest   SHA-256 over a canonical encoding of the served document
+    caller   SHA-256 of the server-reported user and auth db, or null
+    iat      when it was signed, by the proxy's clock
+    read     one random id per read, stable across getMore
+    pos      the document's place in the whole read
+    prev     a hash of the stamp at pos-1, so a read is a chain
+    sig      Ed25519 over all of the above
+
+Verification needs a public key and nothing else — no proxy, no database:
+
+```python
+from voyd import attest
+
+keys = attest.load_public_keys(open("attest.pem.pub", "rb").read())
+attest.verify(doc, keys, policy=expected_hash)    # -> Verdict(ok, reason, ...)
+attest.verify_all(window, keys)                   # the chain too
+prompt = "\n".join(f"[{attest.cite(d)}] {attest.strip(d)['text']}" for d in window)
+```
+
+```
+voyd-verify --keys attest.pem.pub --policy <sha256> < context.jsonl
+```
+
+`verify` names which check failed: `unknown kid` (a key this verifier does
+not hold), `bad signature` (the stamp was altered or relabelled), `digest
+mismatch` (an authentic stamp on a document edited after the boundary),
+`id mismatch`, `stale policy`. A masked value is stamped as the null it
+left as, so putting it back fails verification — the stamp proves the
+client never had it.
+
+**The digest is over a type-tagged canonical JSON form, not BSON bytes**,
+because a stamp has to survive a driver decoding it, an application holding
+it and a JSON file for an auditor. Keys are sorted, every integer width is
+one type, a whole double equals its integer, datetimes are epoch
+milliseconds, and strings are compared by exact code point. Reordering keys
+or widening an integer therefore verifies; every other edit does not. The
+full table is in [`voyd/attest.py`](voyd/attest.py).
+
+**A read is a hash chain rather than a Merkle tree.** A root needs a
+finished set, a cursor is finished only when the client decides, and no
+reply a driver hands an application could carry one. The chain needs no
+end: the stamp at position *k* signs the link to *k-1*, so the last stamp of
+a window commits to everything before it, and `verify_all` reports whether
+each read's positions are contiguous from zero.
+
+**Nothing upstream of the signer can mint or keep a stamp.** `_voyd` is
+stripped from every document before any rule or transform sees it, and
+again before signing, so a stamp stored in a row, saved back by a client,
+or written by a `@transform` or `@stage` is replaced.
+
+**What is not stamped:** `count`, `distinct`, and any pipeline with a stage
+whose output is not one stored document (`$group`, `$bucket`, `$unwind`,
+`$replaceRoot`, ...). There is no `(_id, content)` pair to attest to. A
+projection is stamped as what it served.
+
+**Key rotation** is a bundle: generate a new key, give verifiers a PEM file
+holding both public keys, restart the boundary on the new private key, and
+delete the old block once nothing signed under it still needs checking. A
+stamp under a key not in the bundle is `unknown kid`, never a pass.
+`voyd-plan` reports a guard that stops attesting as `attest_removed` — not
+fail-open, because nothing becomes reachable, but every later prompt loses
+its evidence. `voyd_stamped_total{collection}` counts what was signed.
+
+[`examples/attest.py`](examples/attest.py) reads through the boundary,
+verifies offline, edits one field and watches it fail, and builds a prompt
+with citations.
+
+---
+
 ## Running the tests
 
 ```bash
@@ -1079,6 +1174,19 @@ the second language.
 - `recipes_only=True` closes reads. `findAndModify` returns the document it
   wrote and is left alone as a write, and a direct connection is outside
   every guarantee here.
+- **A stamp proves provenance, not truth.** It says the boundary served
+  this document under this policy; it says nothing about whether the
+  document was correct, or whether the policy was the right one.
+- **Whoever holds the private key can mint stamps.** A compromised key
+  signs forgeries indistinguishable from real stamps until it is dropped
+  from every verifier's bundle, and nothing here revokes a key on its own
+  or timestamps stamps against an outside clock. `iat` is the proxy's
+  clock and is only as honest as it.
+- The caller field is **pseudonymous**: anybody with a list of user names
+  can hash each and match it. A verifier outside Python must reproduce the
+  canonical form exactly, including Python's shortest float repr.
+- A stamp costs an Ed25519 signature per document and a re-encoded reply;
+  an attested collection never gets the byte-for-byte fast path.
 - There is **no observe-only mode**. `voyd-wire` enforces or it is not
   in the path; it cannot yet run alongside a read logging what it *would*
   have refused. `voyd-plan --audit` answers most of that question without

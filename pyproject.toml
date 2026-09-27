@@ -46,6 +46,12 @@ crypto = [
 rerank = [
     "numpy>=1.26",
 ]
+# Signed context receipts. The proxy signs what an `attest=True` collection
+# serves with Ed25519, and a verifier needs only the public key -- so this
+# is the one extra a *client* may want too, to run `voyd.attest.verify`.
+attest = [
+    "cryptography>=42",
+]
 # Everything optional, which is one thing. Nothing here computes an
 # embedding: `auto_embed` means the index owns the vector and the server
 # produces it, so a client-side embedding library is not a dependency this
@@ -53,6 +59,7 @@ rerank = [
 all = [
     "voyd[crypto]",
     "voyd[rerank]",
+    "voyd[attest]",
 ]
 # Every tool the suite and CI actually invoke, declared rather than inherited.
 # A linter or type checker that arrives transitively is advisory -- it holds
@@ -73,6 +80,8 @@ dev = [
     # reading `action.yml`. A rig that retyped those steps would pass
     # while the file people actually run was broken.
     "pyyaml>=6.0",
+    # Stamps are signed and verified in the suite, both halves.
+    "cryptography>=42",
 ]
 
 [project.urls]
@@ -95,6 +104,9 @@ voyd-bench = "voyd.wire.bench:main"
 # the whole command is a question about a policy that is not deployed.
 voyd-plan = "voyd.wire.plan:main"
 voyd-wire-health = "voyd.wire.health:main"
+# Needs no proxy, no cluster and no private key: JSON lines of documents in,
+# a verdict per document out. The tool an auditor runs.
+voyd-verify = "voyd.verify:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["voyd"]

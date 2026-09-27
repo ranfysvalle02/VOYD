@@ -119,6 +119,11 @@ class AdmissionSpec:
     # policies apart after the fact -- a revision is. ``None`` until a
     # deployment names one; ``record_use`` requires it, ordinary reads do not.
     policy_revision: str | None = None
+    # Whether a wire boundary signs what it serves from this collection --
+    # `@guard(..., attest=True)`. Refuses nothing and changes no value; it
+    # is part of identity because `voyd-plan` compares two specs, and a
+    # policy that stops attesting is a finding an auditor needs to see.
+    attest: bool = False
 
     def with_defaults(self) -> AdmissionSpec:
         default_rules: tuple[Rule, ...] = (
@@ -179,8 +184,9 @@ class AdmissionSpec:
         cooks = (f", recipes [{', '.join(r.describe() for r in self.recipes)}]"
                  + (" only" if self.recipes_only else "")
                  if self.recipes or self.recipes_only else "")
+        signed = ", attested" if self.attest else ""
         return (f"{self.collection}: refuses on [{reasons}]{scope}{within}"
-                f"{hides}{cooks}")
+                f"{hides}{cooks}{signed}")
 
 
 def _ask(rule, doc: dict, *, when: datetime | None,

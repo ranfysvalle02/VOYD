@@ -798,8 +798,16 @@ def _check_recipes() -> None:
 
 def guard(collection: str, *, lineage_field: str | None = None,
           on_delete: str = "forward", backfill: int = 4,
-          prefilter: bool = False, recipes_only: bool = False):
+          prefilter: bool = False, recipes_only: bool = False,
+          attest: bool = False):
     """Declare the rules for one collection. Returns the class unchanged.
+
+    ``attest=True`` has the boundary sign every document it serves from
+    this collection: a ``_voyd`` stamp naming the key, the policy file's
+    hash, the document's digest as served and who it was served to, so a
+    client or an auditor can later prove a chunk in a prompt came through
+    here unmodified. Needs ``voyd-wire --attest-key``. See
+    ``voyd/attest.py``.
 
     ``on_delete="revoke"`` gives a client's ``delete`` the better meaning:
     the row is marked, unreachable on the next read, still on disk, its
@@ -990,13 +998,15 @@ def guard(collection: str, *, lineage_field: str | None = None,
             # loader exists to refuse.
             transforms=tuple(TRANSFORMS.get(collection, ())),
             recipes=_recipes_for(collection),
-            recipes_only=bool(recipes_only))
+            recipes_only=bool(recipes_only),
+            attest=bool(attest))
         OPTIONS[collection] = {"on_delete": on_delete,
                                "backfill": backfill,
                                "sealed": tuple(sealed_fields),
                                "scope_field": tenant_field,
                                "auto_embed": dict(embedded),
-                               "prefilter": bool(prefilter)}
+                               "prefilter": bool(prefilter),
+                               "attest": bool(attest)}
         return cls
     return decorate
 

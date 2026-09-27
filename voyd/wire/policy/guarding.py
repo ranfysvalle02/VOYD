@@ -85,6 +85,12 @@ class Guard:
         # Reads served by each `@recipe` on this collection, by name. The
         # version is fixed at load, so the name is enough to count by.
         self.recipe_reads: dict[str, int] = {}
+        # The key this collection's served documents are stamped with, for
+        # a collection that declared `attest=True`. Attached by `voyd-wire`
+        # before any fork, like the vault's custody; `None` everywhere else.
+        # See `voyd/wire/stamp.py`, which does the stamping, last.
+        self.signer: Any = None
+        self.stamped = 0
 
     @classmethod
     def defaults(cls, collection: str, *, at_field: str, mark_field: str):
@@ -174,6 +180,12 @@ class Guard:
 
     def _bound(self, docs: list[dict], caller: dict | None, tab: Any, *,
                shape: bool) -> list[dict]:
+        if self.spec.attest:
+            # `_voyd` is the boundary's to write. One stored in the row, or
+            # saved back by a client that wrote what it read, is taken out
+            # before any rule or transform sees it, so nothing downstream
+            # of here can carry a stamp it did not get from `stamp.py`.
+            docs = [_unstamped(d) for d in docs]
         handle = self.handle
         if self.needs_caller:
             # `for_caller` clones rather than assigns, and here that is
@@ -221,6 +233,12 @@ class Guard:
         for reason, count in self.sealed_refused.items():
             counts[reason] = counts.get(reason, 0) + count
         return counts
+
+
+def _unstamped(doc: Any) -> Any:
+    if isinstance(doc, Mapping) and "_voyd" in doc:
+        return {k: v for k, v in doc.items() if k != "_voyd"}
+    return doc
 
 
 def _collection_of(reply: Mapping) -> str | None:
@@ -280,17 +298,22 @@ def _wants_a_caller(guards: dict[str, Guard], body: Mapping) -> bool:
     handful of fields a command names its collection in, and a deployment
     that declares no caller-aware rule never gets past the first line.
     """
-    if not any(g.needs_caller for g in guards.values()):
+    # A collection that attests asks too: its stamps record who was served,
+    # and the only honest answer to that is the server's.
+    def asks(g: Guard) -> bool:
+        return g.needs_caller or g.signer is not None
+
+    if not any(asks(g) for g in guards.values()):
         return False
     for verb in ("find", "aggregate", "distinct", "count", "getMore",
                  "findAndModify", "delete", "update", "insert"):
         target = body.get(verb)
         if isinstance(target, str) and target in guards:
-            return guards[target].needs_caller
+            return asks(guards[target])
     # A `getMore` names its collection in `collection`, not in the verb.
     more = body.get("collection")
     if isinstance(more, str) and more in guards:
-        return guards[more].needs_caller
+        return asks(guards[more])
     return False
 
 

@@ -1021,14 +1021,19 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "cryptography" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pymongo", extra = ["encryption"] },
+]
+attest = [
+    { name = "cryptography" },
 ]
 crypto = [
     { name = "pymongo", extra = ["encryption"] },
 ]
 dev = [
+    { name = "cryptography" },
     { name = "mypy" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -1044,6 +1049,8 @@ rerank = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", marker = "extra == 'attest'", specifier = ">=42" },
+    { name = "cryptography", marker = "extra == 'dev'", specifier = ">=42" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'rerank'", specifier = ">=1.26" },
@@ -1053,7 +1060,8 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
+    { name = "voyd", extras = ["attest"], marker = "extra == 'all'" },
     { name = "voyd", extras = ["crypto"], marker = "extra == 'all'" },
     { name = "voyd", extras = ["rerank"], marker = "extra == 'all'" },
 ]
-provides-extras = ["crypto", "rerank", "all", "dev"]
+provides-extras = ["crypto", "rerank", "attest", "all", "dev"]

@@ -105,6 +105,7 @@ from .codec import (OP_COMPRESSED, OP_MSG, Hangup, ProtocolError,
 from .identity import Backchannel, CallerIdentity
 from .report import merge, summarise, tally
 from .scratch import Scratch
+from .stamp import Stamps
 from .upstream import (Upstream, keepalive, stepped_down,
                        upstream_ready, vault_uri)
 
@@ -193,6 +194,9 @@ class _Pump(TypedDict):
     # this worker's temporary collections. `None` when none are declared.
     virtuals: "Virtuals | None"
     scratch: "Scratch | None"
+    # The open reads this connection is stamping, for a policy with any
+    # `attest=True` collection. `None` otherwise. See `stamp.py`.
+    stamps: "Stamps | None"
 
 
 async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -212,7 +216,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                backfill: "Backfill | None" = None,
                draining: "asyncio.Event | None" = None,
                virtuals: "Virtuals | None" = None,
-               scratch: "Scratch | None" = None) -> str:
+               scratch: "Scratch | None" = None,
+               stamps: "Stamps | None" = None) -> str:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -354,6 +359,9 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                             await who.resolve(verbose)
                         claims = who.claims if who else None
                         tabs = Budgets()
+                        if stamps is not None:
+                            stamps.note_virtual(virtual.guard.collection,
+                                                req_id, guards)
 
                         async def judged(reply: bytes) -> bytes:
                             return await judge(reply, req_id, 0, guards,
@@ -366,6 +374,12 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                             judge_reply=judged, scratch=scratch,
                             virtuals=virtuals, caller=claims,
                             verbose=verbose)
+                        if stamps is not None:
+                            # Last: after the virtual steps and the
+                            # terminal recheck, so the stamp signs the
+                            # answer the client is about to receive.
+                            answer = stamps.stamp(answer, req_id, guards,
+                                                  claims)
                         await send(back, answer)
                         continue
                 if refusal is None:
@@ -446,6 +460,11 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 if refusal is not None:
                     await send(back, refusal)
                     continue
+                if stamps is not None:
+                    # The command as it will be sent, after every rewrite
+                    # above: which reads get stamped, and which `getMore`
+                    # continues which read's chain.
+                    stamps.note(body, req_id, guards)
 
                 target = guard_for(guards, body, "delete")
                 if target is not None and target.on_delete == "revoke":
@@ -560,6 +579,12 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     # After `judge`, never before: the cut may only remove
                     # what the per-document check already let through.
                     raw = backfill.settle(raw, req_id, resp_to)
+                if stamps is not None:
+                    # Last of all, after the cut: a stamp signs exactly the
+                    # document the client receives, at the position it
+                    # receives it in.
+                    raw = stamps.stamp(raw, resp_to, guards,
+                                       who.claims if who else None)
             await send(writer, raw)
     except Hangup:
         # Not an error, and the one disconnect the caller may still be
@@ -703,7 +728,10 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                          "reduced": set(), "reduced_cursors": set(),
                          "budgets": Budgets(), "backfill": Backfill(),
                          "draining": draining, "virtuals": virtuals,
-                         "scratch": scratch}
+                         "scratch": scratch,
+                         "stamps": (Stamps() if any(
+                             g.signer is not None for g in guards.values())
+                             else None)}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
         back = asyncio.ensure_future(pump(up_r, client_w, up_w,

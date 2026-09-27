@@ -129,7 +129,7 @@ class Layout:
         for collection in self.collections:
             for field in ("admitted_total", "refused_total", "revoked_total",
                           "cascaded_total", "neutralised_total",
-                          "masked_total"):
+                          "masked_total", "stamped_total"):
                 self.names.append((field, collection, None))
             for reason in (*REASONS, OTHER):
                 self.names.append(("refused_by_reason_total", collection,
@@ -328,6 +328,7 @@ class Meter:
             values[self.layout.index("neutralised_total", name)] = (
                 guard.neutralised)
             values[self.layout.index("masked_total", name)] = guard.masked
+            values[self.layout.index("stamped_total", name)] = guard.stamped
             spare = 0
             for reason, count in guard.reasons().items():
                 if reason in REASONS:
@@ -380,6 +381,12 @@ HELP = {
         "admitted. Not refusals: the document was served, one field of it "
         "was not. Flat at zero on a collection whose masked field is "
         "populated means reads are not reaching this boundary."),
+    "stamped_total": (
+        "counter",
+        "Documents served with a signed _voyd stamp, on a collection that "
+        "declared attest=True. Below admitted_total on the same collection "
+        "means reads whose output is not a stored document (count, "
+        "distinct, $group), which are not stamped."),
     "cascaded_total": (
         "counter",
         "Documents marked because they were *derived from* something a "

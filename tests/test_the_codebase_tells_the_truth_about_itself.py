@@ -158,6 +158,20 @@ def test_the_public_surface_is_deliberate():
         "the policy vocabulary changed; that is the package's whole public "
         "surface, so it is a deliberate edit and not an incidental one")
 
+    # The verifier's surface, pinned for the same reason. A client checking
+    # stamps imports this and nothing else, and a stamp issued today has to
+    # verify against the names it was verified with last year.
+    import voyd.attest as attest
+
+    assert set(attest.__all__) == {
+        "FIELD", "ALG", "VERSION", "Verdict", "Report",
+        "canonical", "digest", "link", "caller_hash",
+        "verify", "verify_all", "strip", "cite",
+        "generate", "kid_of", "load_private_key", "load_public_keys",
+        "public_pem", "sign"}
+    for name in attest.__all__:
+        assert hasattr(attest, name), f"voyd.attest.__all__ promises {name}"
+
 
 def test_break_glass_does_not_leave_the_package_that_counts_it():
     """The ungated read is private, and stays inside `admission`.

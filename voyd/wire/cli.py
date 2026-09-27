@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import os
 import sys
 from typing import Mapping
@@ -180,6 +181,75 @@ def _preflight(args, guards: dict[str, Guard]) -> int:
     if preflight.fatal(found):
         return 3
     print(flush=True)
+    return 0
+
+
+def _keygen(path: str) -> int:
+    """Write an Ed25519 key pair for `--attest-key`. Never overwrites."""
+    try:
+        from voyd import attest
+        private, public, kid = attest.generate()
+    except RuntimeError as exc:
+        print(f"voyd-wire: {exc}", file=sys.stderr)
+        return 2
+    pub = path + ".pub"
+    for existing in (path, pub):
+        if os.path.exists(existing):
+            print(f"voyd-wire: {existing} exists. Refusing to overwrite a "
+                  f"signing key: the stamps it made would stop verifying "
+                  f"against anything but a backup", file=sys.stderr)
+            return 2
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(private)
+    with open(pub, "wb") as handle:
+        handle.write(public)
+    print(f"voyd-wire: wrote {path} (private, 0600) and {pub} (public). "
+          f"kid {kid}. Serve with --attest-key {path}; hand verifiers {pub}")
+    return 0
+
+
+def _signer_from(args, guards: dict[str, Guard]) -> int:
+    """Attach the signing key to every `attest=True` guard. 0 to continue.
+
+    The same three ways to be wrong as the key vault, and the same answer:
+    a policy that attests with no key, a key with nothing to attest, and a
+    key this cannot read. All at startup, because a boundary that silently
+    served unstamped documents to a client that expects stamps would be
+    reporting provenance it was not providing.
+    """
+    wanted = sorted(n for n, g in guards.items() if g.spec.attest)
+    if wanted and not args.attest_key:
+        print("voyd-wire: this policy declares attest=True on "
+              + ", ".join(wanted) + " but no --attest-key was given. "
+              "Generate one with --attest-keygen PATH", file=sys.stderr)
+        return 2
+    if args.attest_key and not wanted:
+        print("voyd-wire: --attest-key was given but no collection declares "
+              "attest=True, so nothing would be signed", file=sys.stderr)
+        return 2
+    if not wanted:
+        return 0
+    try:
+        from voyd import attest
+        from .stamp import Signer
+        spec = args.attest_key
+        if spec.startswith("env:"):
+            pem = os.environ.get(spec[4:], "")
+            if not pem:
+                raise ValueError(f"${spec[4:]} is empty or unset")
+        else:
+            with open(spec, "rb") as handle:
+                pem = handle.read().decode("ascii")
+        key = attest.load_private_key(pem)
+        with open(args.config, "rb") as handle:
+            policy = hashlib.sha256(handle.read()).hexdigest()
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"voyd-wire: --attest-key: {exc}", file=sys.stderr)
+        return 2
+    signer = Signer(key, policy)
+    for name in wanted:
+        guards[name].signer = signer
     return 0
 
 
@@ -359,8 +429,19 @@ def main(argv: list[str] | None = None) -> int:
                     help="the most documents a read with a virtual step may "
                          "hold at any step. Past it the read is an error, "
                          "never a truncation (default 1000)")
+    ap.add_argument("--attest-key", metavar="PEM|env:NAME", default=None,
+                    help="the Ed25519 private key that signs what a "
+                         "collection declaring attest=True serves: a PEM "
+                         "file, or env:NAME for a PEM in that variable. "
+                         "Needs the voyd[attest] extra")
+    ap.add_argument("--attest-keygen", metavar="PATH", default=None,
+                    help="write a new Ed25519 key pair to PATH and "
+                         "PATH.pub, print its key id, and exit")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
+
+    if args.attest_keygen:
+        return _keygen(args.attest_keygen)
 
     if not args.config and not args.guard:
         print("voyd-wire: give it --config voydfile.py, or --guard naming at "
@@ -433,6 +514,13 @@ def main(argv: list[str] | None = None) -> int:
         code = _prefilter(args, guards)
         if code:
             return code
+        code = _signer_from(args, guards)
+        if code:
+            return code
+        if not args.quiet:
+            from .stamp import announce
+            for line in announce(guards):
+                print(line, flush=True)
         if args.workers < 1:
             print("voyd-wire: --workers must be at least 1", file=sys.stderr)
             return 2

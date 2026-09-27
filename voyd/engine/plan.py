@@ -74,6 +74,12 @@ RECIPE_REMOVED = "recipe_removed"
 RECIPE_CHANGED = "recipe_changed"
 RECIPES_ONLY_ADDED = "recipes_only_added"
 RECIPES_ONLY_REMOVED = "recipes_only_removed"
+# Not fail-open: no document becomes reachable and no value leaves that did
+# not before. It is still a finding, because every prompt built afterwards
+# loses the evidence that it came through the boundary, and an auditor who
+# relied on the stamps finds out from their absence.
+ATTEST_REMOVED = "attest_removed"
+ATTEST_ADDED = "attest_added"
 
 
 @dataclass(frozen=True)
@@ -427,6 +433,17 @@ def structural(current: Mapping[str, AdmissionSpec],
                 f"right", False))
         found.extend(_masks(name, was, now))
         found.extend(_recipes(name, was, now))
+        if getattr(was, "attest", False) and not getattr(now, "attest", False):
+            found.append(Structural(
+                name, ATTEST_REMOVED,
+                "served documents stop carrying a signed _voyd stamp: "
+                "nothing becomes reachable, but no prompt built after this "
+                "can prove its chunks came through the boundary", False))
+        elif getattr(now, "attest", False) and not getattr(was, "attest",
+                                                           False):
+            found.append(Structural(
+                name, ATTEST_ADDED,
+                "served documents carry a signed _voyd stamp", False))
     return found
 
 
