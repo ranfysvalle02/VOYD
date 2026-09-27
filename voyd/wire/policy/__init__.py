@@ -21,6 +21,8 @@ trusting that a scroll was thorough.
                 it should have been, in both of its wire spellings
     reads       what a read may see -- the refusal pushed into a query,
                 and the projections that would leave no verdict to take
+    prefilter   the opt-in copy of the rules in `$vectorSearch.filter`,
+                which narrows ranking and is never the guarantee
     refusals    refuse a command outright -- the verbs no rewrite is
                 narrow enough to cover, and the error a client raises
     handshake   the two rewrites that are about the connection itself
@@ -52,6 +54,9 @@ from .reads import (DERIVED_COMMANDS, FOREIGN_STAGES, LEADING_STAGES,
                     deciding_fields, expressible_clauses, pins_the_tenant,
                     projection_blinds, reducing_stage, rewrite_derived_read)
 from .reads import _was_reduced as _was_reduced
+from .prefilter import (VECTOR_FILTER_OPERATORS, clause_paths, index_declares,
+                        prefilter_clauses, prefilter_fields,
+                        rewrite_vector_search)
 from .refusals import (EXFILTRATING_STAGES, UNREWRITABLE,
                        client_vector_on_server_index, refuse_change_stream,
                        refuse_client_vector, streams_changes,
@@ -74,6 +79,8 @@ __all__ = [
     "deciding_fields", "projection_blinds", "blinds_a_subject",
     "blinded_find", "reducing_stage", "DERIVED_COMMANDS",
     "PRESERVING_STAGES", "LEADING_STAGES", "FOREIGN_STAGES",
+    "rewrite_vector_search", "prefilter_clauses", "prefilter_fields",
+    "clause_paths", "index_declares", "VECTOR_FILTER_OPERATORS",
 
     # ---- refuse a command outright ----
     "refuse_unrewritable", "refuse_client_vector", "seal_refusal",

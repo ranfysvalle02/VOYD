@@ -80,9 +80,6 @@ class AdmissionCore:
         # read. Internal ``_unfiltered()`` clones set ``_include`` without this
         # bit because their enclosing verb already has its own authority.
         self._break_glass = False
-        # Which consequences were made out of these facts. ``None`` means
-        # nothing is recording them, and ``record_use`` says so rather than
-        # succeeding quietly.
         # Who may *do* things here. ``None`` means this handle is not
         # serving anybody but its own application; see ``authorised_by``.
         self.authority = None

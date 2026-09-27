@@ -91,7 +91,7 @@ from .policy import (Backfill, Budgets, Guard, _wants_a_caller, _was_reduced,
                      refuse_unrewritable,
                      revoke_instead_of_delete,
                      revoke_instead_of_find_and_delete, rewrite_derived_read,
-                     rewrite_topology, seal_refusal, strip_compression,
+                     rewrite_topology, rewrite_vector_search, seal_refusal, strip_compression,
                      unsuppliable_claims)
 
 from .codec import (OP_COMPRESSED, OP_MSG, Hangup, ProtocolError,
@@ -315,7 +315,21 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         # caller could `find()` two rows in.
                         if reduced is not None:
                             reduced.add(req_id)
-                    elif refusal is None and backfill is not None:
+                    elif refusal is None:
+                        # A collection that opted into `prefilter=True`
+                        # gets its rules in `$vectorSearch.filter` too. Not
+                        # recorded as reduced: the reply is still the stored
+                        # documents and is judged on the way out as if this
+                        # had not happened, because that pass is the
+                        # guarantee and this one is an optimisation.
+                        narrowed = rewrite_vector_search(
+                            raw, req_id, resp_to, guards, verbose,
+                            who.claims if who else None)
+                        if narrowed is not None:
+                            raw = narrowed
+                            head = decode_sections(raw)
+                            body = head[1] if head else body
+                    if pushed is None and refusal is None and backfill is not None:
                         # Ordinary retrieval. A lone `$vectorSearch` asks
                         # for more than the client did, so the rows the
                         # egress check refuses can be replaced; the reply

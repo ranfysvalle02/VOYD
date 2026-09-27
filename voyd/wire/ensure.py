@@ -38,6 +38,8 @@ from voyd.engine.capabilities import detect
 from voyd.engine.expiry import Expiry, ExpirySpec
 from voyd.engine.search import SearchEngine, SearchSpec
 
+from .policy.prefilter import index_declares, prefilter_fields
+
 
 def search_specs(guards: Mapping, options: Mapping) -> dict[str, SearchSpec]:
     """A `SearchSpec` per collection the policy asks the server to embed.
@@ -58,6 +60,15 @@ def search_specs(guards: Mapping, options: Mapping) -> dict[str, SearchSpec]:
         # `auto_embed` is declared per *field*: the path the server reads.
         path, model = next(iter(embedded.items()))
         tenant = getattr(guard.spec, "tenant", None)
+        extra: tuple[str, ...] = ()
+        if opts.get("prefilter"):
+            fields = prefilter_fields(guard)
+            if fields is None:
+                raise ValueError(
+                    f"{name}: prefilter=True, and a rule's clause is not one "
+                    f"a $vectorSearch filter accepts. Nothing is declared "
+                    f"on the index for it")
+            extra = tuple(f for f in fields if f != tenant)
         out[name] = SearchSpec(
             collection=name,
             text_paths=(path,),
@@ -69,6 +80,11 @@ def search_specs(guards: Mapping, options: Mapping) -> dict[str, SearchSpec]:
             # the one that is right for the ids people actually put in a
             # voydfile; an ObjectId tenant wants `tenant_type='objectId'`.
             tenant_type="token" if tenant else "objectId",
+            # The fields the rules read, as `filter` fields on the vector
+            # index, when -- and only when -- the policy asked for the
+            # prefilter. Declared here, they are also what `drifted()`
+            # compares, so an index built without them is stale.
+            filter_fields=extra,
         )
     return out
 
@@ -174,6 +190,58 @@ async def provision(uri: str, database: str, guards: Mapping,
                              "queryable yet. mongot builds asynchronously, "
                              "and a query against a half-built index "
                              "returns no rows rather than an error")
+        return lines
+    finally:
+        await client.close()
+
+
+async def confirm_prefilter(uri: str, database: str, guards: Mapping,
+                            options: Mapping) -> list[str]:
+    """Switch the prefilter on where the live index can answer it.
+
+    Read-only: one `$listSearchIndexes` per opted-in collection. A guard
+    gets `prefilter_index` only when the live vector index declares every
+    field the rules read as a `filter` field. Anything else -- no index, a
+    drifted one built before the opt-in, a probe that failed -- leaves it
+    `None`, and the boundary forwards `$vectorSearch` exactly as sent.
+    """
+    from pymongo import AsyncMongoClient
+
+    wanted = {n: g for n, g in guards.items()
+              if (options.get(n) or {}).get("prefilter")}
+    if not wanted:
+        return []
+    specs = search_specs(wanted, options)
+    lines: list[str] = []
+    client: Any = AsyncMongoClient(uri, serverSelectionTimeoutMS=8000,
+                                   connectTimeoutMS=8000)
+    try:
+        db = client[database]
+        for name, guard in sorted(wanted.items()):
+            spec = specs[name]
+            needed = spec.filterable()
+            try:
+                live = {i["name"]: i async for i
+                        in await db[name].list_search_indexes()}
+            except Exception as exc:                          # noqa: BLE001
+                lines.append(f"  voyd: {name}: prefilter off -- the search "
+                             f"indexes could not be read "
+                             f"({type(exc).__name__})")
+                continue
+            index = live.get(spec.vector_index) or {}
+            if index_declares(index.get("latestDefinition"), needed):
+                guard.prefilter_index = spec.vector_index
+                lines.append(f"  voyd: {name}: prefilter on -- "
+                             f"{spec.vector_index} declares "
+                             f"{', '.join(needed)}; the reply is still "
+                             f"judged on the way out")
+            else:
+                lines.append(f"  voyd: {name}: prefilter off -- "
+                             f"{spec.vector_index} does not declare "
+                             f"{', '.join(needed)} as filter fields. A "
+                             f"vectorSearch index cannot be updated in "
+                             f"place: declare a new vector_index or drop "
+                             f"and rebuild it")
         return lines
     finally:
         await client.close()

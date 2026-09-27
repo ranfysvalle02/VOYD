@@ -75,6 +75,12 @@ class Guard:
         # to know that `unrecoverable` is answered by a different object
         # than `expired` is.
         self.sealed_refused: dict[str, int] = {}
+        # The vector index confirmed, at startup, to declare every field the
+        # rules read as a `filter` field -- set by `--ensure`/`--verify` for
+        # a collection that declared `prefilter=True`, and `None` otherwise.
+        # `None` means a `$vectorSearch` is forwarded exactly as sent; see
+        # `prefilter.py`.
+        self.prefilter_index: str | None = None
 
     @classmethod
     def defaults(cls, collection: str, *, at_field: str, mark_field: str):

@@ -129,6 +129,34 @@ def _ensure(args, guards: dict[str, Guard]) -> int:
     return 0
 
 
+def _prefilter(args, guards: dict[str, Guard]) -> int:
+    """Turn `prefilter=True` on only where the live index can answer it.
+
+    Before the fork, so every worker inherits the same answer. With neither
+    `--ensure` nor `--verify` there is no database named to ask, so it
+    stays off and says so: the boundary forwards `$vectorSearch` as sent.
+    """
+    wanted = sorted(n for n in guards
+                    if (OPTIONS.get(n) or {}).get("prefilter"))
+    if not wanted:
+        return 0
+    database = args.verify or args.ensure
+    if not database:
+        print("  voyd: prefilter=True on " + ", ".join(wanted) + " is off: "
+              "without --ensure or --verify naming a database there is no "
+              "live index to confirm the filter fields on", flush=True)
+        return 0
+    try:
+        lines = asyncio.run(ensure.confirm_prefilter(
+            vault_uri(args.target), database, guards, OPTIONS))
+    except Exception as exc:                                  # noqa: BLE001
+        lines = [f"  voyd: prefilter off -- could not read the search "
+                 f"indexes ({type(exc).__name__}: {exc})"]
+    for line in lines:
+        print(line, flush=True)
+    return 0
+
+
 def _preflight(args, guards: dict[str, Guard]) -> int:
     """Ask before serving. Returns an exit code, 0 to continue.
 
@@ -370,6 +398,9 @@ def main(argv: list[str] | None = None) -> int:
             code = _preflight(args, guards)
             if code or args.verify_only or args.ensure_only:
                 return code
+        code = _prefilter(args, guards)
+        if code:
+            return code
         if args.workers < 1:
             print("voyd-wire: --workers must be at least 1", file=sys.stderr)
             return 2

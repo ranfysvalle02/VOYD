@@ -488,7 +488,8 @@ def rerank(collection: str, *, diversity: float = 0.3,
 
 
 def guard(collection: str, *, lineage_field: str | None = None,
-          on_delete: str = "forward", backfill: int = 4):
+          on_delete: str = "forward", backfill: int = 4,
+          prefilter: bool = False):
     """Declare the rules for one collection. Returns the class unchanged.
 
     ``on_delete="revoke"`` gives a client's ``delete`` the better meaning:
@@ -502,6 +503,17 @@ def guard(collection: str, *, lineage_field: str | None = None,
     over-fetched so the refused rows can be replaced from further down the
     ranking; the proxy cuts the reply back to the client's ``limit`` after
     the per-document check. ``1`` turns it off. Bounded at 20.
+
+    ``prefilter=True`` asks the vector index to leave refused rows out of
+    the ranking: ``--ensure`` declares every field the rules read as a
+    ``filter`` field on the ``auto_embed`` index, and the boundary ANDs the
+    rules into each ``$vectorSearch.filter`` once ``--ensure`` or
+    ``--verify`` has confirmed the live index carries them. Opt-in, because
+    a vectorSearch index cannot be updated in place -- on an index that
+    already exists this is a rebuild -- and because the per-document check
+    on the way out still runs and is still the guarantee. Needs an
+    ``auto_embed()`` field (the one vector index this file builds) and rules
+    that can all be asked as a query without knowing the caller.
 
     Raises at *load* time for a body it cannot compile -- an unknown value, a
     second deadline, no rule at all. A policy file is the one place an error
@@ -623,6 +635,22 @@ def guard(collection: str, *, lineage_field: str | None = None,
                 f"elements; something still has to refuse them -- a "
                 f"deadline() or a revocable() beside it")
 
+        if prefilter and not embedded:
+            raise ValueError(
+                f"{collection}: prefilter=True with no auto_embed() field. "
+                f"The filter fields are declared on the vector index this "
+                f"file builds, and without auto_embed() it builds none -- "
+                f"so the prefilter would have no index to live in")
+        if prefilter:
+            blind = [type(r).__name__ for r in rules
+                     if getattr(r, "needs_caller", False) or r.clause() is None]
+            if blind:
+                raise ValueError(
+                    f"{collection}: prefilter=True, and {', '.join(blind)} "
+                    f"cannot be asked as a query without knowing the "
+                    f"caller. A prefilter missing one rule is not a "
+                    f"narrower one, so there is nothing to push down")
+
         REGISTRY[collection] = AdmissionSpec(
             collection, rules=tuple(rules), tenant=tenant_field,
             lineage_field=lineage_field, subjects=subject_path,
@@ -638,7 +666,8 @@ def guard(collection: str, *, lineage_field: str | None = None,
                                "backfill": backfill,
                                "sealed": tuple(sealed_fields),
                                "scope_field": tenant_field,
-                               "auto_embed": dict(embedded)}
+                               "auto_embed": dict(embedded),
+                               "prefilter": bool(prefilter)}
         return cls
     return decorate
 

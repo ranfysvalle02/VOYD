@@ -23,9 +23,10 @@ a ``compound.must`` on the lexical leg) so the boundary is enforced by mongot
 rather than by remembering to add a filter -- including inside both
 ``$rankFusion`` legs, where a miss leaks every tenant's data.
 
-**Deadlines are deliberately not pushed into the index.** They are enforced
-in the read path instead. That is a decision, not an omission, and these are
-the measurements behind it -- all taken against Atlas Local, MongoDB 8.x:
+**By default, deadlines and marks are not pushed into the index.** They are
+enforced in the read path instead, and a collection opts in per guard with
+``prefilter=True``. Off by default is a decision, not an omission, and these
+are the measurements behind it -- all taken against Atlas Local, MongoDB 8.x:
 
 - ``living()`` works verbatim as a ``$vectorSearch`` filter. Both ``$or`` and
   ``$exists`` are supported there, returning exactly the null/absent/future
@@ -42,12 +43,32 @@ the measurements behind it -- all taken against Atlas Local, MongoDB 8.x:
 - A ``search`` index definition can be updated in place. A ``vectorSearch``
   definition **cannot**: ``update_search_index`` validates whatever it is
   given as a lexical definition and fails with ``"mappings" is required``.
+- mongot rejects a ``$vectorSearch.filter`` on a path the index does not
+  declare as a ``filter`` field, so a filter sent to an index built without
+  the fields is a failed query rather than a slower one.
 
-So pushing deadlines down would mean a vector-index change that cannot be
-migrated, on an existing deployment, to save fetching a few rows the boundary
-is already refusing correctly -- and enforcing it on only one leg would leave
-the two ``$rankFusion`` legs disagreeing about which documents exist, which is
-worse than filtering both uniformly afterwards.
+So by default nothing about a rule is in the vector index: turning it on for
+an existing deployment is a rebuild rather than a migration, and the rows it
+would save fetching are ones the boundary already refuses correctly.
+
+**What ``prefilter=True`` does, and what it costs.** ``SearchSpec`` gets every
+field the rules read in ``filter_fields``, so ``ensure_indexes`` declares them
+on the vector index and ``drifted()`` compares them -- an index built before
+the opt-in is reported ``stale``, not quietly accepted. At startup the proxy
+reads the live definition, and only if it declares every field does it AND
+the rule clauses into each leading ``$vectorSearch.filter`` on that
+collection (``voyd/wire/policy/prefilter.py``). The costs:
+
+- The index rebuild above, and the extra filter fields it indexes.
+- All rules or none: a policy with a rule that is not a plain query, or that
+  depends on the caller, cannot opt in.
+- Only the leading ``$vectorSearch`` stage is rewritten. The vector leg of a
+  ``$rankFusion`` is not, because the lexical leg would not match it and the
+  two legs would disagree about which documents exist; a ``$rankFusion`` is
+  handled as a reduction, with one ``$match`` over the fused result.
+- The deadline instant is taken when the request is rewritten. The egress
+  pass re-reads the clock and judges every returned document, and it is
+  still what decides: the prefilter narrows ranking, it is not the guarantee.
 """
 
 from __future__ import annotations
@@ -204,6 +225,10 @@ class SearchSpec:
     def _filterable(self) -> tuple[str, ...]:
         tenant = (self.tenant_field,) if self.tenant_field else ()
         return tenant + self.filter_fields
+
+    def filterable(self) -> tuple[str, ...]:
+        """Every path this spec declares as a ``filter`` on the vector index."""
+        return self._filterable()
 
 
 @dataclass
