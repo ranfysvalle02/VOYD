@@ -49,6 +49,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
+from voyd import attest
+
 log = logging.getLogger("voyd.cascade")
 
 
@@ -83,7 +85,8 @@ class Cascade:
         common policy file declares no ``lineage_field`` anywhere and has
         no business paying for a second connection pool per worker.
         """
-        return any(g.spec.lineage_field for g in guards.values())
+        return any(g.spec.lineage_field or g.spec.derived_from
+               for g in guards.values())
 
     async def open(self) -> None:
         from pymongo import AsyncMongoClient
@@ -230,3 +233,78 @@ class Cascade:
         deadlines = [d[at] for d in by_id.values()
                      if hasattr(d.get(at), "timestamp")]
         return closure, deadlines, broken
+
+    async def cited_parentage(self, database: str, target: Any,
+                              citations: list, guards: Mapping,
+                              claims: Mapping | None
+                              ) -> tuple[list, list, Any, list]:
+        """Re-read and judge sources justified by signed receipt citations."""
+        if self._client is None:
+            return [], [], None, ["the boundary's source connection is closed"]
+        closure, deadlines, tenants, broken = set(), [], set(), []
+        for number, stamp in enumerate(citations, 1):
+            if not isinstance(stamp, Mapping):
+                broken.append(f"citation {number} is not a receipt")
+                continue
+            namespace = stamp.get("ns")
+            if not isinstance(namespace, str) or "." not in namespace:
+                broken.append(f"citation {number} names no source")
+                continue
+            cited_db, source_name = namespace.split(".", 1)
+            source = guards.get(source_name)
+            if (cited_db != database or source is None
+                    or source_name not in target.spec.derived_from):
+                broken.append(f"citation {number} names {namespace!r}, "
+                              "which this memory may not derive from")
+                continue
+            signer = source.signer
+            if signer is None:
+                broken.append(f"citation {number} names an unsigned source")
+                continue
+            verdict = attest.verify_stamp(
+                stamp, {signer.kid: signer.key.public_key()})
+            if not verdict.ok:
+                broken.append(f"citation {number}: {verdict.reason}")
+                continue
+            if not _served_to_writer(stamp, claims):
+                broken.append(f"citation {number} was served to another writer")
+                continue
+            if "id" not in stamp:
+                broken.append(f"citation {number} names no source id")
+                continue
+            document = await self._client[database][source_name].find_one(
+                {"_id": stamp["id"]})
+            if document is None or not source.filter([document], claims):
+                broken.append(f"citation {number} names a source that is "
+                              "missing, out of scope, expired, or refused")
+                continue
+            closure.add(document["_id"])
+            closure.update(document.get(source.spec.lineage_field) or ())
+            deadline = document.get(source.spec.at_field)
+            if hasattr(deadline, "timestamp"):
+                deadlines.append(deadline)
+            if source.spec.tenant:
+                tenant = document.get(source.spec.tenant)
+                if tenant is None:
+                    broken.append(f"citation {number} names a source with no "
+                                  f"{source.spec.tenant}")
+                else:
+                    tenants.add(tenant)
+        if len(tenants) > 1:
+            broken.append("cited sources span more than one tenant")
+        tenant = next(iter(tenants)) if len(tenants) == 1 else None
+        return sorted(closure, key=str), deadlines, tenant, broken
+
+
+def _served_to_writer(stamp: Mapping, claims: Mapping | None) -> bool:
+    if claims and claims.get("delegated"):
+        principal = claims.get("principal")
+        actor = claims.get("actor")
+        if not isinstance(principal, Mapping) or not isinstance(actor, Mapping):
+            return False
+        return (stamp.get("principal") == attest.principal_hash(principal.get("user"))
+                and stamp.get("actor") == attest.actor_hash(actor.get("user")))
+    if not claims:
+        return False
+    return stamp.get("caller") == attest.caller_hash(claims.get("user"),
+                                                       claims.get("db"))

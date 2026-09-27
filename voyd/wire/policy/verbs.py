@@ -19,6 +19,9 @@ different documents would be exactly the drift this package is about.
 
 from __future__ import annotations
 
+from typing import Mapping
+
+from voyd import attest
 from voyd.engine.time import now
 
 from ..codec import (decode_op_msg, decode_sections, encode_op_msg,
@@ -208,7 +211,8 @@ def delete_reply(raw: bytes, req_id: int, resp_to: int) -> bytes:
 
 
 async def derive_on_insert(raw: bytes, req_id: int, resp_to: int,
-                           guards: dict[str, Guard], verbose: bool
+                           guards: dict[str, Guard], verbose: bool,
+                           claims: Mapping | None = None
                            ) -> tuple[bytes, bytes | None]:
     """An insert that says what it was made out of, made to mean it.
 
@@ -248,6 +252,36 @@ async def derive_on_insert(raw: bytes, req_id: int, resp_to: int,
     downstream, field = guard.cascade, guard.spec.lineage_field
     if downstream is None or not field:
         return raw, None
+    if guard.spec.derived_from:
+        database = body.get("$db", "")
+        prepared = []
+        for doc in docs:
+            citations = doc.get("_voyd_from")
+            if not isinstance(citations, (list, tuple)) or not citations:
+                return raw, _refuse(
+                    req_id, guard.collection,
+                    "a derived document must cite at least one signed "
+                    "_voyd receipt in _voyd_from", verbose)
+            closure, deadlines, tenant, broken = await downstream.cited_parentage(
+                database, guard, list(citations), guards, claims)
+            if broken:
+                return raw, _refuse(
+                    req_id, guard.collection,
+                    "cannot admit this derived document: " + "; ".join(broken),
+                    verbose)
+            row = {key: value for key, value in doc.items()
+                   if key not in (field, "_voyd_from", "written_by")}
+            row[field] = closure
+            if guard.spec.tenant:
+                row[guard.spec.tenant] = tenant
+            if deadlines:
+                own, soonest = row.get(guard.spec.at_field), min(deadlines)
+                row[guard.spec.at_field] = (min(own, soonest)
+                                            if hasattr(own, "timestamp")
+                                            else soonest)
+            row["written_by"] = _writer(claims)
+            prepared.append(row)
+        return encode_sections(req_id, resp_to, flags, body, ident, prepared), None
     if not any(isinstance(d.get(field), (list, tuple)) and d.get(field)
                for d in docs):
         return raw, None                      # ordinary inserts, untouched
@@ -285,3 +319,119 @@ async def derive_on_insert(raw: bytes, req_id: int, resp_to: int,
               f"ancestor reaches them in one query", flush=True)
     return encode_sections(req_id, resp_to, flags, body, ident,
                            prepared), None
+
+
+async def derive_on_update(raw: bytes, req_id: int, resp_to: int,
+                           guards: dict[str, Guard], verbose: bool,
+                           claims: Mapping | None = None
+                           ) -> tuple[bytes, bytes | None]:
+    """Require fresh citations when a derived fact is replaced or rewritten."""
+    decoded = decode_sections(raw)
+    if decoded is None:
+        return raw, None
+    flags, body, ident, updates = decoded
+    name = body.get("update")
+    guard = guards.get(name) if isinstance(name, str) else None
+    if (guard is None or ident != "updates" or not updates
+            or not guard.spec.derived_from or guard.cascade is None):
+        find_and_modify = body.get("findAndModify")
+        named = guards.get(find_and_modify) if isinstance(find_and_modify, str) else None
+        if named is not None and named.spec.derived_from and "update" in body:
+            return raw, _refuse(
+                req_id, named.collection,
+                "findOneAndUpdate and findOneAndReplace on a derived "
+                "collection are refused: use update with a fresh "
+                "_voyd_from citation", verbose)
+        return raw, None
+    field, database = guard.spec.lineage_field, body.get("$db", "")
+    assert field is not None
+    protected = {field, "written_by", guard.spec.tenant,
+                 guard.spec.at_field}
+    prepared = []
+    for clause in updates:
+        update = clause.get("u") if isinstance(clause, Mapping) else None
+        if not isinstance(update, Mapping):
+            return raw, _refuse(
+                req_id, guard.collection,
+                "pipeline updates on a derived collection are refused: use "
+                "$set with a fresh _voyd_from citation", verbose)
+        operator = any(str(key).startswith("$") for key in update)
+        if "$rename" in update:
+            return raw, _refuse(
+                req_id, guard.collection,
+                "$rename on a derived collection is refused because it can "
+                "move boundary-owned provenance", verbose)
+        set_values = update.get("$set") if operator else update
+        cites = set_values.get("_voyd_from") if isinstance(set_values, Mapping) else None
+        touched = _protected_paths(update, protected)
+        if touched:
+            return raw, _refuse(req_id, guard.collection,
+                                "a derived update may not set boundary-owned "
+                                f"provenance: {', '.join(sorted(touched))}",
+                                verbose)
+        if cites is None:
+            form = "replacement" if not operator else "update"
+            return raw, _refuse(
+                req_id, guard.collection,
+                f"a derived {form} must cite signed _voyd receipts in "
+                "_voyd_from", verbose)
+        if not isinstance(cites, (list, tuple)) or not cites:
+            return raw, _refuse(req_id, guard.collection,
+                                "a rewritten derived document must cite signed "
+                                "_voyd receipts in _voyd_from", verbose)
+        closure, deadlines, tenant, broken = await guard.cascade.cited_parentage(
+            database, guard, list(cites), guards, claims)
+        if broken:
+            return raw, _refuse(req_id, guard.collection,
+                                "cannot admit this derived update: "
+                                + "; ".join(broken), verbose)
+        values = _provenance(guard, closure, deadlines, tenant, claims,
+                     own_deadline=(set_values.get(guard.spec.at_field)
+                           if isinstance(set_values, Mapping)
+                           else None))
+        if operator:
+            rewritten = dict(update)
+            rewritten["$set"] = {key: value for key, value in set_values.items()
+                                  if key != "_voyd_from"} | values
+        else:
+            rewritten = {key: value for key, value in update.items()
+                         if key not in ("_voyd_from", *protected)} | values
+        prepared.append({**clause, "u": rewritten})
+    return encode_sections(req_id, resp_to, flags, body, ident, prepared), None
+
+
+def _protected_paths(update: Mapping, protected: set[str | None]) -> set[str]:
+    found = set()
+    for operator, values in update.items():
+        if not str(operator).startswith("$") or not isinstance(values, Mapping):
+            continue
+        for path in values:
+            root = str(path).split(".", 1)[0]
+            if root in protected or root == "_voyd_from":
+                if not (operator == "$set" and root == "_voyd_from"):
+                    found.add(str(path))
+    return found
+
+
+def _provenance(guard: Guard, closure: list, deadlines: list, tenant: object,
+                claims: Mapping | None, *, own_deadline: object = None) -> dict:
+    values = {guard.spec.lineage_field: closure, "written_by": _writer(claims)}
+    if guard.spec.tenant:
+        values[guard.spec.tenant] = tenant
+    if deadlines:
+        inherited = min(deadlines)
+        values[guard.spec.at_field] = (min(own_deadline, inherited)
+                                       if hasattr(own_deadline, "timestamp")
+                                       else inherited)
+    return values
+
+
+def _writer(claims: Mapping | None) -> dict:
+    if claims and claims.get("delegated"):
+        principal = claims.get("principal")
+        actor = claims.get("actor")
+        return {"principal": attest.principal_hash(principal.get("user")),
+                "actor": attest.actor_hash(actor.get("user")),
+                "token": claims.get("token")}
+    return {"caller": attest.caller_hash(claims.get("user"),
+                                           claims.get("db")) if claims else None}

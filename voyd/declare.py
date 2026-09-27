@@ -998,6 +998,7 @@ def _check_recipes() -> None:
 
 
 def guard(collection: str, *, lineage_field: str | None = None,
+          derived_from: tuple[str, ...] = (),
           on_delete: str = "forward", backfill: int = 4,
           prefilter: bool = False, recipes_only: bool = False,
           attest: bool = False, delegation: str = "allowed",
@@ -1073,6 +1074,18 @@ def guard(collection: str, *, lineage_field: str | None = None,
         raise ValueError(f"{collection}: scope={scope!r} with "
                          f"delegation='forbidden'. A grant nobody may use "
                          f"is a contradiction, not a policy")
+    if derived_from != () and (
+            not isinstance(derived_from, tuple) or not derived_from
+            or any(not isinstance(source, str) or not source
+                   for source in derived_from)
+            or len(set(derived_from)) != len(derived_from)):
+        raise ValueError(
+            f"{collection}: derived_from={derived_from!r} must be a "
+            "non-empty tuple of distinct collection names")
+    if derived_from and not lineage_field:
+        raise ValueError(
+            f"{collection}: derived_from={derived_from!r} needs "
+            "lineage_field= so the boundary can store verified ancestry")
 
     def decorate(cls):
         rules, tenant_field, seen = [], None, set()
@@ -1211,7 +1224,8 @@ def guard(collection: str, *, lineage_field: str | None = None,
 
         REGISTRY[collection] = AdmissionSpec(
             collection, rules=tuple(rules), tenant=tenant_field,
-            lineage_field=lineage_field, subjects=subject_path,
+            lineage_field=lineage_field, derived_from=derived_from,
+            subjects=subject_path,
             subject_key=subject_key,
             masks=tuple(masks),
             # A `@transform` declared *above* the `@guard` is already
@@ -1258,6 +1272,17 @@ def load(path: str) -> dict[str, AdmissionSpec]:
             f"it would start a proxy that refuses nothing, silently")
     _check_recipes()
     for collection, spec in REGISTRY.items():
+        for source in spec.derived_from:
+            source_spec = REGISTRY.get(source)
+            if source_spec is None:
+                raise ValueError(
+                    f"{collection}: derived_from names {source!r}, which "
+                    "has no @guard")
+            if not source_spec.attest:
+                raise ValueError(
+                    f"{collection}: derived_from names {source!r}, which "
+                    "must declare attest=True so the boundary can verify "
+                    "its citations")
         if (spec.delegation == "required" or spec.scope) and not ISSUERS:
             raise ValueError(
                 f"{collection}: delegation={spec.delegation!r}"

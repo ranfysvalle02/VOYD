@@ -302,7 +302,7 @@ def server(tools: Tools, token_of: Callable[[Any], str | None]) -> Any:
     request's bearer header, or a fixed token for stdio.
     """
     _require_mcp()
-    import mcp_types as types
+    import mcp.types as types
     from mcp.server.lowlevel import Server
     from mcp.shared.exceptions import MCPError
 

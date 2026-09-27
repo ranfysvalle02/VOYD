@@ -90,6 +90,10 @@ dev = [
     "pyyaml>=6.0",
     # Stamps are signed and verified in the suite, both halves.
     "cryptography>=42",
+    # MCP integration tests exercise the official 2.x low-level server and
+    # streamable HTTP client; skipping them in the development environment
+    # would leave the shipped `voyd-mcp` adapter untested.
+    "mcp>=2.2",
 ]
 
 [project.urls]

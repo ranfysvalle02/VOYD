@@ -422,6 +422,41 @@ class Verdict:
     citation: str | None = None
 
 
+def verify_stamp(stamp: Mapping, public_keys: Mapping[str, Any]) -> Verdict:
+    """Verify a receipt citation without claiming to have its document.
+
+    A derived write carries only the signed ``_voyd`` metadata; the source
+    document is re-read and judged independently by the boundary. Its digest
+    cannot be checked against a metadata-only citation, but its signature,
+    version and signer can.
+    """
+    if not isinstance(stamp, Mapping):
+        return Verdict(False, "unstamped: no _voyd field")
+    fields = _signed(stamp)
+    missing = [key for key in (*fields, "sig") if key not in stamp]
+    if missing:
+        return Verdict(False, f"malformed stamp: missing {', '.join(missing)}")
+    kid = stamp.get("kid")
+    base: dict[str, Any] = dict(kid=kid if isinstance(kid, str) else None,
+                policy=stamp.get("policy"), digest=stamp.get("digest"),
+                read=stamp.get("read"), pos=stamp.get("pos"))
+    if stamp.get("v") not in VERSIONS or stamp.get("alg") != ALG:
+        return Verdict(False, f"unsupported stamp v={stamp.get('v')!r} "
+                      f"alg={stamp.get('alg')!r}", **base)
+    key = public_keys.get(kid) if isinstance(kid, str) else None
+    if key is None:
+        return Verdict(False, f"unknown kid {kid!r}: not signed by any key "
+                      "this verifier holds", **base)
+    try:
+        sig = _unb64(str(stamp["sig"]))
+        body = {key: stamp.get(key) for key in fields}
+        key.verify(sig, _STAMP + canonical(body))
+    except Exception:                                          # noqa: BLE001
+        return Verdict(False, "bad signature: the stamp was altered, or "
+                      "was not made by this key", **base)
+    return Verdict(True, "verified", **base)
+
+
 def verify(doc: Mapping, public_keys: Mapping[str, Any], *,
            policy: str | Iterable[str] | None = None,
            principal: str | None = None,
@@ -441,29 +476,12 @@ def verify(doc: Mapping, public_keys: Mapping[str, Any], *,
     stamp = doc.get(FIELD) if isinstance(doc, Mapping) else None
     if not isinstance(stamp, Mapping):
         return Verdict(False, "unstamped: no _voyd field")
-    fields = _signed(stamp)
-    missing = [k for k in (*fields, "sig") if k not in stamp]
-    if missing:
-        return Verdict(False, f"malformed stamp: missing {', '.join(missing)}")
-    kid = stamp.get("kid")
-    base: dict[str, Any] = dict(kid=kid if isinstance(kid, str) else None,
-                policy=stamp.get("policy"), digest=stamp.get("digest"),
-                read=stamp.get("read"), pos=stamp.get("pos"),
-                citation=cite(doc))
-    if stamp.get("v") not in VERSIONS or stamp.get("alg") != ALG:
-        return Verdict(False, f"unsupported stamp v={stamp.get('v')!r} "
-                              f"alg={stamp.get('alg')!r}", **base)
-    key = public_keys.get(kid) if isinstance(kid, str) else None
-    if key is None:
-        return Verdict(False, f"unknown kid {kid!r}: not signed by any key "
-                              f"this verifier holds", **base)
-    try:
-        sig = _unb64(str(stamp["sig"]))
-        body = {k: stamp.get(k) for k in fields}
-        key.verify(sig, _STAMP + canonical(body))
-    except Exception:                                          # noqa: BLE001
-        return Verdict(False, "bad signature: the stamp was altered, or "
-                              "was not made by this key", **base)
+    verified = verify_stamp(stamp, public_keys)
+    base: dict[str, Any] = dict(kid=verified.kid, policy=verified.policy,
+                digest=verified.digest, read=verified.read,
+                pos=verified.pos, citation=cite(doc))
+    if not verified.ok:
+        return Verdict(False, verified.reason, **base)
     try:
         actual = digest(doc)
     except TypeError as exc:

@@ -216,6 +216,14 @@ runs:
         voyd-plan "${args[@]}" --json --report "$report" > "$blob"
         code=$?
 
+        # Only 0, 1 (a widening finding) and 2 (no plan) are planner
+        # outcomes. A missing executable or a crash must fail this step,
+        # never be reported as a harmless closed boundary.
+        if [ "$code" != "0" ] && [ "$code" != "1" ] && [ "$code" != "2" ]; then
+          echo "::error::voyd-plan exited unexpectedly with status $code."
+          exit "$code"
+        fi
+
         cat "$report" 2>/dev/null
         echo "report=$report" >> "$GITHUB_OUTPUT"
         echo "json=$blob" >> "$GITHUB_OUTPUT"

@@ -36,6 +36,9 @@ class AdmissionSpec:
     # collection of source facts has no lineage and should not pay a field
     # or an index for one.
     lineage_field: str | None = None
+    # Collections whose signed receipts may justify a derived write here.
+    # Empty preserves the original client-supplied lineage mechanism.
+    derived_from: tuple[str, ...] = ()
     # Part of the spec, and therefore part of identity, because handles are
     # deduplicated per collection by spec equality. It was not, and the
     # consequence was that declaration order silently decided whether the

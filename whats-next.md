@@ -379,3 +379,137 @@ extra; README "Recipes as MCP tools" is the reference. Its decisions:
    `examples/mcp_agent.py` (an agent with a delegated token calling a
    granted recipe over MCP and verifying the stamps on what it got back):
    shipped, decisions under §7. Remaining: the blog post that goes with it.
+
+---
+
+# 0.5.0: a memory is only as allowed as what it was made from
+
+## The problem
+
+An agent reads three notes for a user, writes a summary into its memory
+collection, and reads the summary back next week. Lineage is how a
+revocation reaches that summary: `@guard(..., lineage_field=...)` and the
+cascade in `voyd/wire/cascade.py` mark everything downstream of a revoked
+source. But the lineage on the summary is whatever the client wrote.
+
+    omitted    the agent forgets the field; the summary outlives every
+               revocation of what it was made from
+    forged     the agent names sources it never read, or leaves out the
+               one that will be revoked
+    laundered  the agent reads a fact for user P and writes a memory
+               user Q can read; the tenant was right on the read and
+               nobody asked on the write
+
+Each fails silently, in the direction of *more*. A memory is a derived
+fact, and a derived fact with client-asserted provenance is the
+forgotten tenant filter on the write path.
+
+## The idea
+
+The boundary already signs what it serves. So a derived write cites the
+**stamps** of what it was made from, and the boundary believes the
+lineage only because it can check every citation against its own
+signature:
+
+```python
+@guard("memories", lineage_field="lineage",
+  derived_from=("notes", "tickets"))
+class Memories:
+    expire_at = deadline()
+    tenant_id = tenant()
+    forgotten = revocable()
+```
+
+```python
+memories.insert_one({
+    "text": summary,
+    "_voyd_from": [doc["_voyd"] for doc in context],   # the stamps
+})
+```
+
+On the way in, for every cited stamp, the boundary checks:
+
+1. **its signature**, against the boundary's active attestation key;
+2. **that it was served to this writer** — the stamp's principal (and
+   actor) hash equals the writing identity's;
+3. **that its source is still admissible** — re-read the source by
+   `_id` and judge it now: not revoked, not expired, same tenant;
+4. **that its collection is one `derived_from` names.**
+
+Then the boundary — not the client — writes the derived document's
+provenance:
+
+    lineage     the closure: each source's lineage plus the source
+    written_by  principal and actor hashes of the writer, and the
+                token hash
+    expire_at   the earliest deadline among the sources, if the derived
+                collection declares one and it is later than that
+    tenant      the sources' tenant, which must be one tenant and the
+                writer's
+
+The boundary overwrites client-supplied lineage, tenant and writer metadata,
+and strips `_voyd_from` before storage. It caps the deadline at the earliest
+source deadline, while retaining a shorter expiry on an insert or replacement.
+A modifier update may not set the deadline directly. A write that cites
+nothing, cites a stamp the boundary did not sign, cites a stamp served to
+someone else, or cites a source that is no longer admissible is refused with
+an error naming which.
+
+What that buys, each as a guarantee rather than a convention:
+
+- **A revocation reaches every memory made from the fact.** The
+  lineage was computed by the boundary, so the existing cascade is
+  complete.
+- **A memory expires no later than what it was made from.** Deadline
+  inheritance happens at write time, so the read path needs no lookup.
+- **A memory cannot move a fact across tenants.** All sources share one
+  tenant, and it is the writer's.
+- **"Everything agent A wrote for user P" is a query.** `written_by` is
+  stamped by the boundary, so revoking an agent's output is an ordinary
+  revocation with a filter on it.
+
+## Scope
+
+- Inserts, replacements and modifier updates into a `derived_from`
+  collection require a fresh citation in `$set._voyd_from`. This is
+  deliberately stricter than trying to infer which field is "derived
+  text": the policy cannot know that safely. Pipeline updates,
+  `findOneAndUpdate`, `findOneAndReplace`, `$rename`, and a direct write
+  to provenance are refused rather than creating an untracked path.
+- `derived_from` requires `attest=True` on every named source and a
+  signing key; checked at load.
+- Delegated or plain writers both work; a plain writer is recorded as
+  the connection's server identity.
+
+## Non-goals
+
+- **Checking that the text is actually derived from the sources.** The
+  boundary proves which facts the writer *was served* and *claims* to
+  have used, not what a model did with them. A writer who read nothing
+  still cannot cite anything; a writer who read ten facts and cites
+  three has declared a smaller lineage, and a revocation of the other
+  seven does not reach it. The spec says this plainly.
+- **Read-time taint walks.** Admissibility is judged at write time and
+  maintained by the cascade and deadline inheritance; the read path
+  stays a pure function of the document.
+
+## Open questions
+
+1. A cited stamp's age: should `derived_from=` take a `max_citation_age`
+   so a memory cannot be written from a read a month old?
+2. Merging memories: a memory derived from memories inherits their
+   lineage transitively — the closure already handles it, but grants
+   and tenants need a test at depth.
+
+## Milestone
+
+**0.5.0 — shipped.** `derived_from=` makes signed receipts the authority
+for a derived write. The boundary verifies a cited receipt against the
+source guard's active signing key, checks it was served to the current
+writer, re-reads and judges the source, then owns `lineage`, tenant,
+deadline and `written_by`. Inserts, replacements and modifier updates are
+covered; unsupported update forms refuse rather than bypass provenance.
+
+Remaining work is deliberate rather than silent: citation age limits, key
+rotation for citations, and a live MongoDB end-to-end test for the new write
+path.

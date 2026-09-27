@@ -104,6 +104,15 @@ def test_tampering_with_any_party_breaks_the_signature(field):
     assert not verdict.ok and verdict.reason.startswith("bad signature")
 
 
+def test_a_receipt_citation_verifies_without_the_source_document():
+    stamp = served(DELEGATED)[0]["_voyd"]
+    assert attest.verify_stamp(stamp, KEYS).ok
+    altered = copy.deepcopy(stamp)
+    altered["principal"] = "0" * 64
+    verdict = attest.verify_stamp(altered, KEYS)
+    assert not verdict.ok and verdict.reason.startswith("bad signature")
+
+
 @pytest.mark.parametrize("field", ["principal", "actor", "token"])
 def test_dropping_a_party_is_a_malformed_stamp(field):
     doc = copy.deepcopy(served(DELEGATED)[0])

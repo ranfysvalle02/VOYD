@@ -80,7 +80,7 @@ from .refusals import (EXFILTRATING_STAGES, UNREWRITABLE,
                        client_vector_on_server_index, refuse_change_stream,
                        refuse_client_vector, streams_changes,
                        refuse_unrewritable, seal_refusal, writes_elsewhere)
-from .verbs import (delete_reply, derive_on_insert,
+from .verbs import (delete_reply, derive_on_insert, derive_on_update,
                     revoke_instead_of_delete,
                     revoke_instead_of_find_and_delete)
 
@@ -91,7 +91,7 @@ __all__ = [
 
     # ---- rewrite a command ----
     "revoke_instead_of_delete", "revoke_instead_of_find_and_delete",
-    "derive_on_insert", "delete_reply",
+    "derive_on_insert", "derive_on_update", "delete_reply",
 
     # ---- what a read may see ----
     "rewrite_derived_read", "expressible_clauses", "pins_the_tenant",

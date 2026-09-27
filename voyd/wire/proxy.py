@@ -88,7 +88,7 @@ from . import seal
 from . import metrics
 from .policy import (Backfill, Delegations, Guard, Oidc, _wants_a_caller,
                      _was_reduced, carries_token, pin_expanded, cascade_first, cascade_first_for_one, delete_reply,
-                     derive_on_insert, erase_first, expand_recipe,
+                     derive_on_insert, derive_on_update, erase_first, expand_recipe,
                      guard_for, has_recipes, judge,
                      mask_reduced, refuse_masked_reference,
                      refuse_change_stream, refuse_client_vector,
@@ -559,8 +559,18 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # it rewrites the same documents the vault would encrypt
                 # and reading a stale parse is the bug that combination
                 # invites.
+                target = (guard_for(guards, body, "insert")
+                          or guard_for(guards, body, "update"))
+                if (target is not None and target.spec.derived_from
+                        and who is not None):
+                    await who.resolve(verbose)
                 raw, refused = await derive_on_insert(
-                    raw, req_id, resp_to, guards, verbose)
+                    raw, req_id, resp_to, guards, verbose, asking(delegated))
+                if refused is not None:
+                    await send(back, refused)
+                    continue
+                raw, refused = await derive_on_update(
+                    raw, req_id, resp_to, guards, verbose, asking(delegated))
                 if refused is not None:
                     await send(back, refused)
                     continue
@@ -1091,7 +1101,7 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         lineage = cascade.Cascade(vault_uri(target), verbose=verbose)
         await lineage.open()
         for g in guards.values():
-            if g.spec.lineage_field:
+            if g.spec.lineage_field or g.spec.derived_from:
                 g.cascade = lineage
     live = Live()
     stopping = asyncio.Event()

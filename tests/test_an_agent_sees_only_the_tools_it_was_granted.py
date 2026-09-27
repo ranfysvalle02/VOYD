@@ -282,9 +282,9 @@ def _free_port() -> int:
 
 def test_over_http_the_bearer_token_is_the_identity(make, idp):
     pytest.importorskip("mcp")
-    import httpx2
+    import httpx
     import uvicorn
-    from mcp import Client
+    from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
     wire = Wire(answer=[{"_id": 7}])
@@ -303,13 +303,15 @@ def test_over_http_the_bearer_token_is_the_identity(make, idp):
     try:
         async def run():
             headers = {"Authorization": f"Bearer {token}"}
-            async with httpx2.AsyncClient(headers=headers) as http:
-                async with Client(streamable_http_client(
-                        url, http_client=http)) as c:
-                    listed = await c.list_tools()
-                    called = await c.call_tool("ticket_by_user",
-                                               {"user": "alice"})
-                    return listed, called
+            async with httpx.AsyncClient(headers=headers) as http:
+                async with streamable_http_client(url, http_client=http) as streams:
+                    read, write = streams
+                    async with ClientSession(read, write) as c:
+                        await c.initialize()
+                        listed = await c.list_tools()
+                        called = await c.call_tool("ticket_by_user",
+                                                   {"user": "alice"})
+                        return listed, called
 
         listed, called = asyncio.run(run())
         assert [t.name for t in listed.tools] == ["ticket_by_user"]
@@ -317,7 +319,7 @@ def test_over_http_the_bearer_token_is_the_identity(make, idp):
         assert wire.sent[-1][2] == {"comment": {"voyd": token}}
 
         async def anonymous():
-            async with httpx2.AsyncClient() as http:
+            async with httpx.AsyncClient() as http:
                 got = await http.post(url, json={
                     "jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                     headers={"Accept": "application/json, text/event-stream"})

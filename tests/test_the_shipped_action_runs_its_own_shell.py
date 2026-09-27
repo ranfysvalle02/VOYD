@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
@@ -108,6 +109,16 @@ class Runner:
         self.base = base
         self.temp = tmp_path / "runner-temp"
         self.temp.mkdir()
+        # The action's `Install voyd` step creates this command. The harness
+        # does not run pip for every test, so provide an equivalent wrapper
+        # against the checkout it is testing.
+        self.bin = self.temp / "bin"
+        self.bin.mkdir()
+        planner = self.bin / "voyd-plan"
+        planner.write_text(f"#!{sys.executable}\n"
+                   "from voyd.wire.plan import main\n"
+                   "raise SystemExit(main())\n")
+        planner.chmod(0o755)
         self.out = self.temp / "GITHUB_OUTPUT"
         self.out.touch()
         self.summary = self.temp / "GITHUB_STEP_SUMMARY"
@@ -135,7 +146,10 @@ class Runner:
                    RUNNER_TEMP=str(self.temp),
                    GITHUB_OUTPUT=str(self.out),
                    GITHUB_STEP_SUMMARY=str(self.summary),
-                   VOYD_TARGET=self.defaults.get("target", ""))
+                   VOYD_TARGET=self.defaults.get("target", ""),
+                   PYTHONPATH=str(ROOT) + os.pathsep + os.environ.get(
+                       "PYTHONPATH", ""),
+                   PATH=str(self.bin) + os.pathsep + os.environ["PATH"])
         script = self._expand(self.steps[name]["run"])
         return subprocess.run([*RUNNER_SHELL, "-c", script],
                               cwd=cwd, env=env, capture_output=True,
