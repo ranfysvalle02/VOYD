@@ -12,7 +12,7 @@ a full MongoDB wire-protocol proxy implementing admission control, TTL/expiry, m
 
 **Ranking is not permission.**
 
-A vector index scores relevance. Nothing in an ordinary retrieval path is
+A vector index scores relevance. Nothing in an ordinary retrieval path has
 ever asked the other question — *may this fact reach a prompt?* — so a
 search answers with a confident score and no opinion about whether the hit
 was allowed to be there: an expired row the sweeper has not reached, a fact
