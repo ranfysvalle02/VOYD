@@ -155,6 +155,9 @@ def test_the_public_surface_is_deliberate():
         # A named pipeline a client calls by name; its expansion meets the
         # rules like any pipeline. Not a rule. See `policy/recipes.py`.
         "recipe",
+        # Whose delegated tokens are believed. Not a rule: it decides who
+        # a read is judged as. See `voyd/engine/delegation.py`.
+        "issuer",
         "__version__"}, (
         "the policy vocabulary changed; that is the package's whole public "
         "surface, so it is a deliberate edit and not an incidental one")
@@ -265,6 +268,7 @@ def test_both_doors_leave_the_same_row():
     "voyd.engine.admission.transforms", "voyd.engine.admission.rerank",
     "voyd.contrib", "voyd.contrib.text", "voyd.contrib.rank",
     "voyd.contrib.context",
+    "voyd.engine.delegation", "voyd.wire.jwks", "voyd.testing",
 ])
 def test_every_module_a_reader_is_pointed_at_imports(module):
     # The package docstrings are a map. A map naming a module that does
@@ -279,6 +283,7 @@ def test_every_module_a_reader_is_pointed_at_imports(module):
     "voyd.engine.admission.sanitize", "voyd.wire.plan_report",
     "voyd.contrib._common", "voyd.contrib.text", "voyd.contrib.rank",
     "voyd.contrib.context",
+    "voyd.engine.delegation", "voyd.engine.admission.sides",
 ])
 def test_the_modules_that_claim_to_be_pure_reach_no_database(module):
     """Each of these says "pure" in its own docstring. Checked, not trusted.

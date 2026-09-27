@@ -190,6 +190,7 @@ Beside them, and deliberately not one of them:
 | `@stage(name)` | an aggregation stage mongod does not have, run by the boundary on admitted documents when a pipeline names it |
 | `@operator(name)` | an expression operator mongod does not have, used as a whole field value of `$addFields`/`$set`, per admitted document |
 | `@recipe(name, collection=)` | a named pipeline a client calls with `{$recipe: {name, params}}`; typed parameters are values, never names, and `@guard(..., recipes_only=True)` makes recipes the only way to read |
+| `issuer(url, audience=, jwks=, connection_users=)` | whose delegated tokens the boundary believes: an agent's read carries one in `comment={"voyd": token}` and is judged as the user *and* the agent; `@guard(..., scope=, delegation=)` sets a collection's terms |
 
 None of them is an enforcement point. A rule is what the terminal pass
 re-asks and what `voyd-plan` can reason about; a transform gets no
@@ -677,6 +678,97 @@ in each verbose expansion line, and as the `version` label of
 which revision of a pipeline served a read.
 [`examples/recipes.py`](examples/recipes.py) runs one through pymongo and
 shows an injection and an ad-hoc read refused.
+
+---
+
+## An agent reads as two callers at once
+
+An agent reads *for* somebody. It runs as a service account that can see
+everything, because it serves everyone, and the user it is acting for this
+second is a fact the database never hears about. So the boundary hears it
+instead: the agent passes the delegated token its runtime already holds,
+in the one field every driver forwards verbatim.
+
+```python
+# voydfile.py
+from voyd import guard, issuer, mask, restricted_to, tenant
+
+issuer("https://login.example.com",
+       audience="voyd://prod",
+       jwks="https://login.example.com/.well-known/jwks.json",
+       connection_users=("svc-agent",),       # who may present these tokens
+       roles="https://example.com/roles", tenant="org",
+       actor_roles="act.roles")
+
+@guard("notes", scope="notes:read")
+class Notes:
+    org      = tenant()                 # the principal's, pinned into the query
+    audience = restricted_to("roles")   # the user's roles AND the agent's
+    salary   = mask(visible_to=("hr",)) # unmasked only if both are hr
+```
+
+```python
+# the agent, on one pooled connection, for whichever user it serves
+notes.find({"topic": "refund"}, comment={"voyd": token})
+```
+
+**Verified, not believed.** The token is a JWT signed with `RS256`,
+`ES256` or `EdDSA`; `none` and every `HS*` are refused at load and on the
+wire, and the key a `kid` names must be the kind of key the header's
+algorithm uses, which closes the public-key-as-HMAC-secret confusion. `iss`,
+`aud`, `exp`/`nbf` (with a declared `skew`) and — for
+`delegation="required"` — the `act` claim are checked by a pure function,
+`voyd.engine.delegation.verify(token, keys, now, expected)`. Keys come from a
+JWKS file or an `https://` URL fetched at startup and every `refresh`
+seconds off the request path; an unknown `kid` is a refusal, never a fetch,
+and keys older than `max_age` refuse every delegated read until a refresh
+succeeds.
+
+**Stripped before it is forwarded.** The token is taken out of the command
+(and out of an `explain`'s inner command and every `getMore`) before the
+bytes go upstream, so it never reaches a server log, the profiler or
+`currentOp`. The comment has to be exactly `{"voyd": token}`; a comment
+that is a string or a document without `voyd` is the client's own and is
+forwarded untouched.
+
+**The intersection by default.** A rule that reads the caller asks both
+sides of a delegated read:
+
+| rule | a delegated read is admitted when |
+|---|---|
+| `restricted_to("roles")` | the principal's roles **and** the actor's each overlap the audience |
+| `clearance(order, roles)` | the **lower** of the two rungs clears the label |
+| `mask(visible_to=...)` | the principal **and** the actor are each in the audience |
+| `tenant()` | the document is the principal's tenant, and an actor that carries a tenant carries the same one |
+
+`via="principal"` or `via="actor"` asks one side on purpose
+(`restricted_to("roles", via="principal")`, `mask(..., via="actor")`,
+`tenant(via="principal")`), and `voyd-plan` reports it. Push-down uses the
+intersected values, so a `count`, a `$group`, a blinded projection and a
+prefilter keep working; the principal's tenant is pinned into the query
+itself, and a query naming another tenant is refused.
+
+**The connection is narrowed, never widened.** A plain connection is judged
+exactly as before: its principal is the server-reported user and it has no
+actor. A request-level identity is accepted only on a connection whose
+server-reported user the issuer names in `connection_users` (`("*",)` is any
+connection, written out). A cursor keeps the identity that opened it: a
+`getMore` continues as that identity, and one presenting a different
+principal or actor is refused.
+
+**A collection sets its terms.** `@guard(..., scope="notes:read")` refuses a
+delegated read whose token was not granted the scope, naming it.
+`delegation="required"` refuses a plain read and a user's own token (no
+`act`); `delegation="forbidden"` refuses every agent. Writes take no
+delegated identity at all. `voyd-plan` reports `delegation_loosened`,
+`scope_removed`, `scope_changed`, `via_narrowed_to_one_side` and
+`issuer_added` as fail-open, and their narrowing counterparts as not.
+
+[`examples/delegation.py`](examples/delegation.py) serves two users through
+one service connection with the same query and different rows, shows the
+mask staying on when the agent is narrower than its user, and refuses an
+agent without the scope. `voyd.testing.TestIssuer` mints the tokens with no
+network and no identity provider.
 
 ---
 
@@ -1187,6 +1279,22 @@ the second language.
   canonical form exactly, including Python's shortest float repr.
 - A stamp costs an Ed25519 signature per document and a re-encoded reply;
   an attested collection never gets the byte-for-byte fast path.
+- **Delegated identity is request-level only.** A token rides in
+  `comment`; connection-level `MONGODB-OIDC`, receipts that name the
+  principal and the actor, and recipes granted to actors are specified in
+  [`whats-next.md`](whats-next.md) and not built. A stamp on a delegated
+  read names the principal's user, hashed, as `caller`.
+- **No replay cache.** A captured token is valid until its `exp`, on any
+  connection its issuer's `connection_users` names. Keep `exp` short.
+- **JWKS staleness is bounded, not zero.** A key the identity provider
+  revokes is still believed until the next successful refresh, and a
+  provider that is down leaves the last good keys in use for up to
+  `max_age`.
+- A pooled connection's own identity is the server's; the boundary cannot
+  tell two agents sharing one service account apart except by their tokens.
+- A lone `$vectorSearch` under delegation is not rewritten: its tenant is
+  enforced per document on the way out, so a page can come back short by
+  another tenant's hits.
 - There is **no observe-only mode**. `voyd-wire` enforces or it is not
   in the path; it cannot yet run alongside a read logging what it *would*
   have refused. `voyd-plan --audit` answers most of that question without
@@ -1207,7 +1315,7 @@ at different lengths — each answers a question this one does not:
 | [`blog.md`](blog.md) | the story: every failure in this domain is disguised as its own opposite, including one in this project's own CI |
 | [`blog2.md`](blog2.md) | the sequel: the verbs after *refuse* — backfill, prefilter, mask, sanitize, stages, recipes, attest — and the one property they share |
 | [`examples/operators/README.md`](examples/operators/README.md) | every `voyd.contrib` stage and operator, with a snippet you can paste into a pipeline today |
-| [`whats-next.md`](whats-next.md) | the spec for delegated agent identity at the wire, and `voyd-mcp` to deliver it |
+| [`whats-next.md`](whats-next.md) | the spec for delegated agent identity at the wire: what the request-level half does, and what remains — `MONGODB-OIDC`, receipts naming both parties, recipe grants, `voyd-mcp` |
 | [`docs/why-not-native.md`](docs/why-not-native.md) | change streams, `$where`, views, `$$USER_ROLES`, TTL, RBAC, Queryable Encryption — what each one gives you and where the line is |
 | [`docs/cosine.md`](docs/cosine.md) | the embedding-model failure, reproducible without an API key, with its provenance and its limits |
 | [`docs/ranking-is-not-permission.md`](docs/ranking-is-not-permission.md) | the long-form design argument for putting a boundary on the wire |

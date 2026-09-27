@@ -263,7 +263,13 @@ def test_a_claim_the_wire_cannot_honestly_answer_is_reported_at_boot():
     # answer. Reported at boot because the alternative is correct and
     # useless: every read of that collection refused, with nothing
     # connecting it to a line in a policy file.
-    assert SUPPLIABLE_CLAIMS == {"user", "db", "groups", "roles"}
+    # The server's four, and the same names on each side of a verified
+    # delegation plus the grant it carries.
+    assert {"user", "db", "groups", "roles"} <= SUPPLIABLE_CLAIMS
+    assert SUPPLIABLE_CLAIMS - {"user", "db", "groups", "roles"} == {
+        "scopes", "principal.user", "principal.db", "principal.groups",
+        "principal.roles", "principal.tenant", "actor.user", "actor.groups",
+        "actor.roles", "actor.tenant"}
     mapped = Clearance(order=("public", "secret"),
                        roles=(("analyst", "public"),), claim="roles")
     assert unsuppliable_claims(notes(mapped)) == []

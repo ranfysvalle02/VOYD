@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
 from voyd import __version__
-from voyd.declare import load
+from voyd.declare import ISSUERS, load
 from voyd.engine import attest
 from voyd.engine.plan import Matrix, Plan, matrix, plan
 
@@ -386,8 +386,12 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "--current and --proposed are both required to plan. Pass "
                 "`none` for the side that does not exist yet")
+        # `load` clears the registries, so each file's issuers are copied
+        # out before the next one is read.
         current = _policy(args.current)
+        trusted_now = dict(ISSUERS) if current else {}
         proposed = _policy(args.proposed)
+        trusted = (trusted_now, dict(ISSUERS) if proposed else {})
         if not current and not proposed:
             raise ValueError(
                 "--current and --proposed are both `none`. There is no "
@@ -439,11 +443,11 @@ def main(argv: list[str] | None = None) -> int:
         if each:
             result = matrix(current, proposed, sample, each, when=when,
                             collections=args.collections,
-                            exhaustive=exhaustive)
+                            exhaustive=exhaustive, trusted=trusted)
         else:
             result = plan(current, proposed, sample, when=when,
                           caller=caller, collections=args.collections,
-                          exhaustive=exhaustive)
+                          exhaustive=exhaustive, trusted=trusted)
     except Exception as exc:                                  # noqa: BLE001
         print(f"voyd-plan: {exc}", file=sys.stderr)
         return 2

@@ -94,19 +94,55 @@ def holdable(reason: str = "quarantined") -> _Field:
                                            reversible=True))
 
 
-def tenant() -> _Field:
+def tenant(*, via: str | None = None) -> _Field:
     """This field is the tenant id, enforced on *both* halves.
 
     Required in a reduction, and checked per document on the way out,
     which are two different mistakes and both of them leak. See
     ``tests/test_a_real_driver_through_a_real_boundary.py``.
+
+    On a delegated read the tenant is not the client's to say: it is the
+    principal's ``tenant`` claim, pinned into the query and checked on
+    every document, and an actor that carries a tenant must carry the
+    same one. ``via="principal"`` or ``via="actor"`` names one side
+    explicitly (``"principal.org"`` names the claim too).
     """
-    return _Field("tenant")
+    return _Field("tenant", args=(_via(via, "tenant", "tenant"),))
 
 
-def restricted_to(claim: str) -> _Field:
+def _via(via: str | None, default: str, what: str) -> str:
+    """A claim reference: ``"roles"`` (both sides when delegated),
+    ``"principal"``/``"actor"`` (that side's ``default`` claim), or
+    ``"principal.roles"``/``"actor.roles"``."""
+    if via is None:
+        return default
+    if not isinstance(via, str) or not via.strip():
+        raise ValueError(f"{what}(via=...) must name a side or a claim, e.g. "
+                         f"'principal', 'actor' or 'roles'")
+    if via in ("principal", "actor"):
+        return f"{via}.{default}"
+    head, dot, rest = via.partition(".")
+    if dot and head in ("principal", "actor") and not rest:
+        raise ValueError(f"{what}(via={via!r}) names a side and no claim")
+    return via
+
+
+def restricted_to(claim: str, *, via: str | None = None) -> _Field:
     """This field names the audience; admit only callers whose ``claim``
-    overlaps it."""
+    overlaps it.
+
+    On a delegated read the principal's ``claim`` *and* the actor's must
+    each overlap the audience. ``via="principal"`` or ``via="actor"``
+    asks one side only, and ``voyd-plan`` reports the change."""
+    if via is not None:
+        if via not in ("principal", "actor"):
+            raise ValueError(
+                f"restricted_to({claim!r}, via={via!r}): via names a side, "
+                f"'principal' or 'actor'")
+        if claim.partition(".")[0] in ("principal", "actor"):
+            raise ValueError(
+                f"restricted_to({claim!r}, via={via!r}) names the side twice")
+        claim = f"{via}.{claim}"
     return _Field("rule", lambda f: Restricted(field=f, claim=claim))
 
 
@@ -205,7 +241,12 @@ def clearance(*, order: tuple[str, ...] | list[str],
     ``via``. The boundary cannot supply one -- it will say so at boot,
     naming this collection -- so that form belongs where an application
     already knows the level.
+
+    On a delegated read the caller's rung is the **lower** of the
+    principal's and the actor's. ``via="principal"`` or ``via="actor"``
+    (or ``"principal.groups"``) asks one side only.
     """
+    via = _via(via, "roles", "clearance")
     if not order:
         raise ValueError(
             "clearance() needs an order: the levels, lowest first. Without "
@@ -384,7 +425,9 @@ def mask(*, strip: bool = False,
     ``visible_to`` names the values of the caller's ``via`` claim that see
     the field. The claim is the one the *server* reports for the
     connection, never one the client asserts, and a caller the boundary
-    cannot identify sees the mask.
+    cannot identify sees the mask. On a delegated read the value is
+    shown only if the principal *and* the actor are each in the audience;
+    ``via="principal"`` or ``via="actor"`` asks one side.
 
     Top-level fields only, by construction: the attribute name is the
     path. Mask the parent of a nested value, and note that elements of a
@@ -404,8 +447,132 @@ def mask(*, strip: bool = False,
             f"non-empty string -- a role or group the server reports")
     if not isinstance(via, str) or not via.strip():
         raise ValueError("mask(via=...) must name a claim, e.g. 'roles'")
+    via = _via(via, "roles", "mask")
     return _Field("mask", lambda f: Mask(field=f, strip=bool(strip),
                                          visible_to=audience, via=via))
+
+
+# The identity providers whose delegated tokens this policy believes, by
+# issuer URL. See `issuer` and `voyd/engine/delegation.py`.
+ISSUERS: dict[str, Any] = {}
+
+DELEGATION = ("allowed", "required", "forbidden")
+
+
+def issuer(url: str, *, audience: str | tuple[str, ...] | list[str],
+           jwks: str, connection_users: tuple[str, ...] | list[str],
+           principal: str = "sub", actor: str = "act.sub",
+           scopes: str = "scope", roles: str | None = None,
+           groups: str | None = None, tenant: str | None = None,
+           actor_roles: str | None = None, actor_groups: str | None = None,
+           actor_tenant: str | None = None,
+           algorithms: tuple[str, ...] | list[str] = ("RS256", "ES256", "EdDSA"),
+           skew: float = 60, refresh: float = 300,
+           max_age: float = 3600) -> None:
+    """Trust delegated tokens from one identity provider.
+
+        issuer("https://login.example.com",
+               audience="voyd://prod",
+               jwks="https://login.example.com/.well-known/jwks.json",
+               connection_users=("svc-agent",),
+               roles="https://example.com/roles", tenant="org",
+               actor_roles="act.roles")
+
+    A read then carries the token in its ``comment``, which every driver
+    passes through verbatim::
+
+        coll.find({...}, comment={"voyd": token})
+
+    The boundary verifies it (``voyd/engine/delegation.py``), judges that
+    one command as the principal and the actor together, and strips the
+    token before the command goes upstream, so it never reaches a server
+    log or the profiler.
+
+    The claim names are paths into the token (``"act.sub"``), and a name
+    the token lacks yields an empty value, which admits nothing that
+    requires it. ``connection_users`` is required: the server-reported
+    users whose connections may present this issuer's tokens, because a
+    request-level identity narrows the connection's and must be one the
+    connection is allowed to act for. ``("*",)`` means any connection and
+    has to be written to be meant.
+
+    ``jwks`` is a file path or an ``https://`` URL. A URL is fetched at
+    startup and every ``refresh`` seconds off the request path; a key id
+    the boundary does not hold is a refusal, never a fetch, and keys older
+    than ``max_age`` seconds refuse every delegated read until a refresh
+    succeeds.
+
+    Refused at load: ``none`` or any ``HS*`` algorithm, an algorithm this
+    verifier does not implement, a plain ``http://`` key URL, an empty
+    audience or connection list, a URL declared twice, and a missing
+    ``cryptography`` (``pip install 'voyd[attest]'``).
+    """
+    from .engine.delegation import ALGORITHMS, Issuer
+
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("issuer() needs the issuer URL its tokens carry as iss")
+    if url in ISSUERS:
+        raise ValueError(f"issuer({url!r}) is declared twice. One issuer, one "
+                         f"set of keys and one claim mapping")
+    audiences = (audience,) if isinstance(audience, str) else tuple(audience or ())
+    if not audiences or not all(isinstance(a, str) and a for a in audiences):
+        raise ValueError(f"issuer({url!r}): audience must name this boundary. "
+                         f"A token for any audience is a token for somebody "
+                         f"else's service, replayed here")
+    algs = tuple(algorithms)
+    for alg in algs:
+        if not isinstance(alg, str) or alg.lower() == "none" or alg.upper().startswith("HS"):
+            raise ValueError(
+                f"issuer({url!r}): algorithm {alg!r} is refused. A shared "
+                f"secret in the proxy is a key anybody holding its "
+                f"configuration could mint tokens with; only asymmetric "
+                f"signatures are verified")
+        if alg not in ALGORITHMS:
+            raise ValueError(f"issuer({url!r}): algorithm {alg!r} is not one "
+                             f"of {sorted(ALGORITHMS)}")
+    if not algs:
+        raise ValueError(f"issuer({url!r}): algorithms=() accepts nothing")
+    if not isinstance(jwks, str) or not jwks.strip():
+        raise ValueError(f"issuer({url!r}): jwks= is a file path or an https URL")
+    if jwks.startswith("http://"):
+        raise ValueError(f"issuer({url!r}): jwks={jwks!r} is plain http. Keys "
+                         f"fetched without TLS are keys anybody on the path "
+                         f"chose")
+    if "://" in jwks and not jwks.startswith(("https://", "file://")):
+        raise ValueError(f"issuer({url!r}): jwks={jwks!r} is neither a file "
+                         f"nor an https URL")
+    users = tuple(connection_users or ())
+    if not users or not all(isinstance(u, str) and u for u in users):
+        raise ValueError(
+            f"issuer({url!r}): connection_users= names the server users whose "
+            f"connections may present these tokens, or ('*',) for any. "
+            f"Leaving it out would let any connection act for anybody the "
+            f"issuer names")
+    for name, value in (("skew", skew), ("refresh", refresh),
+                        ("max_age", max_age)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError(f"issuer({url!r}): {name}={value!r} is seconds, "
+                             f"not negative")
+    if skew > 600:
+        raise ValueError(f"issuer({url!r}): skew={skew} is more than ten "
+                         f"minutes of clock disagreement, which is an "
+                         f"expiry nobody enforces")
+    if max_age < refresh:
+        raise ValueError(f"issuer({url!r}): max_age={max_age} is shorter than "
+                         f"refresh={refresh}, so the keys would go stale "
+                         f"between every two refreshes")
+    try:
+        import cryptography  # noqa: F401
+    except ImportError as exc:
+        raise ValueError("issuer() verifies signatures with `cryptography`: "
+                         "pip install 'voyd[attest]'") from exc
+    ISSUERS[url] = Issuer(
+        url=url, audience=audiences, jwks=jwks, principal=principal,
+        actor=actor, scopes=scopes, roles=roles, groups=groups,
+        tenant=tenant, actor_roles=actor_roles, actor_groups=actor_groups,
+        actor_tenant=actor_tenant, algorithms=algs, skew=float(skew),
+        connection_users=users, refresh=float(refresh),
+        max_age=float(max_age))
 
 
 # Every collection declared in a loaded policy file, by name, with the
@@ -793,8 +960,18 @@ def _check_recipes() -> None:
 def guard(collection: str, *, lineage_field: str | None = None,
           on_delete: str = "forward", backfill: int = 4,
           prefilter: bool = False, recipes_only: bool = False,
-          attest: bool = False):
+          attest: bool = False, delegation: str = "allowed",
+          scope: str | None = None):
     """Declare the rules for one collection. Returns the class unchanged.
+
+    ``delegation`` says who may read here by delegated token: ``"allowed"``
+    (the default -- a delegated read is judged as principal and actor
+    together, a plain one exactly as before), ``"required"`` (every read
+    carries a verified token with an actor; a plain read, or a user's own
+    token, is refused) or ``"forbidden"`` (agents may not read this
+    collection at all). ``scope="notes:read"`` refuses a delegated read
+    whose token was not granted that scope, naming it. Writes are
+    untouched by both. See ``issuer``.
 
     ``attest=True`` has the boundary sign every document it serves from
     this collection: a ``_voyd`` stamp naming the key, the policy file's
@@ -845,9 +1022,21 @@ def guard(collection: str, *, lineage_field: str | None = None,
             f"{collection}: backfill={backfill!r}; expected a whole number "
             f"from 1 (off) to 20. It multiplies every vector search's "
             f"candidate set, so past 20 it is a different workload")
+    if delegation not in DELEGATION:
+        raise ValueError(f"{collection}: delegation={delegation!r}; expected "
+                         f"one of {DELEGATION}")
+    if scope is not None and (not isinstance(scope, str) or not scope.strip()
+                              or " " in scope):
+        raise ValueError(f"{collection}: scope={scope!r} must be one scope "
+                         f"name, e.g. 'notes:read'")
+    if scope is not None and delegation == "forbidden":
+        raise ValueError(f"{collection}: scope={scope!r} with "
+                         f"delegation='forbidden'. A grant nobody may use "
+                         f"is a contradiction, not a policy")
 
     def decorate(cls):
         rules, tenant_field, seen = [], None, set()
+        tenant_via = "tenant"
         subject_path: str | None = None
         subject_key: str | None = None
         sealed_fields: list[str] = []
@@ -867,6 +1056,7 @@ def guard(collection: str, *, lineage_field: str | None = None,
                         f"{collection}: two tenant fields ({tenant_field!r} "
                         f"and {name!r}); a scope with two keys is not a scope")
                 tenant_field = name
+                tenant_via = value.args[0] if value.args else "tenant"
                 continue
             if value.kind == "deadline" and "deadline" in seen:
                 raise ValueError(
@@ -993,7 +1183,8 @@ def guard(collection: str, *, lineage_field: str | None = None,
             transforms=tuple(TRANSFORMS.get(collection, ())),
             recipes=_recipes_for(collection),
             recipes_only=bool(recipes_only),
-            attest=bool(attest))
+            attest=bool(attest),
+            delegation=delegation, scope=scope, tenant_via=tenant_via)
         OPTIONS[collection] = {"on_delete": on_delete,
                                "backfill": backfill,
                                "sealed": tuple(sealed_fields),
@@ -1019,10 +1210,18 @@ def load(path: str) -> dict[str, AdmissionSpec]:
     STAGES.clear()
     OPERATORS.clear()
     RECIPES.clear()
+    ISSUERS.clear()
     runpy.run_path(path, run_name="voydfile")
     if not REGISTRY:
         raise ValueError(
             f"{path} declared no collections. A policy file with no @guard in "
             f"it would start a proxy that refuses nothing, silently")
     _check_recipes()
+    for collection, spec in REGISTRY.items():
+        if (spec.delegation == "required" or spec.scope) and not ISSUERS:
+            raise ValueError(
+                f"{collection}: delegation={spec.delegation!r}"
+                + (f", scope={spec.scope!r}" if spec.scope else "")
+                + " and no issuer() in the policy. No token could satisfy "
+                  "it, so every read would be refused")
     return dict(REGISTRY)

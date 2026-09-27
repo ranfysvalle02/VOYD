@@ -135,6 +135,7 @@ from voyd import issuer
 issuer("https://login.example.com",
        audience="voyd://prod",
        jwks="https://login.example.com/.well-known/jwks.json",
+       connection_users=("svc-agent",),
        principal="sub", actor="act.sub", scopes="scope",
        roles="https://example.com/roles")
 ```
@@ -304,9 +305,26 @@ there would be two boundaries to keep in agreement.
 
 ## Milestones
 
-1. **0.4.0-a** — `issuer()`, pure `verify`, request-level tokens via
-   `comment`, principal/actor claims, intersection for every caller
-   rule, `scope=` and `delegation=`, plan findings.
+1. **0.4.0-a — shipped.** `issuer()`, pure `verify`, request-level tokens
+   via `comment`, principal/actor claims, intersection for every caller
+   rule, `scope=` and `delegation=`, plan findings. The README's "An agent
+   reads as two callers at once" is the reference for what it does. The
+   decisions it made that the rest of this spec builds on:
+   - "the connection may act for" is `issuer(..., connection_users=...)`:
+     the server-reported users whose connections may present that
+     issuer's tokens, required, with `("*",)` written out for any;
+   - a cursor keeps the identity that opened it, and a `getMore` under a
+     different principal or actor is refused;
+   - a token without `act` is a principal alone under
+     `delegation="allowed"` and refused under `"required"`;
+   - `scope=` binds delegated reads; plain reads are governed by
+     `delegation=`;
+   - `via=` is a claim reference — `"roles"` (both sides),
+     `"principal"`/`"actor"`, or `"principal.roles"` — so `clearance` and
+     `mask`, whose `via` already named a claim, keep one parameter;
+   - the claim mapping adds `actor_roles`, `actor_groups` and
+     `actor_tenant`, because identity providers disagree about where an
+     actor's roles live as much as a user's.
 2. **0.4.0-b** — connection-level `MONGODB-OIDC` in both modes,
    receipts with principal and actor, recipe grants.
 3. **0.4.0** — `voyd-mcp`, an end-to-end example (an agent with a

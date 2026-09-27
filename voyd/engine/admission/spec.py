@@ -124,6 +124,17 @@ class AdmissionSpec:
     # is part of identity because `voyd-plan` compares two specs, and a
     # policy that stops attesting is a finding an auditor needs to see.
     attest: bool = False
+    # Who may read by delegation, and with what grant. ``delegation`` is
+    # ``"allowed"`` (a delegated identity is judged as the intersection of
+    # principal and actor, a plain one as always), ``"required"`` (every
+    # read carries a verified delegated identity with an actor) or
+    # ``"forbidden"`` (no delegated read at all). ``scope`` is the grant a
+    # delegated identity must hold to read here. ``tenant_via`` is the
+    # claim a delegated read's tenant is taken from -- see ``sides.py``.
+    # Part of identity because ``voyd-plan`` compares them.
+    delegation: str = "allowed"
+    scope: str | None = None
+    tenant_via: str = "tenant"
 
     def with_defaults(self) -> AdmissionSpec:
         default_rules: tuple[Rule, ...] = (
@@ -182,8 +193,12 @@ class AdmissionSpec:
                  + (" only" if self.recipes_only else "")
                  if self.recipes or self.recipes_only else "")
         signed = ", attested" if self.attest else ""
+        acts = ""
+        if self.delegation != "allowed" or self.scope:
+            acts = f", delegation {self.delegation}" + (
+                f" with scope {self.scope!r}" if self.scope else "")
         return (f"{self.collection}: refuses on [{reasons}]{scope}{within}"
-                f"{hides}{cooks}{signed}")
+                f"{hides}{cooks}{signed}{acts}")
 
 
 def _ask(rule, doc: dict, *, when: datetime | None,

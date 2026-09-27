@@ -33,6 +33,7 @@ from datetime import datetime
 from typing import Any, ClassVar, Protocol
 
 from ..time import aware, living, now
+from .sides import sides
 from .reasons import (DEADLINE, NOT_CLEARED, QUARANTINED,
                       REDUNDANT,
                       REVOKED, UNREADABLE, UNRECOVERABLE,
@@ -452,7 +453,15 @@ class Clearance:
         than raising: an unmapped role is an unanswered question, and the
         answer to an unanswered question here is no.
         """
-        got = (caller or {}).get(self.claim)
+        # One rung per side the claim is asked of, and the *lower* of them
+        # is the caller's: a delegated read is cleared only as far as both
+        # the principal and the actor are. See `sides.py`.
+        rungs = [self._held_one(got) for got in sides(caller, self.claim)]
+        if any(r is None for r in rungs):
+            return None
+        return min(r for r in rungs if r is not None)
+
+    def _held_one(self, got: Any) -> int | None:
         if not self.roles:
             return self._rank(got)
         if isinstance(got, str):            # one role, not a list of them
@@ -534,14 +543,19 @@ class Restricted:
         allowed = self._set(doc.get(self.field))
         if not allowed:
             return True
-        return not (allowed & self._set((caller or {}).get(self.claim)))
+        # Every side asked must overlap the audience on its own. On a
+        # delegated read that is the principal *and* the actor; see
+        # `sides.py` for why the intersection is the default.
+        return any(not (allowed & self._set(held))
+                   for held in sides(caller, self.claim))
 
     def clause(self) -> dict | None:
         return None
 
     def clause_for(self, caller: dict | None) -> dict | None:
-        held = sorted(self._set((caller or {}).get(self.claim)))
-        return {self.field: {"$in": held}}
+        each = [{self.field: {"$in": sorted(self._set(held))}}
+                for held in sides(caller, self.claim)]
+        return each[0] if len(each) == 1 else {"$and": each}
 
 
 class Kept:

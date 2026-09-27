@@ -28,11 +28,12 @@ import sys
 from typing import Mapping
 
 from voyd import __version__
-from voyd.declare import OPERATORS, OPTIONS, STAGES, load
+from voyd.declare import ISSUERS, OPERATORS, OPTIONS, STAGES, load
 
 from . import ensure
 from . import preflight
 from . import seal
+from .jwks import Trust
 from .policy import Guard, Virtuals
 from .proxy import serve
 from .upstream import vault_uri
@@ -251,6 +252,27 @@ def _signer_from(args, guards: dict[str, Guard]) -> int:
     for name in wanted:
         guards[name].signer = signer
     return 0
+
+
+def _trust() -> "Trust | int":
+    """The declared issuers' keys, read once before any fork.
+
+    A key file that cannot be read is a policy that cannot be enforced,
+    so it stops the boundary here. A key URL that cannot be reached is
+    said and survived: the refresh keeps trying, and until it succeeds a
+    delegated read refuses rather than guesses.
+    """
+    trust = Trust(ISSUERS)
+    for url in trust.preload():
+        where = ISSUERS[url].jwks
+        if not where.startswith("https://"):
+            print(f"voyd-wire: issuer {url}: cannot read keys from {where}: "
+                  f"{trust.why.get(url)}", file=sys.stderr)
+            return 2
+        print(f"voyd-wire: WARNING: issuer {url}: keys at {where} are "
+              f"unreachable ({trust.why.get(url)}); delegated reads from it "
+              f"refuse until a refresh succeeds", flush=True)
+    return trust
 
 
 def _embeds_from(options: Mapping) -> dict:
@@ -480,6 +502,12 @@ def main(argv: list[str] | None = None) -> int:
                   f"one of their own, because the sweep drops what it finds "
                   f"there", file=sys.stderr)
             return 2
+    trust: Trust | None = None
+    if ISSUERS:
+        held = _trust()
+        if isinstance(held, int):
+            return held
+        trust = held
     for c in args.guard:
         guards.setdefault(c, Guard.defaults(
             c, at_field=args.at_field, mark_field=args.mark_field))
@@ -536,7 +564,7 @@ def main(argv: list[str] | None = None) -> int:
               workers=args.workers, metrics_port=args.metrics,
               metrics_bind=args.metrics_bind,
               vault_spec=vault_spec, auto_embed=_embeds_from(OPTIONS),
-              virtuals=virtuals)
+              virtuals=virtuals, trust=trust)
     except KeyboardInterrupt:
         summarise(guards)
     return 0

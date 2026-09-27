@@ -46,6 +46,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+from .sides import sides
+
 
 @dataclass(frozen=True)
 class Mask:
@@ -69,13 +71,16 @@ class Mask:
             return True
         if not caller:
             return True                     # unknown is not entitled
-        held = caller.get(self.via)
+        # Visible only if every side asked is in the audience: on a
+        # delegated read, the principal and the actor both. See `sides.py`.
+        return any(not self._sees(held) for held in sides(caller, self.via))
+
+    def _sees(self, held: Any) -> bool:
         if isinstance(held, str):
             held = [held]
         if not isinstance(held, (list, tuple, set, frozenset)):
-            return True
-        return not any(v in self.visible_to for v in held
-                       if isinstance(v, str))
+            return False
+        return any(v in self.visible_to for v in held if isinstance(v, str))
 
     def describe(self) -> str:
         how = "strip" if self.strip else "null"

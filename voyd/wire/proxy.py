@@ -86,8 +86,8 @@ from typing import Mapping, TypedDict
 from . import cascade
 from . import seal
 from . import metrics
-from .policy import (Backfill, Guard, _wants_a_caller, _was_reduced,
-                     cascade_first, cascade_first_for_one, delete_reply,
+from .policy import (Backfill, Delegations, Guard, _wants_a_caller,
+                     _was_reduced, carries_token, cascade_first, cascade_first_for_one, delete_reply,
                      derive_on_insert, erase_first, expand_recipe,
                      guard_for, has_recipes, judge,
                      mask_reduced, refuse_masked_reference,
@@ -103,6 +103,7 @@ from .codec import (OP_COMPRESSED, OP_MSG, Hangup, ProtocolError,
                     decode_op_msg, decode_sections, encode_sections,
                     read_message_async, uncompress_message)
 from .identity import Backchannel, CallerIdentity
+from .jwks import Trust
 from .report import merge, summarise, tally
 from .scratch import Scratch
 from .stamp import Stamps
@@ -196,6 +197,10 @@ class _Pump(TypedDict):
     # The open reads this connection is stamping, for a policy with any
     # `attest=True` collection. `None` otherwise. See `stamp.py`.
     stamps: "Stamps | None"
+    # This connection's delegated reads, for a policy that declares an
+    # `issuer()` or a collection with `delegation=`/`scope=`. `None`
+    # otherwise. See `policy/delegation.py`.
+    delegations: "Delegations | None"
 
 
 async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -215,7 +220,8 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                draining: "asyncio.Event | None" = None,
                virtuals: "Virtuals | None" = None,
                scratch: "Scratch | None" = None,
-               stamps: "Stamps | None" = None) -> str:
+               stamps: "Stamps | None" = None,
+               delegations: "Delegations | None" = None) -> str:
     """One direction of one connection.
 
     ``rewritten`` is shared between the two directions and is the only state
@@ -242,6 +248,13 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         await sock_writer.drain()
 
     cookbook = to_server and has_recipes(guards)
+
+    def asking(delegated: dict | None) -> dict | None:
+        # Whom this command is judged as: its own verified delegated
+        # identity when it carries one, the connection's otherwise.
+        if delegated is not None:
+            return delegated
+        return who.claims if who else None
     try:
         while True:
             raw, _len, req_id, resp_to, opcode = await _next_message(
@@ -275,6 +288,23 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 # like it was not implemented.
                 head = decode_sections(raw)
                 body = head[1] if head else {}
+
+                # A delegated identity in the `comment` is verified and
+                # taken out first of all, so nothing below -- and nothing
+                # upstream -- sees the token, and every decision below is
+                # made as the principal and actor it names. See
+                # `policy/delegation.py`.
+                delegated: dict | None = None
+                if delegations is not None:
+                    if who is not None and carries_token(body):
+                        await who.resolve(verbose)
+                    raw, head, delegated, refused = delegations.admit(
+                        raw, req_id, resp_to, head, guards,
+                        who.claims if who else None, verbose)
+                    if refused is not None:
+                        await send(back, refused)
+                        continue
+                    body = head[1] if head else {}
 
                 # A `$recipe` becomes the pipeline its policy names before
                 # anything below reads the message, so everything below
@@ -338,8 +368,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     # or a copy leaves as something the mask never sees, so
                     # the command is answered here. See `reads.py`.
                     refusal = refuse_masked_reference(
-                        raw, req_id, guards, verbose,
-                        who.claims if who else None)
+                        raw, req_id, guards, verbose, asking(delegated))
                 if refusal is None and embeds:
                     refusal = refuse_client_vector(raw, req_id, req_id, embeds)
                 if refusal is None and virtuals:
@@ -355,7 +384,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     if virtual is not None:
                         if who is not None:
                             await who.resolve(verbose)
-                        claims = who.claims if who else None
+                        claims = asking(delegated)
                         if stamps is not None:
                             stamps.note_virtual(virtual.guard.collection,
                                                 req_id, guards)
@@ -384,7 +413,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     # `rewrite_derived_read` for why one call answers both.
                     pushed, refusal = rewrite_derived_read(
                         raw, req_id, resp_to, guards, verbose,
-                        who.claims if who else None)
+                        asking(delegated))
                     if pushed is not None:
                         raw = pushed
                         head = decode_sections(raw)
@@ -412,7 +441,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         # guarantee and this one is an optimisation.
                         narrowed = rewrite_vector_search(
                             raw, req_id, resp_to, guards, verbose,
-                            who.claims if who else None)
+                            asking(delegated))
                         if narrowed is not None:
                             raw = narrowed
                             head = decode_sections(raw)
@@ -529,6 +558,12 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                 if back_channel is not None and back_channel.answer(resp_to,
                                                                     raw):
                     continue
+                # Judged as whoever the request was judged as: a delegated
+                # command's reply, and every batch of a cursor it opened,
+                # as its principal and actor.
+                claims = delegations.reply(resp_to, raw) if delegations else None
+                if claims is None:
+                    claims = who.claims if who else None
                 if advertise:
                     rebuilt = rewrite_topology(raw, req_id, resp_to, advertise)
                     if rebuilt is not None:
@@ -560,12 +595,10 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     raw = delete_reply(raw, req_id, resp_to)
                 elif already:
                     # The rules ran in the query; the masks cannot have.
-                    raw = mask_reduced(raw, req_id, resp_to, guards,
-                                       who.claims if who else None)
+                    raw = mask_reduced(raw, req_id, resp_to, guards, claims)
                 else:
                     raw = await judge(raw, req_id, resp_to, guards,
-                                      verbose, vault, meter,
-                                      who.claims if who else None)
+                                      verbose, vault, meter, claims)
                 if backfill is not None:
                     # After `judge`, never before: the cut may only remove
                     # what the per-document check already let through.
@@ -574,8 +607,7 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                     # Last of all, after the cut: a stamp signs exactly the
                     # document the client receives, at the position it
                     # receives it in.
-                    raw = stamps.stamp(raw, resp_to, guards,
-                                       who.claims if who else None)
+                    raw = stamps.stamp(raw, resp_to, guards, claims)
             await send(writer, raw)
     except Hangup:
         # Not an error, and the one disconnect the caller may still be
@@ -672,7 +704,8 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                   half_close_seconds: float = 10.0,
                   draining: "asyncio.Event | None" = None,
                   virtuals: "Virtuals | None" = None,
-                  scratch: "Scratch | None" = None) -> None:
+                  scratch: "Scratch | None" = None,
+                  trust: "Trust | None" = None) -> None:
     """One client connection, start to finish, as one coroutine pair.
 
     A MongoDB connection is stateful -- authentication, sessions, cursors
@@ -722,6 +755,12 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
                          "scratch": scratch,
                          "stamps": (Stamps() if any(
                              g.signer is not None for g in guards.values())
+                             else None),
+                         "delegations": (
+                             Delegations(trust.issuers if trust else {},
+                                         trust.keys if trust else _no_keys)
+                             if Delegations.wanted(
+                                 guards, trust.issuers if trust else {})
                              else None)}
         forward = asyncio.ensure_future(pump(client_r, up_w, client_w,
                                              to_server=True, **common))
@@ -773,6 +812,10 @@ async def session(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
 # mark lookup's future and never reaching it.
 
 
+def _no_keys(_url: str, _now: float) -> None:
+    return None
+
+
 async def close(writer: asyncio.StreamWriter) -> None:
     """Close a stream and do not care how it goes.
 
@@ -795,7 +838,8 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
           metrics_bind: str = "127.0.0.1",
           vault_spec: dict | None = None,
           auto_embed: dict | None = None,
-          virtuals: "Virtuals | None" = None) -> None:
+          virtuals: "Virtuals | None" = None,
+          trust: "Trust | None" = None) -> None:
     """Bind, announce, then run the boundary -- in this process or N of them.
 
     The listening socket is bound *here*, once, before any fork. That is
@@ -855,6 +899,14 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                   f"roles, which is the same question asked of an answer "
                   f"the deployment will vouch for",
                   flush=True)
+    for _url, issuer in sorted((trust.issuers if trust else {}).items()):
+        # Its own line because it changes who a read is judged as. An
+        # operator asking why one pooled connection returned two users'
+        # different rows should find the reason here.
+        print(f"voyd-wire: believes delegated tokens from "
+              f"{issuer.describe()}: verified per command, judged as "
+              f"principal and actor together, stripped before forwarding",
+              flush=True)
     print(f"voyd-wire: up to {max_connections} concurrent connections"
           + (f" per worker, {workers} workers "
              f"({max_connections * workers} total)" if workers > 1 else ""),
@@ -915,7 +967,7 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                   drain_seconds=drain_seconds, advertise=advertise,
                   slab=slab, meters=meters, metrics_port=metrics_port,
                   metrics_bind=metrics_bind, vault_spec=vault_spec,
-                  auto_embed=auto_embed, virtuals=virtuals)
+                  auto_embed=auto_embed, virtuals=virtuals, trust=trust)
         return
 
     if slab is not None and metrics_port is not None:
@@ -926,7 +978,8 @@ def serve(listen_port: int, target: str, guards: dict[str, Guard],
                               drain_seconds=drain_seconds,
                               advertise=advertise, vault_spec=vault_spec,
                               auto_embed=auto_embed, virtuals=virtuals,
-                              meter=meters[0] if meters else None))
+                              meter=meters[0] if meters else None,
+                              trust=trust))
     summarise(counts)
 
 
@@ -936,7 +989,8 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
                advertise: str | None, vault_spec: dict | None = None,
                auto_embed: dict | None = None,
                virtuals: "Virtuals | None" = None,
-               meter: "metrics.Meter | None" = None) -> dict:
+               meter: "metrics.Meter | None" = None,
+               trust: "Trust | None" = None) -> dict:
     """One worker: accept, serve, drain, and report what it counted."""
     upstream = Upstream(target, verbose=verbose, meter=meter)
     # Built per worker, after the fork, because an encrypting handle owns
@@ -970,6 +1024,11 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         scratch = Scratch(vault_uri(target), virtuals, verbose=verbose)
         await scratch.open()
         sweeper = asyncio.ensure_future(scratch.sweeping(stopping))
+    # Delegation keys, renewed on their own timer so no read ever waits on
+    # an identity provider. Per worker, after the fork: a task belongs to
+    # one event loop. The keys read at startup were inherited.
+    renewer = (asyncio.ensure_future(trust.refreshing(stopping))
+               if trust is not None and trust.issuers else None)
 
     async def flushing(meter: "metrics.Meter") -> None:
         """Copy this worker's counters into shared memory, once a second.
@@ -1019,7 +1078,7 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
             return
         await session(reader, writer, upstream, guards, verbose, live,
                       advertise, vault, embeds, meter, draining=stopping,
-                      virtuals=virtuals, scratch=scratch)
+                      virtuals=virtuals, scratch=scratch, trust=trust)
 
     # A failed TLS handshake, a port scan, a plain-TCP probe against a TLS
     # listener: one client's problem, never the listener's. An earlier
@@ -1111,6 +1170,8 @@ async def _run(sock: socket.socket, ssl_ctx: "ssl.SSLContext | None",
         await lineage.aclose()
     if sweeper is not None:
         await asyncio.gather(sweeper, return_exceptions=True)
+    if renewer is not None:
+        await asyncio.gather(renewer, return_exceptions=True)
     if scratch is not None:
         await scratch.aclose()
     return counted
@@ -1126,7 +1187,8 @@ def supervise(sock: socket.socket, workers: int, target: str,
               metrics_bind: str = "127.0.0.1",
                   vault_spec: dict | None = None,
               auto_embed: dict | None = None,
-              virtuals: "Virtuals | None" = None) -> None:
+              virtuals: "Virtuals | None" = None,
+              trust: "Trust | None" = None) -> None:
     """N worker processes over one listening socket, and one honest total.
 
     Why processes at all, when the loop already removed the thread stacks:
@@ -1178,7 +1240,8 @@ def supervise(sock: socket.socket, workers: int, target: str,
                     drain_seconds=drain_seconds, advertise=advertise,
                     vault_spec=vault_spec, auto_embed=auto_embed,
                     virtuals=virtuals,
-                    meter=meters[index] if meters else None))
+                    meter=meters[index] if meters else None,
+                    trust=trust))
             except BaseException:
                 traceback.print_exc()
                 counts, code = tally(guards), 1

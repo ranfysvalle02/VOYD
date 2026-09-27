@@ -54,6 +54,7 @@ from .guarding import SUPPLIABLE_CLAIMS, Guard, enforce
 from .guarding import _wants_a_caller as _wants_a_caller
 from .guarding import guard_for, judge, mask_reduced, unsuppliable_claims
 from .backfill import Backfill
+from .delegation import Delegations, carries_token, pin_tenant, take_token
 from .handshake import TOPOLOGY_FIELDS, rewrite_topology, strip_compression
 from .reads import (DERIVED_COMMANDS, FOREIGN_STAGES, LEADING_STAGES,
                     PRESERVING_STAGES, blinded_find, blinds_a_subject,
@@ -99,6 +100,9 @@ __all__ = [
     "Virtuals", "VirtualContext", "StageError", "plan_virtual",
     "split_virtual", "run_virtual", "refuse_scratch", "names_scratch",
     "SOURCE_STAGES",
+
+    # ---- a read on somebody's behalf ----
+    "Delegations", "take_token", "carries_token", "pin_tenant",
 
     # ---- named pipelines ----
     "Recipe", "RecipeError", "expand_recipe", "has_recipes", "ad_hoc_read",

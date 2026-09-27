@@ -22,6 +22,7 @@ from typing import Any, Mapping
 from voyd.engine import Deadline, revoked
 from voyd.engine.admission import Admission, AdmissionSpec
 from voyd.engine.admission.masks import apply as apply_masks
+from voyd.engine.admission.sides import is_delegated, tenant_of
 
 from .. import cascade, metrics, seal
 from ..codec import LAZY, decode_op_msg, encode_op_msg
@@ -180,7 +181,13 @@ class Guard:
             # empty claims rather than skipping the rules, so an unknown
             # caller is refused by them instead of waved past.
             handle = handle.for_caller(caller or {})
-        if self.spec.tenant:
+        if self.spec.tenant and is_delegated(caller):
+            # A delegated read's tenant is the token's, not the batch's:
+            # the principal's, and the actor's must agree. No tenant is
+            # not every tenant -- it binds a scope no document can match.
+            scope, _why = tenant_of(caller, self.spec.tenant_via)
+            handle = handle.for_tenant(object() if _why else scope)
+        elif self.spec.tenant:
             # A declared tenant is enforced per document, and the proxy has
             # no filters to read it from -- so it takes the scope from the
             # batch itself. Every document in a cursor batch came from one
@@ -235,16 +242,25 @@ def _collection_of(reply: Mapping) -> str | None:
 # else cannot be answered: there is nowhere else for a claim to come from,
 # because the boundary will not believe one the caller asserts. See
 # `unsuppliable_claims`, which says so at boot rather than at query time.
-SUPPLIABLE_CLAIMS = frozenset({"user", "db", "groups", "roles"})
+#
+# A delegated read adds the same names under `principal.` and `actor.` --
+# the verified token's, mapped by `issuer()` -- plus `scopes`. An
+# unqualified claim is asked of both sides; see `admission/sides.py`.
+SUPPLIABLE_CLAIMS = frozenset(
+    {"user", "db", "groups", "roles", "scopes"}
+    | {f"principal.{c}" for c in ("user", "db", "groups", "roles", "tenant")}
+    | {f"actor.{c}" for c in ("user", "groups", "roles", "tenant")})
 
 
 def unsuppliable_claims(guard: Guard) -> list[str]:
     """Claims this guard's rules need and the wire cannot produce.
 
-    There are exactly four a boundary can honestly answer -- `user`, `db`,
-    `groups`, `roles` -- because those are what the *server* says when
-    asked `connectionStatus`, and a claim the client asserted is not
-    evidence about the client.
+    A plain connection can honestly answer four -- `user`, `db`, `groups`,
+    `roles` -- because those are what the *server* says when asked
+    `connectionStatus`, and a claim the client asserted is not evidence
+    about the client. A delegated read answers the same names under
+    `principal.` and `actor.`, and `scopes`, from a token the boundary
+    verified itself.
 
     A rule wanting anything else is not wrong; it is enforceable where an
     application already knows the answer. Here it can only be reported,

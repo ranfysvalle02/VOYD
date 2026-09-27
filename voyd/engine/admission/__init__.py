@@ -73,6 +73,7 @@ dependency order -- each layer may only reach the ones above it:
 
     reasons.py      the vocabulary. Stable strings, no behaviour, no imports.
     rules.py        what the answer is, for one document. Pure functions.
+    sides.py        whose claims a caller rule asks: principal, actor, both.
     spec.py         where a collection keeps its deadline and its mark.
     receipts.py     what a read cost, and what a handle has refused.
     core.py         the state, and the two enforcement points.

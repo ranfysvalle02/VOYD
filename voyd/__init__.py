@@ -88,7 +88,8 @@ no mock tier, on purpose, because these properties are only true if the
 from __future__ import annotations
 
 from .declare import (auto_embed, clearance, deadline, distinct,
-                      embedded_with, guard, holdable, mask, restricted_to,
+                      embedded_with, guard, holdable, issuer, mask,
+                      restricted_to,
                       operator, recipe, rerank, revocable, sanitized,
                       sealed, stage, subjects, tenant, transform)
 
@@ -109,5 +110,8 @@ __all__ = [
     # A named, governed pipeline a client calls by name. Not a rule: its
     # expansion meets the rules like any pipeline. See `policy/recipes.py`.
     "recipe",
+    # Whose delegated tokens the boundary believes. Not a rule: it says
+    # who a read may be judged as. See `voyd/engine/delegation.py`.
+    "issuer",
     "__version__",
 ]

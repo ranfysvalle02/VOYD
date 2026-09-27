@@ -46,6 +46,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from .admission.sides import asked, split
 from .admission.spec import AdmissionSpec, why_refused
 
 
@@ -80,6 +81,26 @@ RECIPES_ONLY_REMOVED = "recipes_only_removed"
 # relied on the stamps finds out from their absence.
 ATTEST_REMOVED = "attest_removed"
 ATTEST_ADDED = "attest_added"
+# Who may read by delegation, with what grant, asked of whom.
+DELEGATION_LOOSENED = "delegation_loosened"
+DELEGATION_TIGHTENED = "delegation_tightened"
+SCOPE_REMOVED = "scope_removed"
+SCOPE_ADDED = "scope_added"
+SCOPE_CHANGED = "scope_changed"
+VIA_NARROWED_TO_ONE_SIDE = "via_narrowed_to_one_side"
+VIA_WIDENED_TO_BOTH = "via_widened_to_both"
+ISSUER_ADDED = "issuer_added"
+ISSUER_REMOVED = "issuer_removed"
+ISSUER_CHANGED = "issuer_changed"
+# Not a collection: the finding is about the whole policy's trust.
+ISSUERS = "(issuers)"
+
+# Which kinds of identity each `delegation=` admits. A change loosens when
+# the new setting admits a kind the old one refused -- which is why
+# required -> forbidden loosens: plain reads come back.
+_ADMITS = {"allowed": frozenset({"plain", "delegated"}),
+           "required": frozenset({"delegated"}),
+           "forbidden": frozenset({"plain"})}
 
 
 @dataclass(frozen=True)
@@ -433,6 +454,7 @@ def structural(current: Mapping[str, AdmissionSpec],
                 f"right", False))
         found.extend(_masks(name, was, now))
         found.extend(_recipes(name, was, now))
+        found.extend(_delegation(name, was, now))
         if getattr(was, "attest", False) and not getattr(now, "attest", False):
             found.append(Structural(
                 name, ATTEST_REMOVED,
@@ -497,6 +519,123 @@ def _recipes(name: str, was: AdmissionSpec,
     return found
 
 
+def _delegation(name: str, was: AdmissionSpec,
+                now: AdmissionSpec) -> list[Structural]:
+    """What a change does to who may read by delegation, and whom a rule asks.
+
+    ``delegation=`` loosens when it admits a kind of identity it did not;
+    a ``scope`` removed or renamed fails open, because some actor that was
+    refused may now hold what is asked for. A caller-reading rule that
+    stops asking one side -- both sides to ``via="principal"``, say --
+    fails open: the intersection was the narrower answer.
+    """
+    found: list[Structural] = []
+    old_d = getattr(was, "delegation", "allowed")
+    new_d = getattr(now, "delegation", "allowed")
+    if old_d != new_d:
+        gained = sorted(_ADMITS.get(new_d, frozenset())
+                        - _ADMITS.get(old_d, frozenset()))
+        if gained:
+            found.append(Structural(
+                name, DELEGATION_LOOSENED,
+                f"delegation {old_d!r} -> {new_d!r}: {' and '.join(gained)} "
+                f"reads that were refused are served", True))
+        else:
+            found.append(Structural(
+                name, DELEGATION_TIGHTENED,
+                f"delegation {old_d!r} -> {new_d!r}", False))
+    old_s, new_s = getattr(was, "scope", None), getattr(now, "scope", None)
+    if old_s and not new_s:
+        found.append(Structural(
+            name, SCOPE_REMOVED,
+            f"a delegated read no longer needs the scope {old_s!r}: any "
+            f"actor may read here for its principal", True))
+    elif new_s and not old_s:
+        found.append(Structural(
+            name, SCOPE_ADDED, f"a delegated read needs the scope {new_s!r}",
+            False))
+    elif old_s and new_s and old_s != new_s:
+        found.append(Structural(
+            name, SCOPE_CHANGED,
+            f"the scope moves from {old_s!r} to {new_s!r}; which actors hold "
+            f"the new one is not a question the policy files can answer",
+            True))
+
+    def asked_of(spec: AdmissionSpec) -> dict[str, tuple[str, frozenset]]:
+        out: dict[str, tuple[str, frozenset]] = {}
+        for rule in spec.rules:
+            claim = getattr(rule, "claim", None)
+            field_ = getattr(rule, "field", None)
+            if getattr(rule, "needs_caller", False) and isinstance(claim, str):
+                out[f"{field_} ({type(rule).__name__})"] = (claim, asked(claim))
+        for mask in getattr(spec, "masks", ()):
+            if mask.visible_to:
+                out[f"{mask.field} (mask)"] = (mask.via, asked(mask.via))
+        if spec.tenant:
+            via = getattr(spec, "tenant_via", "tenant")
+            out[f"{spec.tenant} (tenant)"] = (via, asked(via))
+        return out
+
+    before, after = asked_of(was), asked_of(now)
+    for key in sorted(set(before) & set(after)):
+        (old_c, old_sides), (new_c, new_sides) = before[key], after[key]
+        if old_sides - new_sides:
+            found.append(Structural(
+                name, VIA_NARROWED_TO_ONE_SIDE,
+                f"{key}: asked via {old_c!r}, now {new_c!r} -- it stops "
+                f"asking the {' and '.join(sorted(old_sides - new_sides))}, "
+                f"so a delegated read is no longer the intersection", True))
+        elif new_sides - old_sides:
+            found.append(Structural(
+                name, VIA_WIDENED_TO_BOTH,
+                f"{key}: asked via {old_c!r}, now {new_c!r}", False))
+    return found
+
+
+def issuers(current: Mapping[str, Any],
+            proposed: Mapping[str, Any]) -> list[Structural]:
+    """What a change does to whose tokens the boundary believes.
+
+    Adding an issuer fails open -- a new party can mint identities the
+    boundary acts on. Removing one does not: its tokens are refused.
+    Changing one fails open unless every difference only narrows (fewer
+    algorithms, fewer connections, less skew), because new keys, a new
+    audience or a new claim mapping are new people it may believe.
+    """
+    found: list[Structural] = []
+    for url in sorted(set(current) | set(proposed)):
+        old, new = current.get(url), proposed.get(url)
+        if old is None and new is not None:
+            found.append(Structural(
+                ISSUERS, ISSUER_ADDED,
+                f"tokens from {new.describe()} are believed", True))
+        elif new is None and old is not None:
+            found.append(Structural(
+                ISSUERS, ISSUER_REMOVED,
+                f"tokens from {url} are refused", False))
+        elif old is not None and new is not None and old != new:
+            moved = [f for f in ("audience", "jwks", "principal", "actor",
+                                 "scopes", "roles", "groups", "tenant",
+                                 "actor_roles", "actor_groups",
+                                 "actor_tenant", "algorithms", "skew",
+                                 "connection_users", "refresh", "max_age")
+                     if getattr(old, f) != getattr(new, f)]
+            narrows = (set(moved) <= {"algorithms", "skew",
+                                      "connection_users", "refresh",
+                                      "max_age"}
+                       and set(new.algorithms) <= set(old.algorithms)
+                       and new.skew <= old.skew
+                       and new.max_age <= old.max_age
+                       and ("*" not in new.connection_users
+                            or "*" in old.connection_users)
+                       and set(new.connection_users)
+                       <= set(old.connection_users))
+            found.append(Structural(
+                ISSUERS, ISSUER_CHANGED,
+                f"{url}: {', '.join(moved)} change", not narrows))
+    return found
+
+
 def _stages(expansions: Sequence) -> str:
     return " | ".join("[" + ", ".join(next(iter(s)) for s in pipeline) + "]"
                       for pipeline in expansions)
@@ -536,14 +675,17 @@ def _masks(name: str, was: AdmissionSpec,
             widened.append("the key is kept as null, so which documents "
                            "carry it becomes visible")
         gained = sorted(set(new.visible_to) - set(old.visible_to))
-        if gained or (old.visible_to and new.via != old.via):
+        # A via that only changes whose side is asked -- "roles" to
+        # "principal.roles" -- is `_delegation`'s finding, not this one.
+        claim_moved = split(new.via)[1] != split(old.via)[1]
+        if gained or (old.visible_to and claim_moved):
             who = ", ".join(gained) if gained else f"claim {new.via!r}"
             widened.append(f"callers holding {who} now read the value")
         if widened:
             found.append(Structural(
                 name, MASK_LOOSENED, f"{path!r}: " + "; ".join(widened),
                 True))
-        elif old != new:
+        elif old != (new if claim_moved else replace(new, via=old.via)):
             found.append(Structural(
                 name, MASK_TIGHTENED, f"{path!r} is masked from more", False))
     return found
@@ -556,7 +698,8 @@ def plan(current: Mapping[str, AdmissionSpec],
          when: datetime | None = None,
          caller: dict | None = None,
          collections: Sequence[str] | None = None,
-         exhaustive: bool = False) -> Plan:
+         exhaustive: bool = False,
+         trusted: tuple[Mapping, Mapping] | None = None) -> Plan:
     """The whole difference: structural findings plus per-document counts.
 
     ``sample`` is a function from a collection name to documents, which is
@@ -572,6 +715,10 @@ def plan(current: Mapping[str, AdmissionSpec],
                exhaustive=exhaustive)
     out.structural = [s for s in structural(current, proposed)
                       if collections is None or s.collection in names]
+    if trusted is not None:
+        # Whose tokens are believed is a fact about the whole policy, so no
+        # collection filter hides it.
+        out.structural += issuers(*trusted)
     for name in names:
         one = compare(name, current.get(name), proposed.get(name),
                       sample(name), when=when, caller=caller)
@@ -643,7 +790,8 @@ def matrix(current: Mapping[str, AdmissionSpec],
            *,
            when: datetime | None = None,
            collections: Sequence[str] | None = None,
-           exhaustive: bool = False) -> Matrix:
+           exhaustive: bool = False,
+           trusted: tuple[Mapping, Mapping] | None = None) -> Matrix:
     """Plan the same change for every named caller, reading the data once.
 
     ``sample`` is still called once per collection, not once per
@@ -664,6 +812,10 @@ def matrix(current: Mapping[str, AdmissionSpec],
     out = Matrix(when=when, exhaustive=exhaustive)
     out.structural = [s for s in structural(current, proposed)
                       if collections is None or s.collection in names]
+    if trusted is not None:
+        # Whose tokens are believed is a fact about the whole policy, so no
+        # collection filter hides it.
+        out.structural += issuers(*trusted)
     for role, claims in callers.items():
         out.plans[role] = Plan(when=when,
                                caller=dict(claims) if claims else None,

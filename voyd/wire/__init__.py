@@ -15,6 +15,8 @@ forgotten -- in any driver, in any language, with no import and no code.
     proxy       transport: accept, pump both directions, fork, drain
     upstream    where it forwards to, and how an election is followed
     identity    who the *server* says this connection authenticated as
+    jwks        the keys a delegated token is verified with, renewed off
+                the request path
     report      what was refused, counted across workers and said once
     cli         the flags, and what runs before the listener binds
     cascade     a revocation reaching what was derived from the fact

@@ -462,6 +462,12 @@ def rewrite_derived_read(raw: bytes, req_id: int, resp_to: int,
     if guard.spec.tenant:
         pinned = (lead_name == "$match" and pins_the_tenant(
             lead.get("$match"), guard.spec.tenant))
+        if not pinned and at == 1 and len(pipeline) > 1:
+            # A `$vectorSearch` has to come first, so the scope can only
+            # follow it. What reaches the reduction is still one tenant's.
+            after = pipeline[1] if isinstance(pipeline[1], Mapping) else {}
+            pinned = (len(after) == 1 and "$match" in after
+                      and pins_the_tenant(after["$match"], guard.spec.tenant))
         if not pinned:
             return None, _refuse(
                 req_id, guard.collection,
